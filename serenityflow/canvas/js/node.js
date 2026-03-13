@@ -1,0 +1,446 @@
+/**
+ * Node rendering: header, ports, widgets, drag, selection highlight.
+ */
+
+const NODE_MIN_WIDTH = 180;
+const NODE_HEADER_HEIGHT = 24;
+const NODE_PORT_SPACING = 24;
+const NODE_WIDGET_X_PAD = 14;
+const NODE_CONTENT_PAD = 8;
+
+class SFNode {
+    constructor(id, nodeType, x, y, info, canvas) {
+        this.id = id;
+        this.nodeType = nodeType;
+        this.x = x;
+        this.y = y;
+        this.canvas = canvas;
+        this.info = info || {};
+
+        // Parse inputs/outputs from object_info
+        this.inputs = [];    // [{ name, type, config }]
+        this.outputs = [];   // [{ name, type }]
+        this.widgetValues = {};
+        this.widgets = {};   // name -> widget object
+
+        this._parseInfo();
+
+        // Calculate dimensions
+        this.width = this._calcWidth();
+        this.height = 0; // calculated during build
+
+        // Konva group — NOT draggable (manual drag to avoid stealing port events)
+        this.group = new Konva.Group({
+            x: x,
+            y: y,
+            draggable: false,
+        });
+
+        this._selected = false;
+        this._executionState = null; // 'executing' | 'executed' | 'error' | null
+        this._isDragging = false;
+
+        // Build visual
+        this._build();
+
+        // Manual drag: only starts from body/header clicks, not port clicks
+        this._setupManualDrag();
+    }
+
+    _setupManualDrag() {
+        // Listen on the group for mousedown, but only drag if the click target
+        // is a direct child (body/header rect), NOT a port sub-group child
+        this.group.on('mousedown', (e) => {
+            // If a connection drag is active, don't start node drag
+            if (this.canvas.draggingConnection) return;
+
+            // Check if the click target belongs to a port sub-group
+            // Port groups are nested: group -> portGroup -> hitCircle/circle/text
+            // Direct children of this.group that are Konva.Group are port groups
+            const target = e.target;
+            let parent = target.getParent();
+
+            // Walk up to see if any ancestor (before this.group) is a port/widget sub-group
+            while (parent && parent !== this.group) {
+                // If parent is a sub-group inside our node group, this click is on a port/widget
+                if (parent.getParent() === this.group && parent instanceof Konva.Group) {
+                    return; // Don't drag — let the port handle it
+                }
+                parent = parent.getParent();
+            }
+
+            // This click is on the body/header — start manual drag
+            e.cancelBubble = true;
+            this.canvas.stage.draggable(false);
+            this.canvas.selectNode(this.id, e.evt.ctrlKey || e.evt.metaKey);
+
+            const stage = this.canvas.stage;
+            const pointer = stage.getPointerPosition();
+            if (!pointer) return;
+
+            const stagePos = stage.position();
+            const scale = stage.scaleX();
+            const startWorldX = (pointer.x - stagePos.x) / scale;
+            const startWorldY = (pointer.y - stagePos.y) / scale;
+            const startNodeX = this.group.x();
+            const startNodeY = this.group.y();
+
+            this._isDragging = true;
+
+            const onMouseMove = (evt) => {
+                if (!this._isDragging) return;
+                const p = stage.getPointerPosition();
+                if (!p) return;
+                const sp = stage.position();
+                const sc = stage.scaleX();
+                const worldX = (p.x - sp.x) / sc;
+                const worldY = (p.y - sp.y) / sc;
+
+                const newX = startNodeX + (worldX - startWorldX);
+                const newY = startNodeY + (worldY - startWorldY);
+
+                this.group.x(newX);
+                this.group.y(newY);
+                this.x = newX;
+                this.y = newY;
+                this.canvas.nodeLayer.batchDraw();
+                // Update connections
+                this.canvas.connectionLayer.batchDraw();
+            };
+
+            const onMouseUp = () => {
+                this._isDragging = false;
+                window.removeEventListener('mousemove', onMouseMove);
+                window.removeEventListener('mouseup', onMouseUp);
+            };
+
+            window.addEventListener('mousemove', onMouseMove);
+            window.addEventListener('mouseup', onMouseUp);
+        });
+    }
+
+    _parseInfo() {
+        if (!this.info) return;
+
+        // Parse inputs
+        const inputTypes = this.info.input || {};
+
+        // "required" inputs
+        if (inputTypes.required) {
+            for (const [name, def] of Object.entries(inputTypes.required)) {
+                const type = this._extractType(def);
+                this.inputs.push({ name: name, type: type, config: def, required: true });
+
+                // Set default widget value
+                const defaultVal = this._extractDefault(def);
+                if (defaultVal !== undefined) {
+                    this.widgetValues[name] = defaultVal;
+                }
+            }
+        }
+
+        // "optional" inputs
+        if (inputTypes.optional) {
+            for (const [name, def] of Object.entries(inputTypes.optional)) {
+                const type = this._extractType(def);
+                this.inputs.push({ name: name, type: type, config: def, required: false });
+
+                const defaultVal = this._extractDefault(def);
+                if (defaultVal !== undefined) {
+                    this.widgetValues[name] = defaultVal;
+                }
+            }
+        }
+
+        // Parse outputs
+        const outputTypes = this.info.output || [];
+        const outputNames = this.info.output_name || [];
+        for (let i = 0; i < outputTypes.length; i++) {
+            this.outputs.push({
+                name: outputNames[i] || outputTypes[i],
+                type: outputTypes[i],
+            });
+        }
+    }
+
+    _extractType(def) {
+        if (Array.isArray(def)) {
+            const t = def[0];
+            if (Array.isArray(t)) return 'COMBO';
+            return String(t);
+        }
+        return '*';
+    }
+
+    _extractDefault(def) {
+        if (Array.isArray(def) && def.length > 1 && def[1] && def[1].default !== undefined) {
+            return def[1].default;
+        }
+        // For combo, default to first option
+        if (Array.isArray(def) && Array.isArray(def[0]) && def[0].length > 0) {
+            return def[0][0];
+        }
+        return undefined;
+    }
+
+    _isWidgetType(type) {
+        return ['INT', 'FLOAT', 'STRING', 'BOOLEAN', 'COMBO'].includes(type);
+    }
+
+    _calcWidth() {
+        // Estimate based on name lengths
+        let maxLen = this.nodeType.length * 7 + 20;
+
+        for (const inp of this.inputs) {
+            maxLen = Math.max(maxLen, inp.name.length * 6 + 40);
+        }
+        for (const out of this.outputs) {
+            maxLen = Math.max(maxLen, out.name.length * 6 + 40);
+        }
+
+        return Math.max(NODE_MIN_WIDTH, Math.min(maxLen, 300));
+    }
+
+    _build() {
+        this.group.destroyChildren();
+        this._portGroups = { inputs: [], outputs: [] };
+
+        const w = this.width;
+        const category = this.info.category || '';
+        const headerColor = getCategoryColor(category);
+
+        let yPos = 0;
+
+        // --- Header ---
+        const header = new Konva.Rect({
+            width: w,
+            height: NODE_HEADER_HEIGHT,
+            fill: headerColor,
+            cornerRadius: [4, 4, 0, 0],
+            listening: false,
+        });
+        this.group.add(header);
+
+        const title = new Konva.Text({
+            x: 8,
+            y: 6,
+            text: this.info.display_name || this.nodeType,
+            fontSize: 11,
+            fontStyle: 'bold',
+            fill: '#e0e0e0',
+            width: w - 16,
+            ellipsis: true,
+            wrap: 'none',
+            listening: false,
+        });
+        this.group.add(title);
+
+        yPos = NODE_HEADER_HEIGHT;
+
+        // --- Outputs (rendered first, at top) ---
+        for (let i = 0; i < this.outputs.length; i++) {
+            const out = this.outputs[i];
+            const portY = yPos + NODE_CONTENT_PAD + i * NODE_PORT_SPACING;
+            const portGroup = createOutputPort(this, i, w, portY + 6, out.type, out.name);
+            this.group.add(portGroup);
+            this._portGroups.outputs.push({ y: portY + 6, group: portGroup });
+        }
+
+        if (this.outputs.length > 0) {
+            yPos += NODE_CONTENT_PAD + this.outputs.length * NODE_PORT_SPACING;
+        }
+
+        // --- Inputs + Widgets ---
+        const widgetWidth = w - NODE_WIDGET_X_PAD * 2;
+
+        for (let i = 0; i < this.inputs.length; i++) {
+            const inp = this.inputs[i];
+            const isWidget = this._isWidgetType(inp.type);
+
+            if (isWidget) {
+                // Render widget
+                const widgetY = yPos + NODE_CONTENT_PAD;
+                const widget = sfWidgets.createWidget(
+                    this, inp.name, inp.config,
+                    NODE_WIDGET_X_PAD, widgetY, widgetWidth
+                );
+
+                if (widget) {
+                    this.group.add(widget.group);
+                    this.widgets[inp.name] = widget;
+                    widget._yPos = widgetY;
+
+                    // Also add an input port on the left
+                    const portGroup = createInputPort(this, i, 0, widgetY + widget.height / 2, inp.type, '');
+                    this.group.add(portGroup);
+                    this._portGroups.inputs.push({ y: widgetY + widget.height / 2, group: portGroup, widgetName: inp.name });
+
+                    yPos = widgetY + widget.height + 2;
+                } else {
+                    // Fallback: just port
+                    const portY = yPos + NODE_CONTENT_PAD + 6;
+                    const portGroup = createInputPort(this, i, 0, portY, inp.type, inp.name);
+                    this.group.add(portGroup);
+                    this._portGroups.inputs.push({ y: portY, group: portGroup });
+                    yPos = portY + NODE_PORT_SPACING - 6;
+                }
+            } else {
+                // Non-widget input: just port + label
+                const portY = yPos + NODE_CONTENT_PAD + 6;
+                const portGroup = createInputPort(this, i, 0, portY, inp.type, inp.name);
+                this.group.add(portGroup);
+                this._portGroups.inputs.push({ y: portY, group: portGroup });
+                yPos = portY + NODE_PORT_SPACING - 6;
+            }
+        }
+
+        // If no inputs and no outputs, minimum height
+        if (this.inputs.length === 0 && this.outputs.length === 0) {
+            yPos += 20;
+        }
+
+        yPos += NODE_CONTENT_PAD;
+        this.height = yPos;
+
+        // --- Body background ---
+        const body = new Konva.Rect({
+            y: NODE_HEADER_HEIGHT,
+            width: w,
+            height: this.height - NODE_HEADER_HEIGHT,
+            fill: '#252545',
+            cornerRadius: [0, 0, 4, 4],
+            listening: true,
+        });
+        // Insert body behind everything except header
+        this.group.add(body);
+        body.moveToBottom();
+        header.moveToBottom();
+
+        // --- Selection border (hidden by default) ---
+        this._selectionBorder = new Konva.Rect({
+            x: -2,
+            y: -2,
+            width: w + 4,
+            height: this.height + 4,
+            stroke: '#4a9eff',
+            strokeWidth: 2,
+            cornerRadius: 5,
+            visible: this._selected,
+            listening: false,
+        });
+        this.group.add(this._selectionBorder);
+
+        // --- Execution highlight border ---
+        this._execBorder = new Konva.Rect({
+            x: -2,
+            y: -2,
+            width: w + 4,
+            height: this.height + 4,
+            stroke: 'transparent',
+            strokeWidth: 2,
+            cornerRadius: 5,
+            visible: false,
+            listening: false,
+        });
+        this.group.add(this._execBorder);
+    }
+
+    getInputPortPos(slotIndex) {
+        const entry = this._portGroups.inputs[slotIndex];
+        if (!entry) return { x: this.x, y: this.y };
+        return { x: this.x, y: this.y + entry.y };
+    }
+
+    getOutputPortPos(slotIndex) {
+        const entry = this._portGroups.outputs[slotIndex];
+        if (!entry) return { x: this.x + this.width, y: this.y };
+        return { x: this.x + this.width, y: this.y + entry.y };
+    }
+
+    getInputType(slotIndex) {
+        return this.inputs[slotIndex] ? this.inputs[slotIndex].type : '*';
+    }
+
+    getOutputType(slotIndex) {
+        return this.outputs[slotIndex] ? this.outputs[slotIndex].type : '*';
+    }
+
+    getInputIndex(name) {
+        return this.inputs.findIndex(inp => inp.name === name);
+    }
+
+    setWidgetValue(name, value) {
+        this.widgetValues[name] = value;
+    }
+
+    getWidgetValue(name) {
+        return this.widgetValues[name];
+    }
+
+    setSelected(selected) {
+        this._selected = selected;
+        if (this._selectionBorder) {
+            this._selectionBorder.visible(selected);
+        }
+        this.canvas.nodeLayer.batchDraw();
+    }
+
+    setExecutionState(state) {
+        this._executionState = state;
+        if (!this._execBorder) return;
+
+        switch (state) {
+            case 'executing':
+                this._execBorder.stroke('#ffaa00');
+                this._execBorder.visible(true);
+                break;
+            case 'executed':
+                this._execBorder.stroke('#4aff4a');
+                this._execBorder.visible(true);
+                // Auto-hide after 2s
+                setTimeout(() => {
+                    if (this._executionState === 'executed') {
+                        this._execBorder.visible(false);
+                        this._executionState = null;
+                        this.canvas.nodeLayer.batchDraw();
+                    }
+                }, 2000);
+                break;
+            case 'error':
+                this._execBorder.stroke('#ff4a4a');
+                this._execBorder.visible(true);
+                break;
+            default:
+                this._execBorder.visible(false);
+        }
+        this.canvas.nodeLayer.batchDraw();
+    }
+
+    updateWidgetVisibility() {
+        // Hide widgets for connected inputs, show for disconnected
+        for (let i = 0; i < this.inputs.length; i++) {
+            const inp = this.inputs[i];
+            const widget = this.widgets[inp.name];
+            if (!widget) continue;
+
+            const connected = this.canvas.isInputConnected(this.id, i);
+            widget.group.visible(!connected);
+        }
+        this.canvas.nodeLayer.batchDraw();
+    }
+
+    destroy() {
+        this.group.destroy();
+    }
+
+    // Serialization helpers
+    serialize() {
+        return {
+            id: this.id,
+            type: this.nodeType,
+            pos: [this.x, this.y],
+            size: [this.width, this.height],
+            widgets_values: { ...this.widgetValues },
+        };
+    }
+}

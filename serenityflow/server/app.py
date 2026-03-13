@@ -84,6 +84,7 @@ async def _execution_loop():
         item = await state.prompt_queue.get()
         prompt_id = item["prompt_id"]
         state.executing = prompt_id
+        print(f"[EXEC] Starting execution for {prompt_id}", flush=True)
 
         try:
             await execute_prompt(
@@ -92,7 +93,9 @@ async def _execution_loop():
                 item["prompt"],
                 item.get("extra_data", {}),
             )
-        except Exception:
+            print(f"[EXEC] Completed execution for {prompt_id}", flush=True)
+        except Exception as e:
+            print(f"[EXEC] FAILED: {e}", flush=True)
             log.exception("Execution failed for %s", prompt_id)
             await send_event(state, "execution_error", {
                 "prompt_id": prompt_id,

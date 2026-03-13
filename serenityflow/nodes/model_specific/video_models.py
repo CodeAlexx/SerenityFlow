@@ -1,10 +1,91 @@
 """Video model-specific nodes -- LTX-V, WAN, HunyuanVideo schedulers and utilities."""
 from __future__ import annotations
 
+import logging
+
 import torch
 
 from serenityflow.nodes.registry import registry
 from serenityflow.bridge.types import wrap_latent
+
+log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# LTX-V Model Loading & Sampling
+# ---------------------------------------------------------------------------
+
+
+@registry.register(
+    "LTXVLoader",
+    return_types=("LTXV_MODEL",),
+    return_names=("ltxv_model",),
+    category="loaders/video",
+    input_types={"required": {
+        "checkpoint_path": ("STRING",),
+        "gemma_path": ("STRING",),
+    },
+    "optional": {
+        "dtype": (["bfloat16", "float16"], {"default": "bfloat16"}),
+    }},
+)
+def ltxv_loader(checkpoint_path, gemma_path, dtype="bfloat16"):
+    """Load LTX-V 19B model (transformer + VAE + text encoder)."""
+    from serenityflow.bridge.serenity_api import load_ltxv_model
+    model = load_ltxv_model(checkpoint_path, gemma_path, dtype=dtype)
+    return (model,)
+
+
+@registry.register(
+    "LTXVSampler",
+    return_types=("IMAGE",),
+    return_names=("frames",),
+    category="sampling/video",
+    is_output=False,
+    input_types={"required": {
+        "ltxv_model": ("LTXV_MODEL",),
+        "prompt": ("STRING", {"multiline": True}),
+        "width": ("INT", {"default": 768, "min": 64, "max": 1920, "step": 32}),
+        "height": ("INT", {"default": 512, "min": 64, "max": 1088, "step": 32}),
+        "num_frames": ("INT", {"default": 25, "min": 1, "max": 257, "step": 8}),
+        "steps": ("INT", {"default": 40, "min": 1, "max": 200}),
+        "cfg": ("FLOAT", {"default": 3.0, "min": 1.0, "max": 20.0, "step": 0.5}),
+        "seed": ("INT", {"default": 42}),
+    },
+    "optional": {
+        "negative_prompt": ("STRING", {"multiline": True}),
+        "frame_rate": ("FLOAT", {"default": 25.0, "min": 1.0, "max": 60.0}),
+        "stg_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0}),
+    }},
+)
+def ltxv_sampler(ltxv_model, prompt, width=768, height=512, num_frames=25,
+                 steps=40, cfg=3.0, seed=42, negative_prompt="",
+                 frame_rate=25.0, stg_scale=1.0):
+    """Generate video frames using LTX-V 19B.
+
+    Returns decoded video frames as IMAGE tensor [F, H, W, C].
+    """
+    from serenityflow.bridge.serenity_api import sample_ltxv
+
+    result = sample_ltxv(
+        model=ltxv_model,
+        prompt=prompt,
+        negative_prompt=negative_prompt or "",
+        width=width,
+        height=height,
+        num_frames=num_frames,
+        steps=steps,
+        guidance_scale=cfg,
+        stg_scale=stg_scale,
+        seed=seed,
+        frame_rate=frame_rate,
+    )
+
+    video = result["video"]  # [B, C, T, H, W]
+    # Convert to ComfyUI IMAGE format: [F, H, W, C] float32 [0, 1]
+    frames = video[0].permute(1, 2, 3, 0).float().clamp(0, 1)  # [T, H, W, C]
+    log.info("Generated %d frames at %dx%d", frames.shape[0], frames.shape[2], frames.shape[1])
+    return (frames,)
 
 
 @registry.register(

@@ -1,0 +1,257 @@
+/**
+ * Selection: box select, multi-select, copy/paste, delete.
+ */
+class SFSelection {
+    constructor(canvas) {
+        this.canvas = canvas;
+        this.clipboard = null;
+        this.selectionRect = null;
+        this._dragStart = null;
+
+        this._setupBoxSelect();
+        this._setupKeyboard();
+        this._setupGlobalMouseUp();
+    }
+
+    _setupBoxSelect() {
+        const stage = this.canvas.stage;
+
+        stage.on('mousedown', (e) => {
+            // Only start box select on empty space with left button
+            if (e.evt.button !== 0) return;
+            const clickedOnEmpty = e.target === stage || e.target.getLayer() === this.canvas.gridLayer;
+            if (!clickedOnEmpty) return;
+
+            // Don't start box select if dragging a connection
+            if (this.canvas.draggingConnection) return;
+
+            if (!e.evt.ctrlKey && !e.evt.metaKey) {
+                this.canvas.deselectAll();
+            }
+
+            const pointer = stage.getPointerPosition();
+            if (!pointer) return;
+            const worldPos = this.canvas.getWorldPosition(pointer.x, pointer.y);
+
+            this._dragStart = worldPos;
+
+            this.selectionRect = new Konva.Rect({
+                x: worldPos.x,
+                y: worldPos.y,
+                width: 0,
+                height: 0,
+                fill: 'rgba(74, 158, 255, 0.15)',
+                stroke: 'rgba(74, 158, 255, 0.5)',
+                strokeWidth: 1 / this.canvas.scale,
+                listening: false,
+            });
+            this.canvas.overlayLayer.add(this.selectionRect);
+        });
+
+        stage.on('mousemove', (e) => {
+            if (!this._dragStart || !this.selectionRect) return;
+            if (this.canvas.draggingConnection) return;
+
+            const pointer = stage.getPointerPosition();
+            if (!pointer) return;
+            const worldPos = this.canvas.getWorldPosition(pointer.x, pointer.y);
+
+            const x = Math.min(this._dragStart.x, worldPos.x);
+            const y = Math.min(this._dragStart.y, worldPos.y);
+            const w = Math.abs(worldPos.x - this._dragStart.x);
+            const h = Math.abs(worldPos.y - this._dragStart.y);
+
+            this.selectionRect.x(x);
+            this.selectionRect.y(y);
+            this.selectionRect.width(w);
+            this.selectionRect.height(h);
+            this.canvas.overlayLayer.batchDraw();
+        });
+
+        stage.on('mouseup', (e) => {
+            if (!this._dragStart || !this.selectionRect) return;
+
+            // Find nodes inside selection rect
+            const rx = this.selectionRect.x();
+            const ry = this.selectionRect.y();
+            const rw = this.selectionRect.width();
+            const rh = this.selectionRect.height();
+
+            if (rw > 5 && rh > 5) {
+                this.canvas.nodes.forEach((node, id) => {
+                    if (node.x + node.width > rx && node.x < rx + rw &&
+                        node.y + node.height > ry && node.y < ry + rh) {
+                        this.canvas.selectNode(id, true);
+                    }
+                });
+            }
+
+            this.selectionRect.destroy();
+            this.selectionRect = null;
+            this._dragStart = null;
+            this.canvas.overlayLayer.batchDraw();
+        });
+    }
+
+    _setupGlobalMouseUp() {
+        // Connection drag cancellation is now handled by canvas.startConnectionDrag()
+        // via its own window mouseup listener (with { once: true })
+    }
+
+    _setupKeyboard() {
+        document.addEventListener('keydown', (e) => {
+            // Don't handle when typing in input
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
+                return;
+            }
+
+            // Delete
+            if (e.key === 'Delete' || e.key === 'Backspace') {
+                if (this.canvas.selectedNodes.size > 0) {
+                    e.preventDefault();
+                    const action = {
+                        type: 'delete',
+                        nodes: this._serializeSelected(),
+                        connections: this._getSelectedConnections(),
+                    };
+                    this.canvas.deleteSelected();
+                    if (window.sfHistory) sfHistory.push(action);
+                }
+            }
+
+            // Ctrl+A - select all
+            if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+                e.preventDefault();
+                this.canvas.nodes.forEach((_, id) => {
+                    this.canvas.selectNode(id, true);
+                });
+            }
+
+            // Ctrl+C - copy
+            if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+                if (this.canvas.selectedNodes.size > 0) {
+                    e.preventDefault();
+                    this._copy();
+                }
+            }
+
+            // Ctrl+V - paste
+            if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+                if (this.clipboard) {
+                    e.preventDefault();
+                    this._paste();
+                }
+            }
+
+            // Ctrl+D - duplicate
+            if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
+                if (this.canvas.selectedNodes.size > 0) {
+                    e.preventDefault();
+                    this._copy();
+                    this._paste();
+                }
+            }
+
+            // Ctrl+Z - undo
+            if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+                e.preventDefault();
+                if (window.sfHistory) sfHistory.undo();
+            }
+
+            // Ctrl+Y or Ctrl+Shift+Z - redo
+            if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+                e.preventDefault();
+                if (window.sfHistory) sfHistory.redo();
+            }
+        });
+    }
+
+    _copy() {
+        const nodes = [];
+        const connections = [];
+
+        this.canvas.selectedNodes.forEach(id => {
+            const node = this.canvas.nodes.get(id);
+            if (node) {
+                nodes.push({
+                    id: id,
+                    type: node.nodeType,
+                    x: node.x,
+                    y: node.y,
+                    info: node.info,
+                    widgetValues: { ...node.widgetValues },
+                });
+            }
+        });
+
+        // Copy connections between selected nodes
+        const selectedSet = this.canvas.selectedNodes;
+        this.canvas.connections.forEach(c => {
+            if (selectedSet.has(c.sourceNode) && selectedSet.has(c.targetNode)) {
+                connections.push({
+                    sourceNode: c.sourceNode,
+                    sourceSlot: c.sourceSlot,
+                    targetNode: c.targetNode,
+                    targetSlot: c.targetSlot,
+                });
+            }
+        });
+
+        this.clipboard = { nodes: nodes, connections: connections };
+    }
+
+    _paste() {
+        if (!this.clipboard) return;
+
+        const idMap = {};
+        const offset = 30;
+
+        this.canvas.deselectAll();
+
+        // Create nodes with new IDs
+        this.clipboard.nodes.forEach(data => {
+            const node = this.canvas.addNode(data.type, data.x + offset, data.y + offset, data.info);
+            idMap[data.id] = node.id;
+
+            // Restore widget values
+            for (const [name, val] of Object.entries(data.widgetValues)) {
+                node.setWidgetValue(name, val);
+                if (node.widgets[name]) {
+                    node.widgets[name].setValue(val);
+                }
+            }
+
+            this.canvas.selectNode(node.id, true);
+        });
+
+        // Recreate connections
+        this.clipboard.connections.forEach(c => {
+            const srcId = idMap[c.sourceNode];
+            const tgtId = idMap[c.targetNode];
+            if (srcId && tgtId) {
+                this.canvas.addConnection(srcId, c.sourceSlot, tgtId, c.targetSlot);
+            }
+        });
+    }
+
+    _serializeSelected() {
+        const nodes = [];
+        this.canvas.selectedNodes.forEach(id => {
+            const node = this.canvas.nodes.get(id);
+            if (node) nodes.push(node.serialize());
+        });
+        return nodes;
+    }
+
+    _getSelectedConnections() {
+        const selected = this.canvas.selectedNodes;
+        return this.canvas.connections
+            .filter(c => selected.has(c.sourceNode) || selected.has(c.targetNode))
+            .map(c => ({
+                sourceNode: c.sourceNode,
+                sourceSlot: c.sourceSlot,
+                targetNode: c.targetNode,
+                targetSlot: c.targetSlot,
+            }));
+    }
+}

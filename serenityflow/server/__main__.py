@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--output-dir", default="output")
     parser.add_argument("--input-dir", default="input")
     parser.add_argument("--custom-node-dir", default=None)
+    parser.add_argument("--frontend-dir", default=None, help="Path to ComfyUI frontend")
     parser.add_argument("--listen", action="store_true", help="Listen on 0.0.0.0")
     parser.add_argument("--verbose", "-v", action="store_true")
 
@@ -44,6 +45,10 @@ def main():
             folder_paths.models_dir = os.path.join(args.model_dir, "models")
         except ImportError:
             pass
+
+    # Set frontend dir if specified
+    if args.frontend_dir:
+        os.environ["SERENITYFLOW_FRONTEND_DIR"] = args.frontend_dir
 
     # Import app (triggers route registration)
     from serenityflow.server.app import app, state

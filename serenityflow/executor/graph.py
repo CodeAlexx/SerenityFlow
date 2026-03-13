@@ -35,13 +35,26 @@ class WorkflowGraph:
     }
     """
 
+    # Fallback set when registry is unavailable
     OUTPUT_NODE_TYPES = {
         "SaveImage", "PreviewImage", "SaveLatent",
+        "VideoSave", "SaveVideo", "VideoPreview",
+        "SaveAnimatedWEBP", "SaveAudioMP3", "SaveAudioOpus",
+        "NoteNode", "PreviewAny", "MarkdownNote", "Note",
+        "ImageCompare", "SaveGLB", "Preview3D", "MaskPreview",
+        "SaveSVGNode", "CheckpointSave", "CLIPSave", "VAESave",
     }
 
-    def __init__(self, prompt: dict):
+    def __init__(self, prompt: dict, registry=None):
         self._nodes: dict[str, NodeSpec] = {}
         self._consumers: dict[str, set[str]] = {}  # node_id -> set of consumer node_ids
+
+        # Build output type set from registry if available
+        output_types = set(self.OUTPUT_NODE_TYPES)
+        if registry is not None:
+            for name, node_def in registry.list_all().items():
+                if getattr(node_def, "is_output", False):
+                    output_types.add(name)
 
         # Parse all nodes
         for node_id, node_data in prompt.items():
@@ -50,7 +63,7 @@ class WorkflowGraph:
             if class_type is None:
                 raise ValueError(f"Node {node_id} missing 'class_type'")
             inputs = node_data.get("inputs", {})
-            is_output = class_type in self.OUTPUT_NODE_TYPES
+            is_output = class_type in output_types
 
             self._nodes[node_id] = NodeSpec(
                 node_id=node_id,

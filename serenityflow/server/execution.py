@@ -41,8 +41,11 @@ async def execute_prompt(server_state, prompt_id: str, prompt: dict, extra_data:
 
     # Build graph
     try:
-        graph = WorkflowGraph(prompt)
+        print(f"[EXEC] Building graph from {len(prompt)} nodes", flush=True)
+        graph = WorkflowGraph(prompt, registry=runner.registry)
+        print(f"[EXEC] Graph built: {graph.topological_order()}", flush=True)
     except Exception as e:
+        print(f"[EXEC] Graph build FAILED: {e}", flush=True)
         await send_event(server_state, "execution_error", {
             "prompt_id": prompt_id,
             "node_id": "",
@@ -85,7 +88,16 @@ async def execute_prompt(server_state, prompt_id: str, prompt: dict, extra_data:
         # Send executing events via a hook on the runner
         # We wrap execute in a thread since it's blocking
         def run_in_thread():
-            return runner.execute(graph, progress_callback=progress_callback)
+            print(f"[EXEC-THREAD] Starting runner.execute()", flush=True)
+            try:
+                r = runner.execute(graph, progress_callback=progress_callback)
+                print(f"[EXEC-THREAD] runner.execute() returned: {type(r)}", flush=True)
+                return r
+            except Exception as e:
+                print(f"[EXEC-THREAD] runner.execute() FAILED: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                raise
 
         results = await loop.run_in_executor(_executor, run_in_thread)
 

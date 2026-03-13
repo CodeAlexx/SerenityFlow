@@ -776,7 +776,12 @@ def sample(
 
 
 def vae_decode(vae: VAEWrapper, latent: torch.Tensor) -> torch.Tensor:
-    """Decode latent to image. Returns BCHW float32 [0, 1]."""
+    """Decode latent to image. Returns BCHW float32 [0, 1].
+
+    For LTXVModelWrapper, delegates to the video VAE decoder.
+    """
+    if isinstance(vae, LTXVModelWrapper):
+        return vae.vae_decode(latent)
     if vae is None or vae.decoder is None:
         raise RuntimeError("No VAE decoder available")
     return vae.decoder.decode(latent)
@@ -896,8 +901,370 @@ def _parse_dtype(dtype_str: str) -> torch.dtype:
     return dtype_map.get(dtype_str, torch.float16)
 
 
+# ---------------------------------------------------------------------------
+# LTX-V (Video) Support
+# ---------------------------------------------------------------------------
+
+
+class LTXVModelWrapper:
+    """Wraps LTX-2 pipeline components for SerenityFlow nodes.
+
+    Uses ltx_pipelines ModelLedger directly (same path as LTX2-Desktop app).
+    No diffusers — loads ComfyUI-format single-file safetensors via ltx_core.
+    """
+    __slots__ = ("model_ledger", "device", "dtype", "_arch")
+
+    def __init__(self, model_ledger: Any, device: torch.device, dtype: torch.dtype):
+        self.model_ledger = model_ledger
+        self.device = device
+        self.dtype = dtype
+        self._arch = "ltxv"
+
+    def vae_decode(self, latent: torch.Tensor) -> torch.Tensor:
+        """Decode 5D video latent [B,C,T,H,W] to pixel frames."""
+        import gc
+        from ltx_core.model.video_vae import decode_video as vae_decode_video
+
+        video_decoder = self.model_ledger.video_decoder()
+        decoded = vae_decode_video(latent.to(device=self.device, dtype=self.dtype), video_decoder)
+        # decode_video may return Iterator or Tensor — materialise
+        if not isinstance(decoded, torch.Tensor):
+            decoded = torch.cat(list(decoded), dim=2)
+        del video_decoder
+        gc.collect()
+        torch.cuda.empty_cache()
+        return decoded.cpu()
+
+
+def load_ltxv_model(
+    checkpoint_path: str,
+    gemma_path: str,
+    dtype: str = "bfloat16",
+) -> LTXVModelWrapper:
+    """Load LTX-V model using ltx_pipelines ModelLedger.
+
+    Uses the same proven path as LTX2-Desktop: ComfyUI-format safetensors
+    loaded via ltx_core's SingleGPUModelBuilder. Nothing is loaded into GPU
+    until sample_ltxv() is called — ModelLedger only stores builder configs.
+
+    Args:
+        checkpoint_path: Path to ComfyUI-format .safetensors checkpoint.
+        gemma_path: Path to Gemma 3 12B text encoder directory.
+        dtype: Weight dtype (bfloat16, float16, float32).
+    """
+    from ltx_pipelines.utils import ModelLedger
+
+    torch_dtype = _parse_dtype(dtype)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Auto-detect FP8 checkpoint for quantization policy
+    quantization = None
+    if "fp8" in checkpoint_path.lower():
+        from ltx_core.quantization import QuantizationPolicy
+        quantization = QuantizationPolicy.fp8_cast()
+        logger.info("FP8 checkpoint detected — using fp8_cast quantization policy")
+
+    logger.info("Creating ModelLedger: ckpt=%s, gemma=%s", checkpoint_path, gemma_path)
+    ledger = ModelLedger(
+        dtype=torch_dtype,
+        device=device,
+        checkpoint_path=checkpoint_path,
+        gemma_root_path=gemma_path,
+        loras=(),
+        quantization=quantization,
+    )
+
+    logger.info("LTX-V ModelLedger created (components load on demand)")
+    return LTXVModelWrapper(ledger, device, torch_dtype)
+
+
+def _stagehand_config_te(gemma_root: str = ""):
+    """Stagehand config for Gemma 3 12B text encoder."""
+    from stagehand import StagehandConfig
+    is_fp4 = "fp4" in gemma_root.lower()
+    return StagehandConfig(
+        pinned_pool_mb=4096 if is_fp4 else 6144,
+        pinned_slab_mb=256 if is_fp4 else 512,
+        vram_high_watermark_mb=18000,
+        vram_low_watermark_mb=14000,
+        prefetch_window_blocks=2,
+        max_inflight_transfers=2,
+        telemetry_enabled=False,
+    )
+
+
+def _stagehand_config_xfm():
+    """Stagehand config for 22B transformer (48 blocks, ~800MB each in bf16)."""
+    from stagehand import StagehandConfig
+    return StagehandConfig(
+        pinned_pool_mb=6400,
+        pinned_slab_mb=800,
+        vram_high_watermark_mb=18000,
+        vram_low_watermark_mb=14000,
+        prefetch_window_blocks=1,
+        max_inflight_transfers=1,
+        telemetry_enabled=False,
+    )
+
+
+def _get_gemma_block_module(text_encoder):
+    """Navigate Gemma3 model to the blockable layers."""
+    import torch.nn as nn
+    model = getattr(text_encoder, "model", text_encoder)
+    # Path 1: model.language_model.model (has .layers)
+    lm = getattr(model, "language_model", None)
+    if lm is not None:
+        inner = getattr(lm, "model", None)
+        if inner is not None and hasattr(inner, "layers"):
+            return inner
+    # Path 2: model.model.language_model
+    model_attr = getattr(model, "model", None)
+    if model_attr is not None:
+        lm2 = getattr(model_attr, "language_model", None)
+        if lm2 is not None and hasattr(lm2, "layers"):
+            return lm2
+    raise AttributeError(f"Cannot find Gemma decoder layers on {type(text_encoder).__name__}")
+
+
+def _unwrap_to_blocks(model):
+    """Navigate X0Model -> velocity_model (LTXModel with transformer_blocks)."""
+    for attr in ("velocity_model", "model", "module"):
+        inner = getattr(model, attr, None)
+        if inner is not None:
+            if hasattr(inner, "transformer_blocks"):
+                return inner
+            for attr2 in ("velocity_model", "model", "module"):
+                inner2 = getattr(inner, attr2, None)
+                if inner2 is not None and hasattr(inner2, "transformer_blocks"):
+                    return inner2
+    if hasattr(model, "transformer_blocks"):
+        return model
+    raise AttributeError(f"Cannot find transformer_blocks on {type(model).__name__}")
+
+
+def _move_non_blocks_to_device(root_module, block_container, device):
+    """Move all params/buffers to device EXCEPT those inside block_container's layers."""
+    layers = getattr(block_container, "layers", None) or getattr(block_container, "transformer_blocks", None)
+    if layers is None:
+        raise AttributeError("block_container has no .layers or .transformer_blocks")
+
+    block_param_ids = set(id(p) for p in layers.parameters())
+    block_buf_ids = set(id(b) for b in layers.buffers())
+
+    with torch.no_grad():
+        for p in root_module.parameters():
+            if id(p) not in block_param_ids and (p.device != device or p.dtype != torch.bfloat16):
+                p.data = p.data.to(device, dtype=torch.bfloat16, non_blocking=True)
+        for name, buf in root_module.named_buffers():
+            if id(buf) not in block_buf_ids and buf.device != device:
+                parts = name.rsplit(".", 1)
+                if len(parts) == 2:
+                    parent = root_module.get_submodule(parts[0])
+                    parent._buffers[parts[1]] = buf.to(device, non_blocking=True)
+                else:
+                    root_module._buffers[name] = buf.to(device, non_blocking=True)
+
+
+@torch.inference_mode()
+def sample_ltxv(
+    model: LTXVModelWrapper,
+    prompt: str,
+    *,
+    negative_prompt: str = "",
+    width: int = 768,
+    height: int = 512,
+    num_frames: int = 25,
+    steps: int = 40,
+    guidance_scale: float = 3.0,
+    stg_scale: float = 1.0,
+    stg_blocks: list[int] | None = None,
+    stg_rescale: float = 0.7,
+    seed: int = 42,
+    frame_rate: float = 25.0,
+    dtype: str = "bfloat16",
+) -> dict[str, torch.Tensor | None]:
+    """Generate video using LTX-V via ltx_pipelines + Stagehand block-swap.
+
+    Same pipeline as LTX2-Desktop: load each component to CPU, use Stagehand
+    to stream transformer blocks through GPU one at a time. Fits in 24GB VRAM.
+    Returns {"video": [B,C,T,H,W] tensor, "audio": tensor or None}.
+    """
+    import gc
+    from stagehand import StagehandRuntime
+    from ltx_core.components.diffusion_steps import EulerDiffusionStep
+    from ltx_core.components.noisers import GaussianNoiser
+    from ltx_core.model.audio_vae import decode_audio as vae_decode_audio
+    from ltx_core.model.video_vae import decode_video as vae_decode_video
+    from ltx_core.types import VideoPixelShape
+    from ltx_pipelines.utils.constants import DISTILLED_SIGMA_VALUES
+    from ltx_pipelines.utils.helpers import (
+        cleanup_memory,
+        denoise_audio_video,
+        simple_denoising_func,
+    )
+    from ltx_pipelines.utils.samplers import euler_denoising_loop
+    from ltx_pipelines.utils.types import PipelineComponents
+
+    ledger = model.model_ledger
+    device = model.device
+
+    # ---------------------------------------------------------------
+    # 1. Text encoding with Stagehand (Gemma 3 12B)
+    # ---------------------------------------------------------------
+    logger.info("Loading Gemma 3 text encoder to CPU...")
+    ledger.device = torch.device("cpu")
+    text_encoder = ledger.text_encoder()
+    ledger.device = device
+
+    block_module = _get_gemma_block_module(text_encoder)
+    _move_non_blocks_to_device(text_encoder, block_module, device)
+
+    te_runtime = StagehandRuntime(
+        model=block_module,
+        config=_stagehand_config_te(),
+        block_pattern=r"^layers\.\d+$",
+        group="text_encoder",
+        dtype=model.dtype,
+        inference_mode=True,
+    )
+    logger.info("Stagehand TE ready (%d blocks)", len(te_runtime._registry))
+
+    # Encode prompt
+    te_runtime.begin_step(0)
+    with te_runtime.managed_forward():
+        raw_hs, raw_mask = text_encoder.encode(prompt)
+    te_runtime.end_step()
+
+    # Shut down TE Stagehand, free text encoder
+    te_runtime.shutdown()
+    del te_runtime, text_encoder, block_module
+    gc.collect()
+    cleanup_memory()
+    logger.info("Text encoder freed")
+
+    # Process hidden states through embeddings processor (small, fits on GPU)
+    raw_hs = tuple(h.to(device=device) for h in raw_hs)
+    raw_mask = raw_mask.to(device=device)
+    emb_proc = ledger.gemma_embeddings_processor()
+    context_p = emb_proc.process_hidden_states(raw_hs, raw_mask)
+    video_context = context_p.video_encoding.clone()
+    audio_context = context_p.audio_encoding
+    if audio_context is not None:
+        audio_context = audio_context.clone()
+    del emb_proc, raw_hs, raw_mask, context_p
+    gc.collect()
+    cleanup_memory()
+    logger.info("Text encoding complete")
+
+    # ---------------------------------------------------------------
+    # 2. Denoise with Stagehand (22B transformer)
+    # ---------------------------------------------------------------
+    logger.info("Loading transformer to CPU...")
+    ledger.device = torch.device("cpu")
+    transformer = ledger.transformer()
+    ledger.device = device
+
+    xfm_inner = _unwrap_to_blocks(transformer)
+    _move_non_blocks_to_device(transformer, xfm_inner, device)
+    transformer.requires_grad_(False)
+
+    xfm_runtime = StagehandRuntime(
+        model=xfm_inner,
+        config=_stagehand_config_xfm(),
+        block_pattern=r"^transformer_blocks\.\d+$",
+        group="transformer",
+        dtype=model.dtype,
+        inference_mode=True,
+    )
+    logger.info("Stagehand transformer ready (%d blocks)", len(xfm_runtime._registry))
+
+    generator = torch.Generator(device=device).manual_seed(seed)
+    noiser = GaussianNoiser(generator=generator)
+    stepper = EulerDiffusionStep()
+    sigmas = torch.tensor(DISTILLED_SIGMA_VALUES, device=device)
+    components = PipelineComponents(dtype=model.dtype, device=device)
+
+    base_fn = simple_denoising_func(
+        video_context=video_context,
+        audio_context=audio_context,
+        transformer=transformer,
+    )
+
+    _call = [0]
+    n_steps = len(sigmas) - 1
+
+    def wrapped_fn(video_state, audio_state, sigmas_arg, step_index):
+        xfm_runtime.begin_step(_call[0])
+        with xfm_runtime.managed_forward():
+            result = base_fn(video_state, audio_state, sigmas_arg, step_index)
+        xfm_runtime.end_step()
+        _call[0] += 1
+        logger.info("Step %d/%d complete", _call[0], n_steps)
+        return result
+
+    def denoising_loop(sigmas_arg, video_state, audio_state, stepper_arg):
+        return euler_denoising_loop(
+            sigmas=sigmas_arg,
+            video_state=video_state,
+            audio_state=audio_state,
+            stepper=stepper_arg,
+            denoise_fn=wrapped_fn,
+        )
+
+    output_shape = VideoPixelShape(
+        batch=1, frames=num_frames, width=width, height=height, fps=frame_rate,
+    )
+
+    logger.info("Denoising %d steps at %dx%d, %d frames...", n_steps, width, height, num_frames)
+    video_state, audio_state = denoise_audio_video(
+        output_shape=output_shape,
+        conditionings=[],
+        noiser=noiser,
+        sigmas=sigmas,
+        stepper=stepper,
+        denoising_loop_fn=denoising_loop,
+        components=components,
+        dtype=model.dtype,
+        device=device,
+    )
+
+    xfm_runtime.shutdown()
+    del xfm_runtime, transformer, xfm_inner, base_fn
+    gc.collect()
+    cleanup_memory()
+    logger.info("Transformer freed")
+
+    # ---------------------------------------------------------------
+    # 3. Decode video
+    # ---------------------------------------------------------------
+    logger.info("Decoding video...")
+    video_decoder = ledger.video_decoder()
+    decoded_video = vae_decode_video(video_state.latent, video_decoder)
+    if not isinstance(decoded_video, torch.Tensor):
+        decoded_video = torch.cat(list(decoded_video), dim=2)
+
+    # ---------------------------------------------------------------
+    # 4. Decode audio (optional)
+    # ---------------------------------------------------------------
+    decoded_audio = None
+    try:
+        audio_decoder = ledger.audio_decoder()
+        vocoder = ledger.vocoder()
+        decoded_audio = vae_decode_audio(audio_state.latent, audio_decoder, vocoder)
+        del audio_decoder, vocoder
+    except Exception:
+        logger.debug("Audio decode skipped (no audio components)")
+
+    del video_decoder
+    gc.collect()
+    cleanup_memory()
+
+    return {"video": decoded_video.cpu(), "audio": decoded_audio}
+
+
 __all__ = [
     "CLIPWrapper",
+    "LTXVModelWrapper",
     "VAEWrapper",
     "LoadedCheckpoint",
     "apply_controlnet",
@@ -911,8 +1278,10 @@ __all__ = [
     "load_controlnet",
     "load_diffusion_model",
     "load_dual_clip",
+    "load_ltxv_model",
     "load_vae",
     "sample",
+    "sample_ltxv",
     "vae_decode",
     "vae_decode_tiled",
     "vae_encode",

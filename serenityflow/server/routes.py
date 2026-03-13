@@ -11,16 +11,45 @@ import uuid
 import torch
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 
 log = logging.getLogger(__name__)
 
 
+class _StripApiPrefixMiddleware(BaseHTTPMiddleware):
+    """Strip /api/ prefix from request paths.
+
+    ComfyUI frontend v1.34+ sends all API calls to /api/... (via fetchApi → apiURL).
+    This middleware rewrites /api/foo → /foo so our routes work without duplication.
+    Does NOT touch WebSocket upgrades (those go to /ws directly).
+    """
+
+    # Paths that should NOT be rewritten (static assets, frontend)
+    _SKIP_PREFIXES = ("/assets/", "/scripts/", "/fonts/", "/cursor/", "/extensions/")
+
+    async def dispatch(self, request, call_next):
+        path = request.scope.get("path", "")
+        if path.startswith("/api/") and not any(path.startswith(p) for p in self._SKIP_PREFIXES):
+            # Rewrite /api/foo → /foo
+            new_path = path[4:]  # strip "/api"
+            request.scope["path"] = new_path
+        return await call_next(request)
+
+
 def register_routes(app: FastAPI):
-    """Register all REST routes on the FastAPI app."""
+    """Register all REST routes on the FastAPI app.
+
+    ComfyUI frontend v1.34+ uses /api/ prefixed paths for all API calls
+    (fetchApi → apiURL which prepends /api). We register routes at both
+    /path and /api/path for compatibility.
+    """
 
     def _state():
         from serenityflow.server.app import state
         return state
+
+    # Add /api/ prefix middleware BEFORE routes
+    app.add_middleware(_StripApiPrefixMiddleware)
 
     def _get_all_registered():
         """Merge native registry + compat NODE_CLASS_MAPPINGS."""
@@ -464,6 +493,105 @@ def register_routes(app: FastAPI):
     async def get_features():
         return JSONResponse([])
 
+    # === ComfyUI frontend compatibility endpoints ===
+
+    @app.get("/settings")
+    async def get_settings():
+        return JSONResponse({})
+
+    @app.get("/settings/{setting_id}")
+    async def get_setting(setting_id: str):
+        return JSONResponse(None)
+
+    @app.post("/settings")
+    async def post_settings(request: Request):
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/settings/{setting_id}")
+    async def post_setting(setting_id: str, request: Request):
+        return JSONResponse({"status": "ok"})
+
+    @app.get("/users")
+    async def get_users():
+        return JSONResponse({"storage": "server", "users": {"default": "default"}})
+
+    @app.get("/userdata")
+    async def get_userdata():
+        return JSONResponse([])
+
+    @app.get("/userdata/{path:path}")
+    async def get_userdata_file(path: str):
+        # Special case: user.css returns empty
+        if path.endswith(".css"):
+            return Response("", media_type="text/css")
+        if path.endswith(".json"):
+            return JSONResponse({})
+        return Response("", status_code=200)
+
+    @app.post("/userdata/{path:path}")
+    async def post_userdata_file(path: str, request: Request):
+        return JSONResponse({"status": "ok"})
+
+    @app.get("/api/userdata/{path:path}")
+    async def get_api_userdata_file(path: str):
+        if path.endswith(".css"):
+            return Response("", media_type="text/css")
+        if path.endswith(".json"):
+            return JSONResponse({})
+        return Response("", status_code=200)
+
+    @app.get("/extensions")
+    async def get_extensions():
+        return JSONResponse([])
+
+    @app.get("/folder_paths")
+    async def get_folder_paths():
+        return JSONResponse({})
+
+    @app.get("/nodes")
+    async def get_nodes():
+        return JSONResponse([])
+
+    @app.get("/nodes/search")
+    async def search_nodes():
+        return JSONResponse([])
+
+    @app.get("/bulk/nodes/versions")
+    async def get_bulk_node_versions():
+        return JSONResponse({})
+
+    @app.get("/logs")
+    async def get_logs():
+        return JSONResponse([])
+
+    @app.get("/logs/raw")
+    async def get_logs_raw():
+        return Response("", media_type="text/plain")
+
+    @app.get("/logs/subscribe")
+    async def logs_subscribe():
+        return JSONResponse([])
+
+    @app.get("/internal/logs")
+    async def get_internal_logs():
+        return JSONResponse({"entries": []})
+
+    @app.get("/workflow_templates")
+    async def get_workflow_templates():
+        return JSONResponse([])
+
+    @app.get("/global_subgraphs")
+    async def get_global_subgraphs():
+        return JSONResponse([])
+
+    @app.get("/global_subgraphs/{name}")
+    async def get_global_subgraph(name: str):
+        return JSONResponse({}, status_code=404)
+
+    @app.get("/user.css")
+    async def get_user_css():
+        return Response("", media_type="text/css")
+
     # === SerenityFlow extensions ===
 
     @app.get("/api/sf/timeline/{prompt_id}")
@@ -473,6 +601,125 @@ def register_routes(app: FastAPI):
             timeline = state.history[prompt_id].get("timeline", {})
             return JSONResponse(timeline)
         return JSONResponse({}, status_code=404)
+
+    # === Frontend static files ===
+    # Priority: SerenityFlow canvas > ComfyUI frontend > API-only
+
+    _canvas_dir = os.path.join(os.path.dirname(__file__), "..", "canvas")
+    _canvas_dir = os.path.realpath(_canvas_dir)
+    _use_canvas = os.path.isfile(os.path.join(_canvas_dir, "index.html"))
+
+    if _use_canvas:
+        from fastapi.staticfiles import StaticFiles
+
+        @app.get("/")
+        async def serve_index():
+            return FileResponse(os.path.join(_canvas_dir, "index.html"))
+
+        # Mount canvas static subdirectories
+        for subdir in ("css", "js", "assets", "workflows"):
+            subpath = os.path.join(_canvas_dir, subdir)
+            if os.path.isdir(subpath):
+                app.mount(
+                    f"/{subdir}",
+                    StaticFiles(directory=subpath),
+                    name=f"canvas_{subdir}",
+                )
+
+        # Serve loose files from canvas root
+        @app.get("/{filename:path}")
+        async def serve_canvas_file(filename: str):
+            filepath = os.path.join(_canvas_dir, filename)
+            filepath = os.path.realpath(filepath)
+            base_real = os.path.realpath(_canvas_dir)
+            if not filepath.startswith(base_real + os.sep) and filepath != base_real:
+                return Response(status_code=403)
+            if os.path.isfile(filepath):
+                return FileResponse(filepath)
+            return Response(status_code=404)
+
+        log.info("SerenityFlow canvas served from: %s", _canvas_dir)
+
+    else:
+        _frontend_dir = _find_frontend_dir()
+        if _frontend_dir:
+            from fastapi.staticfiles import StaticFiles
+
+            @app.get("/")
+            async def serve_index():
+                index = os.path.join(_frontend_dir, "index.html")
+                if os.path.isfile(index):
+                    return FileResponse(index)
+                return Response("SerenityFlow v2 server running.", status_code=200)
+
+            for subdir in ("assets", "scripts", "fonts", "cursor", "extensions"):
+                subpath = os.path.join(_frontend_dir, subdir)
+                if os.path.isdir(subpath):
+                    app.mount(f"/{subdir}", StaticFiles(directory=subpath), name=f"static_{subdir}")
+
+            @app.get("/{filename:path}")
+            async def serve_frontend_file(filename: str):
+                filepath = os.path.join(_frontend_dir, filename)
+                filepath = os.path.realpath(filepath)
+                base_real = os.path.realpath(_frontend_dir)
+                if not filepath.startswith(base_real + os.sep) and filepath != base_real:
+                    return Response(status_code=403)
+                if os.path.isfile(filepath):
+                    return FileResponse(filepath)
+                index = os.path.join(_frontend_dir, "index.html")
+                if os.path.isfile(index):
+                    return FileResponse(index)
+                return Response(status_code=404)
+
+            log.info("ComfyUI frontend served from: %s", _frontend_dir)
+        else:
+            @app.get("/")
+            async def serve_root():
+                return Response("SerenityFlow v2 server running. No frontend found.", status_code=200)
+
+            log.warning("No frontend found. Server running in API-only mode.")
+
+
+def _find_frontend_dir() -> str | None:
+    """Locate a ComfyUI frontend installation."""
+    # Check env var first
+    env_dir = os.environ.get("SERENITYFLOW_FRONTEND_DIR")
+    if env_dir and os.path.isdir(env_dir):
+        return env_dir
+
+    # Check common locations
+    candidates = [
+        # Local frontend in project
+        os.path.join(os.path.dirname(__file__), "..", "..", "web"),
+        # SwarmUI's ComfyUI frontend (use latest version)
+        os.path.expanduser("~/SwarmUI/dlbackend/ComfyUI/web_custom_versions/Comfy-Org_ComfyUI_frontend"),
+        # Direct ComfyUI install
+        os.path.expanduser("~/ComfyUI/web"),
+    ]
+
+    for candidate in candidates:
+        candidate = os.path.realpath(candidate)
+        if not os.path.isdir(candidate):
+            continue
+
+        # If it's a versioned directory, pick the latest
+        if os.path.isfile(os.path.join(candidate, "index.html")):
+            return candidate
+
+        # Check for version subdirectories
+        try:
+            versions = sorted(
+                [d for d in os.listdir(candidate) if os.path.isdir(os.path.join(candidate, d))],
+                key=lambda v: [int(x) for x in v.split(".") if x.isdigit()],
+            )
+            if versions:
+                latest = os.path.join(candidate, versions[-1])
+                if os.path.isfile(os.path.join(latest, "index.html")):
+                    return latest
+        except (ValueError, OSError):
+            continue
+
+    return None
 
 
 __all__ = ["register_routes"]

@@ -72,7 +72,7 @@ def run_workflow(args):
     prompt = parse_workflow(data)
 
     # Build graph
-    graph = WorkflowGraph(prompt)
+    graph = WorkflowGraph(prompt, registry=registry)
     log.info("Graph: %d nodes, %d output nodes", len(graph.all_node_ids()), len(graph.get_output_nodes()))
 
     # Create runner
