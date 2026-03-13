@@ -59,10 +59,19 @@ class PromptServer:
         self.supports = {}
         self.loop = None
         self.app = None
+        self._server_state = None  # Set by server at startup
+        self._send_fn = None       # Set by server at startup
 
     def send_sync(self, event: str, data: dict, sid=None):
-        self._send_queue.append((event, data))
-        logger.debug("PromptServer send_sync: %s (queued)", event)
+        if self._send_fn:
+            self._send_fn(event, data, sid)
+        else:
+            self._send_queue.append((event, data))
+            logger.debug("PromptServer send_sync: %s (queued)", event)
+
+    async def send(self, event: str, data: dict, sid=None):
+        if self._send_fn:
+            self._send_fn(event, data, sid)
 
     def send_progress_text(self, text: str, node_id=None):
         self.send_sync("progress_text", {"text": text, "node": node_id})
