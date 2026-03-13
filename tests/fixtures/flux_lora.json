@@ -1,0 +1,51 @@
+{
+    "1": {
+        "class_type": "UNETLoader",
+        "inputs": {"unet_name": "flux-dev.safetensors", "weight_dtype": "default"}
+    },
+    "2": {
+        "class_type": "DualCLIPLoader",
+        "inputs": {"clip_name1": "clip_l.safetensors", "clip_name2": "t5xxl.safetensors", "type": "flux"}
+    },
+    "10": {
+        "class_type": "LoraLoader",
+        "inputs": {
+            "model": ["1", 0], "clip": ["2", 0],
+            "lora_name": "my_lora.safetensors",
+            "strength_model": 0.8, "strength_clip": 0.5
+        }
+    },
+    "3": {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"clip": ["10", 1], "text": "a cat in a hat"}
+    },
+    "4": {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"clip": ["10", 1], "text": ""}
+    },
+    "5": {
+        "class_type": "EmptySD3LatentImage",
+        "inputs": {"width": 1024, "height": 1024, "batch_size": 1}
+    },
+    "6": {
+        "class_type": "KSampler",
+        "inputs": {
+            "model": ["10", 0], "seed": 123, "steps": 20, "cfg": 3.5,
+            "sampler_name": "euler", "scheduler": "normal",
+            "positive": ["3", 0], "negative": ["4", 0],
+            "latent_image": ["5", 0], "denoise": 1.0
+        }
+    },
+    "7": {
+        "class_type": "VAELoader",
+        "inputs": {"vae_name": "ae.safetensors"}
+    },
+    "8": {
+        "class_type": "VAEDecode",
+        "inputs": {"samples": ["6", 0], "vae": ["7", 0]}
+    },
+    "9": {
+        "class_type": "SaveImage",
+        "inputs": {"images": ["8", 0], "filename_prefix": "flux_lora_test"}
+    }
+}

@@ -1,0 +1,16 @@
+[project]
+name = "serenityflow"
+version = "0.1.0"
+description = "SerenityFlow v2 - Clean-room ComfyUI workflow executor with Stagehand memory management"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+stagehand = ["stagehand"]
+dev = ["pytest"]
+
+[project.scripts]
+serenityflow = "serenityflow.cli:main"

@@ -1,0 +1,43 @@
+{
+    "1": {
+        "class_type": "UNETLoader",
+        "inputs": {"unet_name": "flux1-dev.safetensors", "weight_dtype": "default"}
+    },
+    "2": {
+        "class_type": "DualCLIPLoader",
+        "inputs": {"clip_name1": "clip_l.safetensors", "clip_name2": "t5xxl_fp16.safetensors", "type": "flux"}
+    },
+    "3": {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"clip": ["2", 0], "text": "a cat on a bench"}
+    },
+    "4": {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"clip": ["2", 0], "text": ""}
+    },
+    "5": {
+        "class_type": "EmptySD3LatentImage",
+        "inputs": {"width": 384, "height": 384, "batch_size": 1}
+    },
+    "6": {
+        "class_type": "KSampler",
+        "inputs": {
+            "model": ["1", 0], "seed": 42, "steps": 20, "cfg": 3.5,
+            "sampler_name": "euler", "scheduler": "simple",
+            "positive": ["3", 0], "negative": ["4", 0],
+            "latent_image": ["5", 0], "denoise": 1.0
+        }
+    },
+    "7": {
+        "class_type": "VAELoader",
+        "inputs": {"vae_name": "ae.safetensors"}
+    },
+    "8": {
+        "class_type": "VAEDecode",
+        "inputs": {"samples": ["6", 0], "vae": ["7", 0]}
+    },
+    "9": {
+        "class_type": "SaveImage",
+        "inputs": {"images": ["8", 0], "filename_prefix": "test"}
+    }
+}
