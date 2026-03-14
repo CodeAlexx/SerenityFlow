@@ -31,7 +31,35 @@ log = logging.getLogger(__name__)
 )
 def ltxv_loader(checkpoint_path, gemma_path, dtype="bfloat16"):
     """Load LTX-V 19B model (transformer + VAE + text encoder)."""
+    import os
     from serenityflow.bridge.serenity_api import load_ltxv_model
+
+    # Resolve relative names against known model directories
+    if not os.path.exists(checkpoint_path):
+        for base in [
+            os.path.expanduser("~/EriDiffusion/Models/diffusion_models"),
+            os.path.expanduser("~/EriDiffusion/Models"),
+            os.path.expanduser("~/models"),
+            os.path.expanduser("~/models/LTX-2"),
+            os.path.expanduser("~/SwarmUI/Models/ltx2"),
+        ]:
+            candidate = os.path.join(base, checkpoint_path)
+            if os.path.exists(candidate):
+                checkpoint_path = candidate
+                break
+
+    if not os.path.exists(gemma_path):
+        for base in [
+            os.path.expanduser("~/EriDiffusion/Models/clip"),
+            os.path.expanduser("~/EriDiffusion/Models"),
+            os.path.expanduser("~/models"),
+        ]:
+            candidate = os.path.join(base, gemma_path)
+            if os.path.isdir(candidate):
+                gemma_path = candidate
+                break
+
+    log.info("LTXVLoader: checkpoint=%s, gemma=%s", checkpoint_path, gemma_path)
     model = load_ltxv_model(checkpoint_path, gemma_path, dtype=dtype)
     return (model,)
 
