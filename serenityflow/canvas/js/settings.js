@@ -342,7 +342,8 @@ var SettingsTab = (function() {
                     gpuLabel.textContent = 'Detected: ' + dev.name + ' (' + formatMb(dev.vram_total) + ')';
                     var slider = document.getElementById('settings-vram-slider');
                     if (slider) slider.max = dev.vram_total;
-                    updateMemoryBars(dev.vram_used, dev.vram_total, 0, 0);
+                    var vramUsed = dev.vram_total - (dev.vram_free || 0);
+                    updateMemoryBars(vramUsed, dev.vram_total, 0, 0);
                 } else {
                     gpuLabel.textContent = 'No GPU detected';
                 }
@@ -656,20 +657,21 @@ var SettingsTab = (function() {
             var el = document.getElementById('settings-about-info');
             if (!el) return;
             var gpu = info.devices && info.devices.length > 0 ? info.devices[0] : null;
+            var sys = info.system || {};
             el.innerHTML =
                 '<div>GPU: ' + (gpu ? gpu.name + ' (' + formatMb(gpu.vram_total) + ')' : 'None') + '</div>' +
-                '<div>Python: ' + (info.python_version || 'N/A') + '</div>' +
-                '<div>PyTorch: ' + (info.torch_version || 'N/A') + '</div>' +
-                '<div>CUDA: ' + (info.cuda_version || 'N/A') + '</div>';
+                '<div>Python: ' + (sys.python_version || 'N/A') + '</div>' +
+                '<div>PyTorch: ' + (sys.pytorch_version || 'N/A') + '</div>' +
+                '<div>CUDA: ' + (sys.cuda_version || 'N/A') + '</div>';
 
             var copyBtn = document.getElementById('settings-copy-debug');
             if (copyBtn) {
                 copyBtn.onclick = function() {
                     var text = 'SerenityFlow v2.0.0-beta\n' +
                         'GPU: ' + (gpu ? gpu.name + ' (' + formatMb(gpu.vram_total) + ')' : 'None') + '\n' +
-                        'Python: ' + (info.python_version || 'N/A') + '\n' +
-                        'PyTorch: ' + (info.torch_version || 'N/A') + '\n' +
-                        'CUDA: ' + (info.cuda_version || 'N/A');
+                        'Python: ' + (sys.python_version || 'N/A') + '\n' +
+                        'PyTorch: ' + (sys.pytorch_version || 'N/A') + '\n' +
+                        'CUDA: ' + (sys.cuda_version || 'N/A');
                     navigator.clipboard.writeText(text).then(function() {
                         copyBtn.textContent = 'Copied!';
                         setTimeout(function() { copyBtn.textContent = 'Copy Debug Info'; }, 1500);
