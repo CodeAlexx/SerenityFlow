@@ -567,6 +567,10 @@ var GenerateTab = (function() {
         // Video controls
         els.videoSection.style.display = isVideo ? 'block' : 'none';
 
+        // Batch: hide for video models
+        var batchInput = document.getElementById('gen-batch');
+        if (batchInput) batchInput.parentElement.parentElement.style.display = isVideo ? 'none' : 'block';
+
         // Button label
         els.btn.textContent = isVideo ? 'Generate Video' : 'Generate';
 
@@ -727,16 +731,15 @@ var GenerateTab = (function() {
 
         // Queue all batch items (server handles sequencing)
         var queueFailed = false;
-        workflows.forEach(function(workflow) {
+        workflows.forEach(function(workflow, i) {
             if (queueFailed) return;
-            fetch('/prompt', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt: workflow, client_id: SerenityWS.getClientId() })
-            })
-            .then(function(resp) {
-                if (!resp.ok) throw new Error('HTTP ' + resp.status);
-                return resp.json();
+            if (batchN > 1) {
+                els.btn.textContent = 'Generating ' + (i + 1) + ' / ' + batchN + '...';
+            }
+            SerenityAPI.postPrompt(workflow, {
+                prompt: state.prompt,
+                model: state.model,
+                batchLabel: batchN > 1 ? ('(' + (i + 1) + '/' + batchN + ')') : ''
             })
             .catch(function(err) {
                 queueFailed = true;

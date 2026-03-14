@@ -1999,19 +1999,7 @@ var CanvasTab = (function() {
     }
 
     function uploadInitImage(base64Data) {
-        return fetch('data:image/png;base64,' + base64Data)
-            .then(function(r) { return r.blob(); })
-            .then(function(blob) {
-                var form = new FormData();
-                form.append('image', blob, 'canvas_init.png');
-                form.append('type', 'input');
-                return fetch('/upload/image', { method: 'POST', body: form });
-            })
-            .then(function(resp) {
-                if (!resp.ok) throw new Error('HTTP ' + resp.status);
-                return resp.json();
-            })
-            .then(function(data) { return data.name; });
+        return SerenityAPI.uploadImage(base64Data, 'canvas_init');
     }
 
     function collectControlLayers() {
@@ -2084,15 +2072,10 @@ var CanvasTab = (function() {
         }
 
         prepare.then(function() {
-            return fetch('/prompt', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt: workflow, client_id: SerenityWS.getClientId() })
+            return SerenityAPI.postPrompt(workflow, {
+                prompt: genState.prompt,
+                model: genState.model
             });
-        })
-        .then(function(resp) {
-            if (!resp.ok) throw new Error('HTTP ' + resp.status);
-            return resp.json();
         })
         .catch(function(err) {
             showError('Failed to queue: ' + err.message);

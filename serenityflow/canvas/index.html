@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="css/canvas-tab.css">
     <link rel="stylesheet" href="css/simple.css">
     <link rel="stylesheet" href="css/queue.css">
+    <link rel="stylesheet" href="css/models.css">
     <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
 </head>
 <body>
@@ -52,8 +53,9 @@
                     <i data-lucide="box"></i>
                     <div class="tooltip">Models</div>
                 </button>
-                <button class="nav-btn" data-tab="queue" title="Queue">
+                <button class="nav-btn" data-tab="queue" title="Queue" style="position:relative">
                     <i data-lucide="list-ordered"></i>
+                    <span id="queue-rail-badge"></span>
                     <div class="tooltip">Queue</div>
                 </button>
             </div>
@@ -237,6 +239,9 @@
 
     <!-- Queue tab -->
     <script src="js/queue.js"></script>
+
+    <!-- Models tab -->
+    <script src="js/models.js"></script>
 
     <!-- Shell navigation (runs after app.js init, switches to saved tab) -->
     <script src="js/shell.js"></script>

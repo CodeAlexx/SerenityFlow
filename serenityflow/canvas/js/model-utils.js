@@ -110,6 +110,11 @@ var ModelUtils = (function() {
             });
     }
 
+    function clearCache() {
+        // No cached object_info data currently — fetchAllModels always hits the network.
+        // This method exists so ModelsTab.refresh can call it uniformly.
+    }
+
     return {
         detectArchFromFilename: detectArchFromFilename,
         isVideoModel: isVideoModel,
@@ -119,6 +124,7 @@ var ModelUtils = (function() {
         snapTo32: snapTo32,
         clampDimension: clampDimension,
         clampVideoDimension: clampVideoDimension,
-        fetchAllModels: fetchAllModels
+        fetchAllModels: fetchAllModels,
+        clearCache: clearCache
     };
 })();

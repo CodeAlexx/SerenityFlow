@@ -460,14 +460,9 @@ var SimpleMode = (function() {
         setGenerating(true);
         var workflow = buildWorkflow();
 
-        fetch('/prompt', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt: workflow, client_id: SerenityWS.getClientId() })
-        })
-        .then(function(resp) {
-            if (!resp.ok) throw new Error('HTTP ' + resp.status);
-            return resp.json();
+        SerenityAPI.postPrompt(workflow, {
+            prompt: getEffectivePrompt(),
+            model: state.model
         })
         .catch(function(err) {
             showError('Failed to queue: ' + err.message);

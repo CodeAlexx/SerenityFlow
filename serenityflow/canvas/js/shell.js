@@ -70,6 +70,11 @@ function switchTab(tabId) {
         QueueTab.init();
     }
 
+    // Init Models tab on first switch
+    if (tabId === 'models' && typeof ModelsTab !== 'undefined') {
+        ModelsTab.init();
+    }
+
     // Resize Konva stage when workflows tab becomes visible
     if (tabId === 'workflows') {
         requestAnimationFrame(resizeWorkflowStage);
