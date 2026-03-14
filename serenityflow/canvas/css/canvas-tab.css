@@ -721,3 +721,124 @@
     margin-bottom: 4px;
     border-bottom: 1px solid var(--shell-border);
 }
+
+/* ── Floating Preview Panel ── */
+#canvas-preview-panel {
+    position: fixed;
+    width: 280px;
+    background: var(--shell-bg-surface);
+    border: 1px solid var(--shell-border);
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+    z-index: 200;
+    overflow: hidden;
+    top: calc(var(--shell-topbar-height) + 60px);
+    right: 280px;
+}
+#canvas-preview-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: var(--shell-bg-panel);
+    border-bottom: 1px solid var(--shell-border);
+    cursor: move;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--shell-text-muted);
+    user-select: none;
+}
+#canvas-preview-close {
+    background: none;
+    border: none;
+    color: var(--shell-text-muted);
+    font-size: 16px;
+    cursor: pointer;
+    padding: 0 4px;
+}
+#canvas-preview-close:hover { color: var(--shell-text); }
+#canvas-preview-body img,
+#canvas-preview-body video {
+    width: 100%;
+    display: block;
+}
+#canvas-preview-actions {
+    display: flex;
+    gap: 6px;
+    padding: 8px;
+}
+.cv-preview-accept {
+    flex: 1;
+    background: var(--shell-accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: var(--shell-font);
+    cursor: pointer;
+}
+.cv-preview-accept:hover { opacity: 0.9; }
+.cv-preview-discard,
+.cv-preview-download {
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: var(--shell-text-muted);
+    font-family: var(--shell-font);
+    cursor: pointer;
+}
+.cv-preview-discard:hover,
+.cv-preview-download:hover {
+    border-color: var(--shell-text-muted);
+    color: var(--shell-text);
+}
+
+/* Mask toolbar extras */
+.cv-mask-sep {
+    color: var(--shell-border);
+    font-size: 14px;
+}
+.cv-mask-label {
+    font-size: 10px;
+    color: var(--shell-text-muted);
+}
+.cv-mask-opacity-range {
+    width: 50px;
+    accent-color: var(--shell-accent);
+    height: 3px;
+}
+
+/* Control/IPA image well */
+.cv-image-well {
+    width: 100%;
+    height: 80px;
+    border: 1px dashed var(--shell-border);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--shell-text-muted);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 150ms ease;
+    overflow: hidden;
+    margin-top: 6px;
+    position: relative;
+}
+.cv-image-well:hover {
+    border-color: var(--shell-text-muted);
+    color: var(--shell-text);
+}
+.cv-image-well img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+.cv-image-well-placeholder {
+    text-align: center;
+    padding: 8px;
+}

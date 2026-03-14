@@ -40,10 +40,42 @@ var WorkflowBuilder = (function() {
     }
 
     function buildInpaint(params) {
-        // For now, use img2img workflow when mask is present.
-        // Full inpaint nodes (SetLatentNoiseMask) can be added later.
-        var workflow = buildImg2Img(params);
-        if (!workflow) return build(params);
+        var arch = ModelUtils.detectArchFromFilename(params.model);
+        var w = ModelUtils.clampDimension(params.width);
+        var h = ModelUtils.clampDimension(params.height);
+        var seed = resolveSeed(params.seed);
+
+        // Flux uses standard img2img (no VAEEncodeForInpaint support)
+        if (arch === 'flux') {
+            return buildFluxImg2Img(params);
+        }
+        // Video models: fall back to txt2vid
+        if (arch === 'ltxv' || arch === 'wan') {
+            return arch === 'ltxv' ? buildLTXV(params) : buildWan(params);
+        }
+
+        var workflow = {
+            '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: params.model } },
+            '2': { class_type: 'CLIPTextEncode', inputs: { text: params.prompt, clip: ['1', 1] } },
+            '3': { class_type: 'CLIPTextEncode', inputs: { text: params.negPrompt || '', clip: ['1', 1] } },
+            '4': { class_type: 'LoadImage', inputs: { image: params.initImageName } },
+            '5': { class_type: 'LoadImage', inputs: { image: params.maskImageName } },
+            '6': { class_type: 'VAEEncodeForInpaint', inputs: {
+                pixels: ['4', 0], vae: ['1', 2], mask: ['5', 0], grow_mask_by: 6
+            }},
+            '7': { class_type: 'KSampler', inputs: {
+                seed: seed, steps: params.steps, cfg: params.cfg || 7.0,
+                sampler_name: params.scheduler || 'euler', scheduler: 'normal',
+                denoise: params.denoise || 0.75,
+                model: ['1', 0], positive: ['2', 0], negative: ['3', 0], latent_image: ['6', 0]
+            }},
+            '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['1', 2] } },
+            '9': { class_type: 'SaveImage', inputs: { images: ['8', 0], filename_prefix: 'sf_inpaint' } }
+        };
+
+        if (params.loras && params.loras.length > 0) {
+            workflow = injectLoRAs(workflow, params.loras);
+        }
         return workflow;
     }
 
@@ -366,5 +398,115 @@ var WorkflowBuilder = (function() {
         };
     }
 
-    return { build: build, buildImg2Img: buildImg2Img, buildInpaint: buildInpaint };
+    // ─── ControlNet ──────────────────────────────────────────────────────
+
+    function applyControlNetNodes(workflow, controlLayers) {
+        if (!controlLayers || !controlLayers.length) return workflow;
+        var nextId = Math.max.apply(null, Object.keys(workflow).map(Number)) + 1;
+
+        // Find the positive conditioning node (output used by sampler)
+        var samplerKey = null;
+        var positiveRef = null;
+        Object.keys(workflow).forEach(function(key) {
+            var node = workflow[key];
+            if (node.class_type === 'KSampler' || node.class_type === 'KSamplerAdvanced') {
+                samplerKey = key;
+                positiveRef = node.inputs.positive;
+            }
+        });
+        if (!samplerKey) return workflow;
+
+        var currentPositive = positiveRef;
+
+        controlLayers.forEach(function(cl) {
+            if (!cl.imageName) return;
+            var loaderId = String(nextId++);
+            var loadImgId = String(nextId++);
+            var applyId = String(nextId++);
+
+            workflow[loaderId] = {
+                class_type: 'ControlNetLoader',
+                inputs: { control_net_name: cl.controlNetModel || 'control_v11p_sd15_canny.safetensors' }
+            };
+            workflow[loadImgId] = {
+                class_type: 'LoadImage',
+                inputs: { image: cl.imageName }
+            };
+            workflow[applyId] = {
+                class_type: 'ControlNetApplyAdvanced',
+                inputs: {
+                    positive: currentPositive,
+                    negative: workflow[samplerKey].inputs.negative,
+                    control_net: [loaderId, 0],
+                    image: [loadImgId, 0],
+                    strength: cl.weight || 1.0,
+                    start_percent: cl.startStep || 0,
+                    end_percent: cl.endStep || 1
+                }
+            };
+            currentPositive = [applyId, 0];
+        });
+
+        // Rewire sampler positive
+        workflow[samplerKey].inputs.positive = currentPositive;
+        return workflow;
+    }
+
+    // ─── IP-Adapter ──────────────────────────────────────────────────────
+
+    function applyIPAdapterNodes(workflow, ipaLayers) {
+        if (!ipaLayers || !ipaLayers.length) return workflow;
+        var nextId = Math.max.apply(null, Object.keys(workflow).map(Number)) + 1;
+
+        // Find model reference used by sampler
+        var samplerKey = null;
+        Object.keys(workflow).forEach(function(key) {
+            var node = workflow[key];
+            if (node.class_type === 'KSampler' || node.class_type === 'KSamplerAdvanced') {
+                samplerKey = key;
+            }
+        });
+        if (!samplerKey) return workflow;
+
+        var currentModel = workflow[samplerKey].inputs.model;
+
+        ipaLayers.forEach(function(ipa) {
+            if (!ipa.imageName) return;
+            var ipaModelId = String(nextId++);
+            var clipVisionId = String(nextId++);
+            var loadImgId = String(nextId++);
+            var applyId = String(nextId++);
+
+            workflow[ipaModelId] = {
+                class_type: 'IPAdapterModelLoader',
+                inputs: { ipadapter_file: ipa.ipaModel || 'ip-adapter_sd15.safetensors' }
+            };
+            workflow[clipVisionId] = {
+                class_type: 'CLIPVisionLoader',
+                inputs: { clip_name: 'clip_vision_g.safetensors' }
+            };
+            workflow[loadImgId] = {
+                class_type: 'LoadImage',
+                inputs: { image: ipa.imageName }
+            };
+            workflow[applyId] = {
+                class_type: 'IPAdapter',
+                inputs: {
+                    model: currentModel,
+                    ipadapter: [ipaModelId, 0],
+                    clip_vision: [clipVisionId, 0],
+                    image: [loadImgId, 0],
+                    weight: ipa.weight || 0.6,
+                    noise: 0.0,
+                    weight_type: 'original'
+                }
+            };
+            currentModel = [applyId, 0];
+        });
+
+        workflow[samplerKey].inputs.model = currentModel;
+        return workflow;
+    }
+
+    return { build: build, buildImg2Img: buildImg2Img, buildInpaint: buildInpaint, applyControlNetNodes: applyControlNetNodes, applyIPAdapterNodes: applyIPAdapterNodes };
 })();
