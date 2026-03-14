@@ -233,7 +233,12 @@
 .enhance-arrow {
     font-size: 11px;
     color: var(--shell-accent);
-    margin-bottom: 6px;
+    margin-bottom: 4px;
+}
+.enhance-source {
+    font-size: 10px;
+    color: var(--shell-accent);
+    margin-bottom: 4px;
 }
 .enhance-new {
     font-size: 12px;

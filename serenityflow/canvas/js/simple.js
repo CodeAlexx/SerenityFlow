@@ -436,15 +436,32 @@ var SimpleMode = (function() {
             enhanceBtn.disabled = true;
         }
 
-        // Local processing (no API calls)
-        setTimeout(function() {
+        // Try backend endpoint first, fall back to local
+        fetch('/enhance_prompt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt: original, arch: state.arch })
+        })
+        .then(function(resp) {
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            return resp.json();
+        })
+        .then(function(data) {
+            if (data.enhanced) {
+                showEnhancedResult(original, data.enhanced, data.source);
+            }
+        })
+        .catch(function() {
+            // Fallback to local enhancement
             var enhanced = localEnhance(original, state.arch);
-            showEnhancedResult(original, enhanced);
+            showEnhancedResult(original, enhanced, 'local');
+        })
+        .finally(function() {
             if (enhanceBtn) {
                 enhanceBtn.textContent = '+ Enhance prompt';
                 enhanceBtn.disabled = false;
             }
-        }, 300);
+        });
     }
 
     function localEnhance(prompt, arch) {
@@ -487,12 +504,13 @@ var SimpleMode = (function() {
         return prompt + ', ' + details.join(', ');
     }
 
-    function showEnhancedResult(original, enhanced) {
+    function showEnhancedResult(original, enhanced, source) {
         var container = document.getElementById('simple-enhance-result');
         if (!container) return;
         container.innerHTML =
             '<div class="enhance-original">' + escapeHtml(original) + '</div>' +
             '<div class="enhance-arrow">\u2193 Enhanced</div>' +
+            '<div class="enhance-source">' + (source === 'llm' ? 'AI enhanced' : 'Auto-enhanced') + '</div>' +
             '<div class="enhance-new">' + escapeHtml(enhanced) + '</div>' +
             '<div class="enhance-actions">' +
                 '<button id="enhance-accept" class="enhance-accept-btn">Use this \u25b6</button>' +

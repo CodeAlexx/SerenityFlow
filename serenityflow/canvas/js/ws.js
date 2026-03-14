@@ -1,48 +1,49 @@
 /**
- * Shared WebSocket module — single connection used by all tabs.
- *
- * Wraps SFApi's WebSocket with a stable, persistent clientId and a
- * simple pub/sub interface that any tab can subscribe to.
- *
- * Usage:
- *   SerenityWS.on('progress', (data) => { ... });
- *   SerenityWS.on('executed', (data) => { ... });
- *   SerenityWS.on('*', (msg) => { ... });  // wildcard
- *   SerenityWS.off('progress', fn);
- *   SerenityWS.getClientId();
+ * SerenityWS — Shared WebSocket client for SerenityFlow.
+ * Singleton pub/sub with exponential backoff reconnect.
  */
-
 var SerenityWS = (function() {
     'use strict';
 
-    // Persistent client ID across page loads
+    var socket = null;
+    var listeners = {};
+    var connected = false;
+    var reconnectAttempts = 0;
+    var reconnectTimer = null;
+    var MAX_RECONNECT_DELAY = 30000;
+    var BASE_DELAY = 1000;
+
+    // Persistent client ID
     var clientId = localStorage.getItem('sf-client-id');
     if (!clientId) {
-        clientId = crypto.randomUUID();
+        clientId = crypto.randomUUID ? crypto.randomUUID() :
+            'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                var r = Math.random() * 16 | 0;
+                return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+            });
         localStorage.setItem('sf-client-id', clientId);
     }
 
-    var socket = null;
-    var listeners = {};
-    var reconnectTimer = null;
-    var connected = false;
+    function getReconnectDelay() {
+        var exp = Math.min(BASE_DELAY * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+        var jitter = Math.random() * 0.3 * exp;
+        return Math.round(exp + jitter);
+    }
 
     function connect() {
-        if (reconnectTimer) {
-            clearTimeout(reconnectTimer);
-            reconnectTimer = null;
+        if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
+            return;
         }
-        if (socket) {
-            try { socket.close(); } catch (e) { /* ignore */ }
-        }
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 
+        var host = location.host || 'localhost:8188';
         var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        var url = protocol + '//' + location.host + '/ws?clientId=' + clientId;
-        socket = new WebSocket(url);
+        socket = new WebSocket(protocol + '//' + host + '/ws?clientId=' + clientId);
 
         socket.onopen = function() {
             connected = true;
-            emit('connected', null);
+            reconnectAttempts = 0;
+            emit('connected', {});
         };
 
         socket.onmessage = function(event) {
@@ -52,32 +53,43 @@ var SerenityWS = (function() {
             }
             try {
                 var msg = JSON.parse(event.data);
-                emit(msg.type, msg.data);
+                var type = msg.type;
+                var data = msg.data || msg;
+                emit(type, data);
             } catch (e) {
-                // ignore parse errors
+                // Ignore parse errors
             }
         };
 
-        socket.onclose = function() {
+        socket.onclose = function(event) {
             connected = false;
-            emit('disconnected', null);
-            reconnectTimer = setTimeout(connect, 2000);
+            emit('disconnected', {});
+            // Only reconnect on abnormal close
+            if (event.code !== 1000) {
+                var delay = getReconnectDelay();
+                reconnectAttempts++;
+                reconnectTimer = setTimeout(connect, delay);
+            }
         };
 
         socket.onerror = function() {
-            emit('error', null);
+            // onclose will fire after this
         };
     }
 
     function emit(type, data) {
-        var fns = listeners[type] || [];
-        for (var i = 0; i < fns.length; i++) {
-            try { fns[i](data); } catch (e) { console.error('WS handler error:', e); }
+        var handlers = listeners[type];
+        if (handlers) {
+            handlers.forEach(function(fn) {
+                try { fn(data); } catch (e) { console.error('WS listener error:', e); }
+            });
         }
         // Wildcard listeners
-        var wild = listeners['*'] || [];
-        for (var j = 0; j < wild.length; j++) {
-            try { wild[j]({ type: type, data: data }); } catch (e) { /* ignore */ }
+        var wildcard = listeners['*'];
+        if (wildcard && type !== '*') {
+            wildcard.forEach(function(fn) {
+                try { fn({ type: type, data: data }); } catch (e) {}
+            });
         }
     }
 
@@ -98,10 +110,19 @@ var SerenityWS = (function() {
     }
 
     function getClientId() { return clientId; }
-
     function isConnected() { return connected; }
 
-    // Auto-connect on load
+    // Page visibility — reconnect when tab becomes visible
+    document.addEventListener('visibilitychange', function() {
+        if (document.visibilityState === 'visible') {
+            if (!socket || socket.readyState === WebSocket.CLOSED) {
+                reconnectAttempts = 0;
+                connect();
+            }
+        }
+    });
+
+    // Auto-connect
     connect();
 
     return {

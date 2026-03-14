@@ -6,6 +6,40 @@
 var ModelUtils = (function() {
     'use strict';
 
+    var objectInfoCache = null;
+
+    function loadObjectInfo() {
+        if (objectInfoCache) return Promise.resolve(objectInfoCache);
+
+        var cachedEtag = localStorage.getItem('sf-object-info-etag');
+        var headers = {};
+        if (cachedEtag) headers['If-None-Match'] = cachedEtag;
+
+        return fetch('/object_info', { headers: headers })
+            .then(function(resp) {
+                if (resp.status === 304) {
+                    try {
+                        var cached = JSON.parse(localStorage.getItem('sf-object-info-data'));
+                        if (cached) { objectInfoCache = cached; return cached; }
+                    } catch(e) {}
+                }
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                return resp.json().then(function(data) {
+                    objectInfoCache = data;
+                    var etag = resp.headers.get('ETag');
+                    if (etag) {
+                        localStorage.setItem('sf-object-info-etag', etag);
+                        try {
+                            localStorage.setItem('sf-object-info-data', JSON.stringify(data));
+                        } catch(e) {
+                            localStorage.removeItem('sf-object-info-data');
+                        }
+                    }
+                    return data;
+                });
+            });
+    }
+
     // Detect architecture from model filename heuristics.
     // The backend does proper header detection — this is frontend-only best-effort
     // for choosing the right workflow graph before generation starts.
@@ -69,11 +103,7 @@ var ModelUtils = (function() {
     // Returns a promise that resolves to an array of { name, loader } objects.
     // loader is 'checkpoint' or 'unet'.
     function fetchAllModels() {
-        return fetch('/object_info')
-            .then(function(resp) {
-                if (!resp.ok) throw new Error('HTTP ' + resp.status);
-                return resp.json();
-            })
+        return loadObjectInfo()
             .then(function(data) {
                 var models = [];
                 var seen = {};
@@ -111,8 +141,9 @@ var ModelUtils = (function() {
     }
 
     function clearCache() {
-        // No cached object_info data currently — fetchAllModels always hits the network.
-        // This method exists so ModelsTab.refresh can call it uniformly.
+        objectInfoCache = null;
+        localStorage.removeItem('sf-object-info-etag');
+        localStorage.removeItem('sf-object-info-data');
     }
 
     return {
@@ -125,6 +156,7 @@ var ModelUtils = (function() {
         clampDimension: clampDimension,
         clampVideoDimension: clampVideoDimension,
         fetchAllModels: fetchAllModels,
+        loadObjectInfo: loadObjectInfo,
         clearCache: clearCache
     };
 })();

@@ -38,6 +38,8 @@ var CanvasTab = (function() {
     var handleStartBox = null;
     var handleStartMouse = null;
     var brushHardness = 1;
+    var drawScheduled = false;
+    var historyDebounce = null;
     var bboxAspectLocked = false;
     var bboxLockedRatio = 1;
 
@@ -248,6 +250,13 @@ var CanvasTab = (function() {
 
         return { push: push, undo: undo, redo: redo, updateButtons: updateButtons };
     })();
+
+    function debouncedHistoryPush() {
+        clearTimeout(historyDebounce);
+        historyDebounce = setTimeout(function() {
+            History.push();
+        }, 300);
+    }
 
     // ── Floating Preview Panel ──
     var lastPreviewSrc = null;
@@ -997,12 +1006,18 @@ var CanvasTab = (function() {
             var pos = getRelativePointerPosition();
             currentLine.points(currentLine.points().concat([pos.x, pos.y]));
             var layer = getActiveKonvaLayer();
-            if (layer) layer.batchDraw();
+            if (layer && !drawScheduled) {
+                drawScheduled = true;
+                requestAnimationFrame(function() {
+                    layer.batchDraw();
+                    drawScheduled = false;
+                });
+            }
         });
 
         stage.on('mouseup', function() {
             if (isDrawing && currentLine) {
-                History.push();
+                debouncedHistoryPush();
             }
             isDrawing = false;
             currentLine = null;

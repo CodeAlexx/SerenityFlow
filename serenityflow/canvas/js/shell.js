@@ -326,4 +326,9 @@ document.addEventListener('DOMContentLoaded', function() {
     // setMode('advanced') internally calls switchTab to restore the saved tab.
     var savedMode = localStorage.getItem('sf-mode') || 'simple';
     setMode(savedMode);
+
+    // Warm object_info cache in background
+    if (typeof ModelUtils !== 'undefined' && ModelUtils.loadObjectInfo) {
+        ModelUtils.loadObjectInfo().catch(function() {});
+    }
 });

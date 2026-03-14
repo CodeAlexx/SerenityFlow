@@ -809,7 +809,7 @@ var GenerateTab = (function() {
 
     function addToGallery(src, isVideo) {
         state.gallery.unshift({ src: src, isVideo: !!isVideo });
-        if (state.gallery.length > 50) state.gallery.pop();
+        if (state.gallery.length > 200) state.gallery.pop();
 
         var wrap = createThumb(src, !!isVideo, true);
         if (els.galleryGrid.firstChild) {
@@ -818,8 +818,8 @@ var GenerateTab = (function() {
             els.galleryGrid.appendChild(wrap);
         }
 
-        // Trim DOM to 50
-        while (els.galleryGrid.children.length > 50) {
+        // Trim DOM to 200
+        while (els.galleryGrid.children.length > 200) {
             els.galleryGrid.removeChild(els.galleryGrid.lastChild);
         }
 
@@ -831,11 +831,11 @@ var GenerateTab = (function() {
         wrap.className = 'gen-thumb-wrap' + (isActive ? ' active' : '') + (isVideo ? ' gen-thumb-video' : '');
         if (isVideo) {
             wrap.innerHTML =
-                '<video src="' + src + '" muted preload="metadata" style="width:100%;height:100%;object-fit:cover;display:block;"></video>' +
+                '<video src="' + src + '#t=0.1" muted preload="metadata" style="width:100%;height:100%;object-fit:cover;display:block;"></video>' +
                 '<div class="gen-thumb-play">\u25b6</div>';
         } else {
             wrap.innerHTML =
-                '<img src="' + src + '" alt="thumbnail">' +
+                '<img src="' + src + '" alt="thumbnail" loading="lazy">' +
                 '<div class="gen-thumb-overlay">' +
                     '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>' +
                 '</div>';
@@ -865,7 +865,7 @@ var GenerateTab = (function() {
             var saved = JSON.parse(localStorage.getItem('sf-gallery'));
             if (saved && Array.isArray(saved)) {
                 // Handle both old (string[]) and new ({src, isVideo}[]) formats
-                state.gallery = saved.slice(0, 50).map(function(item) {
+                state.gallery = saved.slice(0, 200).map(function(item) {
                     if (typeof item === 'string') return { src: item, isVideo: false };
                     return item;
                 });

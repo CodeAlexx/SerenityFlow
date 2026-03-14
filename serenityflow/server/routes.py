@@ -620,6 +620,26 @@ def register_routes(app: FastAPI):
             return JSONResponse(timeline)
         return JSONResponse({}, status_code=404)
 
+    # === Prompt enhancement ===
+
+    @app.post("/enhance_prompt")
+    async def enhance_prompt(request: Request):
+        """Enhance a generation prompt. Falls back to rule-based when no LLM available."""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+        prompt = body.get("prompt", "").strip()
+        arch = body.get("arch", "flux")
+
+        if not prompt:
+            return JSONResponse({"enhanced": prompt, "source": "rules"})
+
+        # Rule-based enhancement
+        enhanced = _enhance_rule_based(prompt, arch)
+        return JSONResponse({"enhanced": enhanced, "source": "rules"})
+
     # === Frontend static files ===
     # Priority: SerenityFlow canvas > ComfyUI frontend > API-only
 
@@ -696,6 +716,31 @@ def register_routes(app: FastAPI):
                 return Response("SerenityFlow v2 server running. No frontend found.", status_code=200)
 
             log.warning("No frontend found. Server running in API-only mode.")
+
+
+def _enhance_rule_based(prompt: str, arch: str) -> str:
+    """Simple rule-based prompt enhancement."""
+    lower = prompt.lower()
+    parts = []
+
+    if "light" not in lower and "lit" not in lower:
+        parts.append("natural lighting")
+    if "detail" not in lower and "quality" not in lower:
+        parts.append("highly detailed")
+    if "composit" not in lower and "angle" not in lower:
+        parts.append("professional composition")
+
+    arch_suffix = {
+        "flux": "masterful execution, 8k",
+        "sdxl": "masterpiece, best quality, sharp focus",
+        "sd3": "masterpiece, best quality",
+        "sd15": "best quality, sharp focus",
+        "ltxv": "smooth motion, cinematic quality",
+        "wan": "smooth motion, high quality",
+    }
+    parts.append(arch_suffix.get(arch, "high quality"))
+
+    return prompt.rstrip(".,") + ", " + ", ".join(parts)
 
 
 def _find_frontend_dir() -> str | None:
