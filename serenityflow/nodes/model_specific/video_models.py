@@ -110,24 +110,26 @@ def ltxv_sampler(ltxv_model, prompt, width=768, height=512, num_frames=25,
     )
 
     video = result["video"]
-    log.info("Raw video tensor shape: %s", list(video.shape))
-    # Normalize to [F, H, W, C] float32 [0, 1]
-    if video.dim() == 5:
+    log.info("Raw video tensor: shape=%s dtype=%s", list(video.shape), video.dtype)
+
+    # vae_decode_video returns uint8 [0-255] in [F,H,W,C] — normalize to float [0,1]
+    frames = video.float()
+    if video.dtype == torch.uint8 or frames.max() > 1.5:
+        frames = frames / 255.0
+
+    # Ensure [F, H, W, C] layout
+    if frames.dim() == 5:
         # [B, C, T, H, W] → [T, H, W, C]
-        frames = video[0].permute(1, 2, 3, 0).float().clamp(0, 1)
-    elif video.dim() == 4:
-        # Could be [C, T, H, W] or [T, H, W, C]
-        if video.shape[-1] <= 4:
-            # Already [T, H, W, C]
-            frames = video.float().clamp(0, 1)
-        else:
+        frames = frames[0].permute(1, 2, 3, 0)
+    elif frames.dim() == 4:
+        if frames.shape[-1] > 4:
             # [C, T, H, W] → [T, H, W, C]
-            frames = video.permute(1, 2, 3, 0).float().clamp(0, 1)
-    elif video.dim() == 3:
-        # [T, H, W] grayscale → [T, H, W, 1]
-        frames = video.unsqueeze(-1).float().clamp(0, 1)
-    else:
-        raise ValueError(f"Unexpected video tensor shape: {list(video.shape)}")
+            frames = frames.permute(1, 2, 3, 0)
+        # else already [T, H, W, C]
+    elif frames.dim() == 3:
+        frames = frames.unsqueeze(-1)
+
+    frames = frames.clamp(0, 1)
     log.info("Generated %d frames at %dx%d", frames.shape[0], frames.shape[2], frames.shape[1])
     return (frames,)
 

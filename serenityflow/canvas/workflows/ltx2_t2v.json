@@ -77,7 +77,7 @@
     },
     {
       "id": 3,
-      "type": "SaveAnimatedWEBP",
+      "type": "SaveVideo",
       "pos": [
         950,
         200
@@ -91,7 +91,7 @@
       "mode": 0,
       "inputs": [
         {
-          "name": "images",
+          "name": "video",
           "type": "IMAGE",
           "link": 2
         }
@@ -100,7 +100,8 @@
       "properties": {},
       "widgets_values": [
         "sf_ltx2_video",
-        24.0
+        24.0,
+        "mp4"
       ]
     }
   ],
