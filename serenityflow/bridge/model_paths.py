@@ -23,6 +23,13 @@ DEFAULT_MODEL_DIRS = {
     "embeddings": ["models/embeddings"],
 }
 
+# Directory name aliases (matches folder_paths compat shim)
+_DIR_ALIASES: dict[str, str] = {
+    "stable-diffusion": "checkpoints",
+    "lora": "loras",
+    "embedding": "embeddings",
+}
+
 
 class ModelPaths:
     def __init__(self, base_dir: str, extra_paths_yaml: str | None = None):
@@ -44,10 +51,14 @@ class ModelPaths:
                 direct = os.path.join(base_dir, leaf)
                 if direct not in paths:
                     paths.append(direct)
+            # Collect alias names that map to this category
+            alias_names = {a for a, cat in _DIR_ALIASES.items() if cat == folder}
+
             # Case-insensitive: probe actual directory entries for matches
             if os.path.isdir(base_dir):
                 folder_names = {os.path.basename(sd) for sd in subdirs}
                 folder_names.add(folder)  # also match the key itself
+                folder_names |= alias_names  # include aliases (e.g. Stable-Diffusion)
                 try:
                     for entry in os.scandir(base_dir):
                         if entry.is_dir() and entry.name.lower() in {

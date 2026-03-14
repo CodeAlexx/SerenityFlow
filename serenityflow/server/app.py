@@ -40,9 +40,28 @@ async def lifespan(app: FastAPI):
     # Import nodes to trigger registration
     import serenityflow.nodes  # noqa: F401
 
+    # Initialize Stagehand coordinator for VRAM-managed block-swap
+    coordinator = None
+    sh_cfg = getattr(state, "stagehand_config", {})
+    if not sh_cfg.get("disable", False):
+        try:
+            from serenityflow.memory.coordinator import StagehandCoordinator
+            coordinator = StagehandCoordinator(
+                pool_mb=sh_cfg.get("pool_mb"),
+                vram_budget_mb=sh_cfg.get("vram_budget_mb"),
+                prefetch_window=sh_cfg.get("prefetch_window", 3),
+                telemetry=sh_cfg.get("telemetry", False),
+                block_threshold_mb=sh_cfg.get("block_threshold_mb", 2048),
+            )
+        except ImportError:
+            log.info("Stagehand not installed, running without block-swap")
+        except Exception as e:
+            log.warning("Stagehand init failed: %s", e)
+
     state.runner = WorkflowRunner(
         node_registry=registry,
         cache=CacheStore(),
+        coordinator=coordinator,
     )
 
     for d in [state.output_dir, state.input_dir, state.temp_dir]:
@@ -62,6 +81,8 @@ async def lifespan(app: FastAPI):
     yield  # Server runs
 
     log.info("Server shutting down")
+    if coordinator is not None:
+        coordinator.shutdown()
 
 
 app = FastAPI(title="SerenityFlow v2", lifespan=lifespan)

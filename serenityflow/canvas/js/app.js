@@ -5,6 +5,9 @@
 // Global references
 let sfCanvas, sfApi, sfSidebar, sfToolbar, sfProperties, sfPreview, sfHistory, sfSelection;
 
+// Track right-click position for node placement
+let lastRightClickPos = { x: 0, y: 0 };
+
 document.addEventListener('DOMContentLoaded', async () => {
     // Create API client
     sfApi = new SFApi();
@@ -20,11 +23,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     sfSelection = new SFSelection(sfCanvas);
     sfToolbar = new SFToolbar(sfCanvas, sfApi);
 
-    // Setup context menu
+    // Setup context menu (node/connection right-click + floating search for empty canvas)
     setupContextMenu(sfCanvas, sfSidebar);
 
-    // Setup drag-drop from sidebar to canvas
-    setupSidebarDragDrop(sfCanvas, sfSidebar);
+    // Setup drag-drop from file drops onto canvas
+    setupCanvasDragDrop(sfCanvas);
 
     // Setup double-click on node to open properties
     sfCanvas.nodeLayer.on('dblclick', (e) => {
@@ -39,11 +42,63 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    // Double-click on empty canvas opens node search
+    sfCanvas.stage.on('dblclick', (e) => {
+        // Only trigger on stage background, not on nodes
+        if (e.target !== sfCanvas.stage) return;
+        // Check it's not the node layer handling it
+        const pointer = sfCanvas.stage.getPointerPosition();
+        if (!pointer) return;
+
+        lastRightClickPos = pointer;
+        const stageBox = sfCanvas.stage.container().getBoundingClientRect();
+        showNodeSearch(stageBox.left + pointer.x, stageBox.top + pointer.y);
+    });
+
+    // Hide canvas hint when first node is added
+    const hint = document.getElementById('canvas-hint');
+    if (hint) {
+        const origAddNode = sfCanvas.addNode.bind(sfCanvas);
+        sfCanvas.addNode = function(...args) {
+            hint.style.display = 'none';
+            return origAddNode(...args);
+        };
+    }
+
+    // Auto-save workflow to sessionStorage
+    const STORAGE_KEY = 'sf_autosave';
+    setInterval(() => {
+        if (sfCanvas.nodes.size > 0) {
+            try {
+                const prompt = serializeWorkflow(sfCanvas);
+                const workflow = { version: 1, prompt, nodes: {} };
+                sfCanvas.nodes.forEach((node, id) => {
+                    workflow.nodes[id] = {
+                        type: node.nodeType,
+                        pos: [node.x, node.y],
+                        widgets_values: { ...node.widgetValues },
+                    };
+                });
+                sessionStorage.setItem(STORAGE_KEY, JSON.stringify(workflow));
+            } catch (_) {}
+        }
+    }, 5000);
+
     // Connect to server
     sfApi.connect();
 
-    // Load node types
+    // Load node types, then restore autosaved workflow
     await sfSidebar.loadNodeTypes();
+
+    // Restore from session storage if available
+    try {
+        const saved = sessionStorage.getItem(STORAGE_KEY);
+        if (saved) {
+            const data = JSON.parse(saved);
+            loadWorkflow(sfCanvas, data, sfCanvas.nodeInfo);
+            if (hint) hint.style.display = 'none';
+        }
+    } catch (_) {}
 });
 
 function findNodeIdByGroup(canvas, group) {
@@ -53,12 +108,141 @@ function findNodeIdByGroup(canvas, group) {
     return null;
 }
 
+// --- Floating Node Search ---
+
+function showNodeSearch(x, y) {
+    const panel = document.getElementById('node-search-panel');
+    if (!panel) return;
+
+    // Position — keep on screen
+    const pw = 260, ph = 400;
+    const left = (x + pw > window.innerWidth) ? x - pw : x;
+    const top = (y + ph > window.innerHeight) ? y - ph : y;
+
+    panel.style.left = Math.max(0, left) + 'px';
+    panel.style.top = Math.max(0, top) + 'px';
+    panel.classList.add('visible');
+
+    // Focus search input
+    const input = document.getElementById('node-search-input');
+    if (input) {
+        input.value = '';
+        input.focus();
+        renderNodeResults('');
+    }
+}
+
+function hideNodeSearch() {
+    const panel = document.getElementById('node-search-panel');
+    if (panel) panel.classList.remove('visible');
+}
+
+function renderNodeResults(query) {
+    const list = document.getElementById('node-search-results');
+    if (!list) return;
+
+    const nodeInfo = sfCanvas ? sfCanvas.nodeInfo : null;
+    if (!nodeInfo) {
+        list.innerHTML = '<div class="node-search-empty">Loading nodes...</div>';
+        return;
+    }
+
+    const q = query.toLowerCase().trim();
+    const entries = Object.entries(nodeInfo);
+    const filtered = q
+        ? entries.filter(function(entry) {
+            var type = entry[0];
+            var info = entry[1];
+            return type.toLowerCase().includes(q) ||
+                   (info.display_name || '').toLowerCase().includes(q) ||
+                   (info.category || '').toLowerCase().includes(q);
+        })
+        : entries;
+
+    // Show max 30 results
+    const results = filtered.slice(0, 30);
+
+    if (results.length === 0) {
+        list.innerHTML = '<div class="node-search-empty">No nodes found</div>';
+        return;
+    }
+
+    list.innerHTML = '';
+    results.forEach(function(entry) {
+        var type = entry[0];
+        var info = entry[1];
+        var row = document.createElement('div');
+        row.className = 'node-search-result';
+        row.dataset.type = type;
+
+        var nameSpan = document.createElement('span');
+        nameSpan.textContent = info.display_name || type;
+        row.appendChild(nameSpan);
+
+        var catSpan = document.createElement('span');
+        catSpan.className = 'node-search-category';
+        catSpan.textContent = info.category || '';
+        row.appendChild(catSpan);
+
+        row.addEventListener('click', function() {
+            addNodeFromSearch(type);
+            hideNodeSearch();
+        });
+
+        list.appendChild(row);
+    });
+}
+
+function addNodeFromSearch(nodeType) {
+    if (!sfCanvas || !sfCanvas.nodeInfo) return;
+    const info = sfCanvas.nodeInfo[nodeType];
+    if (!info) return;
+
+    // Convert stage pointer position to world coordinates
+    const worldPos = sfCanvas.getWorldPosition(lastRightClickPos.x, lastRightClickPos.y);
+    sfCanvas.addNode(nodeType, worldPos.x, worldPos.y, info);
+}
+
+// Search input handler
+document.addEventListener('DOMContentLoaded', function() {
+    var input = document.getElementById('node-search-input');
+    if (input) {
+        input.addEventListener('input', function() {
+            renderNodeResults(input.value);
+        });
+
+        // Enter key adds first result
+        input.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                var first = document.querySelector('.node-search-result');
+                if (first) {
+                    addNodeFromSearch(first.dataset.type);
+                    hideNodeSearch();
+                }
+            }
+        });
+    }
+
+    // Hide on click outside
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('#node-search-panel')) {
+            hideNodeSearch();
+        }
+    });
+
+    // Hide on Escape
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            hideNodeSearch();
+        }
+    });
+});
+
 // --- Context Menu ---
 
 function setupContextMenu(canvas, sidebar) {
     const menu = document.getElementById('context-menu');
     const menuItems = document.getElementById('context-menu-items');
-    let contextTarget = null; // { type: 'canvas'|'node'|'connection', data }
 
     // Hide on click anywhere
     document.addEventListener('click', () => {
@@ -78,6 +262,9 @@ function setupContextMenu(canvas, sidebar) {
         const target = e.target;
         const pointer = canvas.stage.getPointerPosition();
         if (!pointer) return;
+
+        // Store position for node placement
+        lastRightClickPos = pointer;
 
         menuItems.innerHTML = '';
 
@@ -122,55 +309,41 @@ function setupContextMenu(canvas, sidebar) {
                 sfHistory.saveState();
                 canvas.removeNode(clickedNode);
             });
+
+            // Position and show context menu
+            menu.style.left = e.evt.clientX + 'px';
+            menu.style.top = e.evt.clientY + 'px';
+            menu.classList.remove('hidden');
+
+            // Keep menu on screen
+            const rect = menu.getBoundingClientRect();
+            if (rect.right > window.innerWidth) {
+                menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
+            }
+            if (rect.bottom > window.innerHeight) {
+                menu.style.top = (window.innerHeight - rect.height - 4) + 'px';
+            }
         } else if (clickedConnection) {
             // Connection context menu
             addMenuItem(menuItems, 'Delete Connection', () => {
                 sfHistory.saveState();
                 canvas.removeConnection(clickedConnection);
             });
-        } else {
-            // Canvas context menu - add nodes
-            addMenuItem(menuItems, 'Add Node...', null, true);
-            addSeparator(menuItems);
 
-            // Quick-add for common categories
-            const categories = Object.keys(sidebar.categories).sort().slice(0, 15);
-            for (const cat of categories) {
-                const nodes = sidebar.categories[cat];
-                if (nodes.length <= 8) {
-                    // Inline category
-                    const catItem = document.createElement('div');
-                    catItem.className = 'context-submenu-title';
-                    catItem.textContent = cat;
-                    menuItems.appendChild(catItem);
+            menu.style.left = e.evt.clientX + 'px';
+            menu.style.top = e.evt.clientY + 'px';
+            menu.classList.remove('hidden');
 
-                    for (const nodeName of nodes) {
-                        const info = sidebar.nodeTypes[nodeName];
-                        addMenuItem(menuItems, '  ' + (info.display_name || nodeName), () => {
-                            const worldPos = canvas.getWorldPosition(pointer.x, pointer.y);
-                            canvas.addNode(nodeName, worldPos.x, worldPos.y, info);
-                        });
-                    }
-                } else {
-                    addMenuItem(menuItems, cat + ' (' + nodes.length + ')', () => {
-                        // TODO: submenu
-                    });
-                }
+            const rect = menu.getBoundingClientRect();
+            if (rect.right > window.innerWidth) {
+                menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
             }
-        }
-
-        // Position menu
-        menu.style.left = e.evt.clientX + 'px';
-        menu.style.top = e.evt.clientY + 'px';
-        menu.classList.remove('hidden');
-
-        // Keep menu on screen
-        const rect = menu.getBoundingClientRect();
-        if (rect.right > window.innerWidth) {
-            menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
-        }
-        if (rect.bottom > window.innerHeight) {
-            menu.style.top = (window.innerHeight - rect.height - 4) + 'px';
+            if (rect.bottom > window.innerHeight) {
+                menu.style.top = (window.innerHeight - rect.height - 4) + 'px';
+            }
+        } else {
+            // Empty canvas — open floating node search
+            showNodeSearch(e.evt.clientX, e.evt.clientY);
         }
     });
 }
@@ -198,9 +371,9 @@ function addSeparator(container) {
     container.appendChild(sep);
 }
 
-// --- Drag and Drop from sidebar ---
+// --- Drag and Drop (file drop only, no sidebar drag) ---
 
-function setupSidebarDragDrop(canvas, sidebar) {
+function setupCanvasDragDrop(canvas) {
     const container = document.getElementById('canvas-container');
 
     container.addEventListener('dragover', (e) => {
@@ -210,18 +383,21 @@ function setupSidebarDragDrop(canvas, sidebar) {
 
     container.addEventListener('drop', (e) => {
         e.preventDefault();
-        const nodeType = e.dataTransfer.getData('text/plain');
-        if (!nodeType) return;
 
-        const rect = container.getBoundingClientRect();
-        const screenX = e.clientX - rect.left;
-        const screenY = e.clientY - rect.top;
-
-        // Convert to stage coordinates
-        const stageBox = canvas.stage.container().getBoundingClientRect();
-        const pointerX = e.clientX - stageBox.left;
-        const pointerY = e.clientY - stageBox.top;
-
-        sidebar.addNodeAtPosition(nodeType, pointerX, pointerY);
+        // Check for .json file drop (workflow import)
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            const file = e.dataTransfer.files[0];
+            if (file.name.endsWith('.json')) {
+                file.text().then(text => {
+                    try {
+                        const data = JSON.parse(text);
+                        loadWorkflow(canvas, data, canvas.nodeInfo);
+                        sfToolbar._toast('Workflow loaded from ' + file.name);
+                    } catch (err) {
+                        sfToolbar._toast('Failed to load workflow: ' + err.message, 'error');
+                    }
+                });
+            }
+        }
     });
 }

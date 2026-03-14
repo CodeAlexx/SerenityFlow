@@ -3,7 +3,7 @@
 Sends all required WebSocket events in exact ComfyUI order:
   1. execution_start
   2. execution_cached
-  3. For each node: executing -> executed
+  3. For each node: executing -> executed (real-time from worker thread)
   4. execution_success OR execution_error OR execution_interrupted
 """
 from __future__ import annotations
@@ -19,6 +19,15 @@ from serenityflow.executor.runner import ExecutionError
 log = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sf-exec")
+
+
+def _send_from_thread(loop, server_state, event_type: str, data: dict):
+    """Send a WS event from a worker thread using the main event loop."""
+    from serenityflow.server.websocket import send_event
+    asyncio.run_coroutine_threadsafe(
+        send_event(server_state, event_type, data),
+        loop,
+    )
 
 
 async def execute_prompt(server_state, prompt_id: str, prompt: dict, extra_data: dict):
@@ -72,21 +81,52 @@ async def execute_prompt(server_state, prompt_id: str, prompt: dict, extra_data:
         "prompt_id": prompt_id,
     })
 
-    # 3. Execute with progress callback sending WS events
+    # 3. Execute with real-time progress via WS events from worker thread
     executed = set()
     ui_outputs = {}
     loop = asyncio.get_running_loop()
 
     def progress_callback(node_id: str, class_type: str):
-        """Called synchronously from runner after each node completes."""
+        """Called synchronously from runner after each node completes.
+        Sends WS events in real-time from the worker thread."""
         executed.add(node_id)
+
+        # Extract UI output (unwrap the "ui" key for ComfyUI compat)
         result = runner.outputs.get(node_id)
+        output = {}
         if isinstance(result, dict):
-            ui_outputs[node_id] = result
+            if "ui" in result:
+                output = result["ui"]
+                ui_outputs[node_id] = result["ui"]
+            else:
+                output = result
+                ui_outputs[node_id] = result
+
+        # Send executing event (node is done, mark it)
+        _send_from_thread(loop, server_state, "executed", {
+            "node": node_id,
+            "display_node": node_id,
+            "output": output,
+            "prompt_id": prompt_id,
+        })
+
+        server_state.last_node_id = node_id
+
+    # Use RuntimeHook to send "executing" before each node starts
+    from serenityflow.core.hooks import RuntimeHook
+
+    class _ExecutingHook(RuntimeHook):
+        def on_node_start(self, node_id: str, class_type: str) -> None:
+            _send_from_thread(loop, server_state, "executing", {
+                "node": node_id,
+                "display_node": node_id,
+                "prompt_id": prompt_id,
+            })
+
+    ws_hook = _ExecutingHook()
+    runner.hooks.register_runtime(ws_hook)
 
     try:
-        # Send executing events via a hook on the runner
-        # We wrap execute in a thread since it's blocking
         def run_in_thread():
             print(f"[EXEC-THREAD] Starting runner.execute()", flush=True)
             try:
@@ -100,23 +140,6 @@ async def execute_prompt(server_state, prompt_id: str, prompt: dict, extra_data:
                 raise
 
         results = await loop.run_in_executor(_executor, run_in_thread)
-
-        # Send executed events for each node after completion
-        for node_id in order:
-            if node_id in executed:
-                spec = graph.get_node(node_id)
-                output = ui_outputs.get(node_id, {})
-                await send_event(server_state, "executing", {
-                    "node": node_id,
-                    "display_node": node_id,
-                    "prompt_id": prompt_id,
-                })
-                await send_event(server_state, "executed", {
-                    "node": node_id,
-                    "display_node": node_id,
-                    "output": output,
-                    "prompt_id": prompt_id,
-                })
 
         # Signal end of execution (executing null = done)
         await send_event(server_state, "executing", {
@@ -174,6 +197,9 @@ async def execute_prompt(server_state, prompt_id: str, prompt: dict, extra_data:
             "current_inputs": [],
             "current_outputs": list(ui_outputs.keys()),
         })
+    finally:
+        # Remove the WS hook
+        runner.hooks.unregister_runtime(ws_hook)
 
     server_state.last_node_id = None
 

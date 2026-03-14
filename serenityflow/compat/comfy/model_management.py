@@ -141,14 +141,14 @@ current_loaded_models = []
 def load_models_gpu(models, memory_required=0, force_patch_weights=False,
                     minimum_memory_required=None, force_full_load=False):
     for m in models:
-        if hasattr(m, "_handle"):
+        if hasattr(m, "model") and isinstance(m.model, torch.nn.Module):
+            # Move model to GPU if it's on CPU (small models only;
+            # large models use block-level offloading hooks instead)
             try:
-                from serenityflow.memory.coordinator import StagehandCoordinator
-                StagehandCoordinator.instance().ensure_resident(m._handle)
+                device = get_torch_device()
+                m.model.to(device)
             except Exception:
                 pass
-        elif hasattr(m, "model"):
-            pass
 
 
 def load_model_gpu(model):

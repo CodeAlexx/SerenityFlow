@@ -65,15 +65,26 @@ async def send_event(server_state, event_type: str, data: dict, sid: str | None 
 
 
 def send_sync(event_type: str, data: dict, sid: str | None = None):
-    """Synchronous wrapper for send_event (called from executor thread / compat layer)."""
+    """Synchronous wrapper for send_event (called from executor thread / compat layer).
+
+    Uses run_coroutine_threadsafe to safely send from any thread.
+    """
     from serenityflow.server.app import state
 
     try:
+        # Try to get the running loop (works if called from async context)
         loop = asyncio.get_running_loop()
         loop.create_task(send_event(state, event_type, data, sid))
     except RuntimeError:
-        # No running loop — queue it on PromptServer._send_queue as fallback
-        pass
+        # Called from a worker thread — find the main event loop
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    send_event(state, event_type, data, sid), loop
+                )
+        except RuntimeError:
+            pass
 
 
 async def send_binary(server_state, data: bytes, sid: str | None = None):

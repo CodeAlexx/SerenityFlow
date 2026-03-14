@@ -143,10 +143,13 @@ class StagehandCoordinator:
         self._prefetch_window = prefetch_window
         self._telemetry = telemetry
         self._block_threshold_mb = block_threshold_mb
+        self._slab_mb = 700
 
-        slab_mb = 700
-        pool_mb = max(slab_mb, (pool_mb // slab_mb) * slab_mb)
-        self._pool = PinnedPool(total_mb=pool_mb, slab_mb=slab_mb)
+        # Defer PinnedPool allocation until first runtime is created.
+        # Allocating 7+ GB of pinned (locked) RAM at startup leaves too
+        # little headroom for model loading (state dict + key conversion
+        # can temporarily need 3x model size in RAM).
+        self._pool: PinnedPool | None = None
         self._runtimes: dict[int, object] = {}
         self._lock = threading.Lock()
 
@@ -154,9 +157,18 @@ class StagehandCoordinator:
         self.current_schedule: GraphSchedule | None = None
 
         logger.info(
-            "StagehandCoordinator init: pool=%dMB, vram_budget=%dMB, prefetch=%d, block_threshold=%dMB",
-            pool_mb, vram_budget_mb, prefetch_window, block_threshold_mb,
+            "StagehandCoordinator init (pool deferred): vram_budget=%dMB, prefetch=%d, block_threshold=%dMB",
+            vram_budget_mb, prefetch_window, block_threshold_mb,
         )
+
+    def _ensure_pool(self) -> PinnedPool:
+        """Lazily allocate the PinnedPool on first use."""
+        if self._pool is None:
+            pool_mb = max(self._slab_mb, (self._pool_mb // self._slab_mb) * self._slab_mb)
+            self._pool = PinnedPool(total_mb=pool_mb, slab_mb=self._slab_mb)
+            logger.info("PinnedPool allocated: %d MB (%d slabs x %d MB)",
+                        pool_mb, pool_mb // self._slab_mb, self._slab_mb)
+        return self._pool
 
     def get_or_create_runtime(self, model: torch.nn.Module) -> object | None:
         """Create a StagehandRuntime for qualifying models. Returns None if not eligible."""
@@ -186,6 +198,7 @@ class StagehandCoordinator:
             telemetry_enabled=self._telemetry,
         )
 
+        pool = self._ensure_pool()
         runtime = StagehandRuntime(
             model=model,
             config=config,
@@ -193,7 +206,7 @@ class StagehandCoordinator:
             group="transformer",
             dtype=torch.bfloat16,
             inference_mode=True,
-            pool=self._pool,
+            pool=pool,
         )
 
         with self._lock:

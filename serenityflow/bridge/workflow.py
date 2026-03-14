@@ -52,11 +52,15 @@ def parse_api_format(data: dict) -> dict:
     return prompt
 
 
-def parse_litegraph_format(data: dict) -> dict:
+def parse_litegraph_format(data: dict, registry=None) -> dict:
     """Convert litegraph format to API format.
 
     Litegraph nodes have id, type, inputs (with link ids), outputs, widgets_values.
     Litegraph links are [link_id, origin_id, origin_slot, target_id, target_slot, type_string].
+
+    When ``registry`` is provided, linked input port names and widget values
+    are mapped to the registered parameter names so the runner can call
+    ``fn(**inputs)`` correctly.
     """
     nodes = data.get("nodes", [])
     links = data.get("links", [])
@@ -114,6 +118,23 @@ def parse_litegraph_format(data: dict) -> dict:
         # Reroute has no input -- return as-is (will fail validation downstream)
         return (origin_id, origin_slot)
 
+    def _get_registry_input_names(class_type: str) -> list[str] | None:
+        """Get ordered input parameter names from the registry.
+
+        Returns a flat list of required + optional input names, or None
+        if the node isn't registered.
+        """
+        if registry is None or not registry.has(class_type):
+            return None
+        node_def = registry.get(class_type)
+        it = node_def.input_types
+        names: list[str] = []
+        for key in ("required", "optional"):
+            section = it.get(key, {})
+            if isinstance(section, dict):
+                names.extend(section.keys())
+        return names if names else None
+
     prompt = {}
     for node in nodes:
         node_id = str(node.get("id", ""))
@@ -127,35 +148,57 @@ def parse_litegraph_format(data: dict) -> dict:
             continue
 
         inputs_dict = {}
+        reg_names = _get_registry_input_names(class_type)
 
         # Process linked inputs
+        # Litegraph port names may differ from registry parameter names.
+        # When the registry is available, map port slot index → registry name.
         node_inputs = node.get("inputs", []) or []
-        for inp in node_inputs:
-            input_name = inp.get("name", "")
+        linked_slots: set[int] = set()   # track which registry slots are linked
+        for slot_idx, inp in enumerate(node_inputs):
+            litegraph_name = inp.get("name", "")
             link_id = inp.get("link")
             if link_id is not None and link_id in link_map:
                 origin_id, origin_slot = link_map[link_id]
-                # Trace through any Reroute nodes to find the real source
                 origin_id, origin_slot = _resolve_through_reroutes(origin_id, origin_slot)
-                inputs_dict[input_name] = [origin_id, origin_slot]
+
+                # Determine the correct parameter name:
+                # 1. If registry name at this slot index matches, use it
+                # 2. If litegraph name matches a registry name, use it
+                # 3. Fall back to litegraph name
+                param_name = litegraph_name
+                if reg_names is not None:
+                    if slot_idx < len(reg_names):
+                        param_name = reg_names[slot_idx]
+                        linked_slots.add(slot_idx)
+                    elif litegraph_name in reg_names:
+                        param_name = litegraph_name
+                        linked_slots.add(reg_names.index(litegraph_name))
+
+                inputs_dict[param_name] = [origin_id, origin_slot]
 
         # Process widget values (scalars)
-        # Widget values are positional -- map them to input names by position.
-        # We skip inputs that are already linked.
+        # Widget values are positional and fill non-linked inputs in order.
         widgets = node.get("widgets_values", []) or []
-        if widgets:
-            # Get names of non-linked inputs from the node's input spec
-            # Since we don't have INPUT_TYPES metadata in Phase 6,
-            # we use a heuristic: widget values fill non-linked input names
-            # that aren't already in inputs_dict.
-            # For Phase 6 this is best-effort.
-            # In Phase 7, we'll use actual INPUT_TYPES from the registry
-            for i, val in enumerate(widgets):
-                # Skip values that look like link references to avoid
-                # false positives in WorkflowGraph.is_link()
+        if widgets and reg_names is not None:
+            # Collect non-linked registry input names in order
+            widget_target_names = [
+                name for i, name in enumerate(reg_names)
+                if i not in linked_slots and name not in inputs_dict
+            ]
+            wi = 0
+            for val in widgets:
+                if wi >= len(widget_target_names):
+                    break
                 if _is_link(val):
                     continue
-                # Store with a generated name if we can't determine the real one
+                inputs_dict[widget_target_names[wi]] = val
+                wi += 1
+        elif widgets:
+            # Fallback: no registry available
+            for i, val in enumerate(widgets):
+                if _is_link(val):
+                    continue
                 name = f"_widget_{i}"
                 inputs_dict.setdefault(name, val)
 
@@ -167,14 +210,17 @@ def parse_litegraph_format(data: dict) -> dict:
     return prompt
 
 
-def parse_workflow(data: dict) -> dict:
+def parse_workflow(data: dict, registry=None) -> dict:
     """Auto-detect format and parse.
 
     Litegraph has "nodes" key with a list value.
     API format has string keys with dict values containing "class_type".
+
+    ``registry`` is passed through to litegraph parsing for input name
+    resolution.
     """
     if "nodes" in data and isinstance(data["nodes"], list):
-        return parse_litegraph_format(data)
+        return parse_litegraph_format(data, registry=registry)
     else:
         return parse_api_format(data)
 

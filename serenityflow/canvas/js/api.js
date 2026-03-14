@@ -5,13 +5,9 @@ class SFApi {
     constructor(host) {
         host = host || window.location.host;
         const proto = window.location.protocol === 'https:' ? 'https' : 'http';
-        const wsproto = proto === 'https' ? 'wss' : 'ws';
         this.baseUrl = proto + '://' + host;
-        this.wsUrl = wsproto + '://' + host + '/ws';
-        this.ws = null;
-        this.clientId = this._generateId();
+        this.clientId = (typeof SerenityWS !== 'undefined') ? SerenityWS.getClientId() : this._generateId();
         this.listeners = {};
-        this._reconnectTimer = null;
     }
 
     // --- REST ---
@@ -90,41 +86,37 @@ class SFApi {
     // --- WebSocket ---
 
     connect() {
-        if (this._reconnectTimer) {
-            clearTimeout(this._reconnectTimer);
-            this._reconnectTimer = null;
-        }
-        if (this.ws) {
-            try { this.ws.close(); } catch (e) { /* ignore */ }
+        // Bridge from shared SerenityWS — no separate socket
+        if (typeof SerenityWS === 'undefined') {
+            console.warn('SerenityWS not loaded, SFApi WS bridge unavailable');
+            return;
         }
 
-        this.ws = new WebSocket(this.wsUrl + '?clientId=' + this.clientId);
+        const self = this;
 
-        this.ws.onopen = () => {
-            this._emit('connected');
-        };
-
-        this.ws.onmessage = (event) => {
-            if (event.data instanceof Blob) {
-                this._handleBinaryPreview(event.data);
-                return;
+        SerenityWS.on('connected', () => self._emit('connected'));
+        SerenityWS.on('disconnected', () => self._emit('disconnected'));
+        SerenityWS.on('error', () => self._emit('error'));
+        SerenityWS.on('preview', (data) => {
+            if (data && data.blob) {
+                const url = URL.createObjectURL(data.blob);
+                self._emit('preview', { url: url });
             }
-            try {
-                const msg = JSON.parse(event.data);
-                this._emit(msg.type, msg.data);
-            } catch (e) {
-                console.warn('WS parse error:', e);
-            }
-        };
+        });
 
-        this.ws.onclose = () => {
-            this._emit('disconnected');
-            this._reconnectTimer = setTimeout(() => this.connect(), 2000);
-        };
+        // Forward all message types to SFApi listeners
+        SerenityWS.on('status', (d) => self._emit('status', d));
+        SerenityWS.on('executing', (d) => self._emit('executing', d));
+        SerenityWS.on('executed', (d) => self._emit('executed', d));
+        SerenityWS.on('execution_start', (d) => self._emit('execution_start', d));
+        SerenityWS.on('execution_error', (d) => self._emit('execution_error', d));
+        SerenityWS.on('execution_success', (d) => self._emit('execution_success', d));
+        SerenityWS.on('progress', (d) => self._emit('progress', d));
 
-        this.ws.onerror = () => {
-            this._emit('error');
-        };
+        // If already connected, fire immediately
+        if (SerenityWS.isConnected()) {
+            self._emit('connected');
+        }
     }
 
     on(event, callback) {

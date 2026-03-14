@@ -12,7 +12,11 @@ from serenityflow.bridge.types import bchw_to_bhwc, bhwc_to_bchw, unwrap_latent,
     "EmptyLatentImage",
     return_types=("LATENT",),
     category="latent",
-    input_types={"required": {"width": ("INT",), "height": ("INT",), "batch_size": ("INT",)}},
+    input_types={"required": {
+        "width": ("INT", {"default": 512, "min": 16, "max": 16384, "step": 8}),
+        "height": ("INT", {"default": 512, "min": 16, "max": 16384, "step": 8}),
+        "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
+    }},
 )
 def empty_latent_image(width, height, batch_size=1):
     latent = torch.zeros(batch_size, 4, height // 8, width // 8)
@@ -23,7 +27,11 @@ def empty_latent_image(width, height, batch_size=1):
     "EmptySD3LatentImage",
     return_types=("LATENT",),
     category="latent",
-    input_types={"required": {"width": ("INT",), "height": ("INT",), "batch_size": ("INT",)}},
+    input_types={"required": {
+        "width": ("INT", {"default": 1024, "min": 16, "max": 16384, "step": 8}),
+        "height": ("INT", {"default": 1024, "min": 16, "max": 16384, "step": 8}),
+        "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
+    }},
 )
 def empty_sd3_latent(width, height, batch_size=1):
     latent = torch.zeros(batch_size, 16, height // 8, width // 8)

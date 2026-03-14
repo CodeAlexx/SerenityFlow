@@ -11,11 +11,47 @@ class SFPreview {
 
         this.closeBtn.addEventListener('click', () => this.hide());
 
+        // Make header draggable
+        this._initDrag();
+
         // Listen for binary preview (latent)
         this.api.on('preview', (data) => {
             if (data && data.url) {
                 this.showImage(data.url, true);
             }
+        });
+    }
+
+    _initDrag() {
+        const header = document.getElementById('preview-header');
+        let dragging = false, startX, startY, startLeft, startTop;
+
+        header.addEventListener('mousedown', (e) => {
+            if (e.target.tagName === 'BUTTON') return;
+            dragging = true;
+            const rect = this.panel.getBoundingClientRect();
+            startX = e.clientX;
+            startY = e.clientY;
+            startLeft = rect.left;
+            startTop = rect.top;
+            // Switch from bottom/right positioning to top/left
+            this.panel.style.left = rect.left + 'px';
+            this.panel.style.top = rect.top + 'px';
+            this.panel.style.bottom = 'auto';
+            this.panel.style.right = 'auto';
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            this.panel.style.left = (startLeft + dx) + 'px';
+            this.panel.style.top = (startTop + dy) + 'px';
+        });
+
+        document.addEventListener('mouseup', () => {
+            dragging = false;
         });
     }
 

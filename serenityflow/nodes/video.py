@@ -241,13 +241,15 @@ def video_to_frames(images, start_frame=0, end_frame=-1):
     category="video",
     is_output=True,
     input_types={"required": {
-        "images": ("IMAGE",),
+        "video": ("IMAGE",),
         "filename_prefix": ("STRING",),
         "fps": ("FLOAT",),
         "format": ("STRING",),
     }},
 )
-def save_video(images, filename_prefix="SerenityFlow", fps=24.0, format="mp4"):
+def save_video(video, filename_prefix="SerenityFlow", fps=24.0, format="mp4"):
+    # Accept VIDEO dict (from CreateVideo) or raw IMAGE tensor (frames)
+    images = video["frames"] if isinstance(video, dict) else video
     return video_save(images, filename_prefix=filename_prefix, fps=fps, format=format)
 
 

@@ -8,12 +8,21 @@ from serenityflow.nodes.registry import registry
 log = logging.getLogger(__name__)
 
 
+def _list_models(folder: str) -> list[str]:
+    """List available model files for a folder category."""
+    try:
+        import folder_paths
+        return folder_paths.get_filename_list(folder)
+    except (ImportError, Exception):
+        return []
+
+
 @registry.register(
     "CheckpointLoaderSimple",
     return_types=("MODEL", "CLIP", "VAE"),
     return_names=("MODEL", "CLIP", "VAE"),
     category="loaders",
-    input_types={"required": {"ckpt_name": ("STRING",)}},
+    input_types=lambda: {"required": {"ckpt_name": (_list_models("checkpoints") or ["(no models found)"],)}},
 )
 def checkpoint_loader_simple(ckpt_name):
     from serenityflow.bridge.serenity_api import load_checkpoint
@@ -28,7 +37,10 @@ def checkpoint_loader_simple(ckpt_name):
     "UNETLoader",
     return_types=("MODEL",),
     category="loaders",
-    input_types={"required": {"unet_name": ("STRING",), "weight_dtype": ("STRING",)}},
+    input_types=lambda: {"required": {
+        "unet_name": (_list_models("diffusion_models") or _list_models("unet") or ["(no models found)"],),
+        "weight_dtype": (["default", "fp8_e4m3fn", "fp8_e5m2"],),
+    }},
 )
 def unet_loader(unet_name, weight_dtype="default"):
     from serenityflow.bridge.serenity_api import load_diffusion_model
@@ -43,7 +55,10 @@ def unet_loader(unet_name, weight_dtype="default"):
     "CLIPLoader",
     return_types=("CLIP",),
     category="loaders",
-    input_types={"required": {"clip_name": ("STRING",), "type": ("STRING",)}},
+    input_types=lambda: {"required": {
+        "clip_name": (_list_models("clip") or _list_models("text_encoders") or ["(no models found)"],),
+        "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart"],),
+    }},
 )
 def clip_loader(clip_name, type="stable_diffusion"):
     from serenityflow.bridge.serenity_api import load_clip
@@ -58,7 +73,11 @@ def clip_loader(clip_name, type="stable_diffusion"):
     "DualCLIPLoader",
     return_types=("CLIP",),
     category="loaders",
-    input_types={"required": {"clip_name1": ("STRING",), "clip_name2": ("STRING",), "type": ("STRING",)}},
+    input_types=lambda: {"required": {
+        "clip_name1": (_list_models("clip") or _list_models("text_encoders") or ["(no models found)"],),
+        "clip_name2": (_list_models("clip") or _list_models("text_encoders") or ["(no models found)"],),
+        "type": (["sdxl", "sd3", "flux", "hunyuan_video"],),
+    }},
 )
 def dual_clip_loader(clip_name1, clip_name2, type="flux"):
     from serenityflow.bridge.serenity_api import load_dual_clip
@@ -75,7 +94,7 @@ def dual_clip_loader(clip_name1, clip_name2, type="flux"):
     "VAELoader",
     return_types=("VAE",),
     category="loaders",
-    input_types={"required": {"vae_name": ("STRING",)}},
+    input_types=lambda: {"required": {"vae_name": (_list_models("vae") or ["(no models found)"],)}},
 )
 def vae_loader(vae_name):
     from serenityflow.bridge.serenity_api import load_vae
@@ -90,7 +109,7 @@ def vae_loader(vae_name):
     "ControlNetLoader",
     return_types=("CONTROL_NET",),
     category="loaders",
-    input_types={"required": {"control_net_name": ("STRING",)}},
+    input_types=lambda: {"required": {"control_net_name": (_list_models("controlnet") or ["(no models found)"],)}},
 )
 def controlnet_loader(control_net_name):
     from serenityflow.bridge.serenity_api import load_controlnet

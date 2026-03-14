@@ -8,7 +8,6 @@ class SFToolbar {
 
         this.queueBtn = document.getElementById('btn-queue');
         this.interruptBtn = document.getElementById('btn-interrupt');
-        this.clearBtn = document.getElementById('btn-clear-queue');
         this.saveBtn = document.getElementById('btn-save');
         this.loadBtn = document.getElementById('btn-load');
         this.statusIndicator = document.getElementById('status-indicator');
@@ -23,7 +22,6 @@ class SFToolbar {
     _setupButtons() {
         this.queueBtn.addEventListener('click', () => this._queuePrompt());
         this.interruptBtn.addEventListener('click', () => this.api.interrupt());
-        this.clearBtn.addEventListener('click', () => this.api.clearQueue());
         this.saveBtn.addEventListener('click', () => this._saveWorkflow());
         this.loadBtn.addEventListener('click', () => this.fileInput.click());
 
@@ -33,17 +31,7 @@ class SFToolbar {
             this.fileInput.value = '';
         });
 
-        // Template selector
-        const templateSelect = document.getElementById('template-select');
-        if (templateSelect) {
-            templateSelect.addEventListener('change', () => {
-                const url = templateSelect.value;
-                if (url) {
-                    this.loadWorkflowFromUrl(url);
-                    templateSelect.value = '';
-                }
-            });
-        }
+        // Templates are now handled by shell.js dropdown
     }
 
     _setupKeyboard() {
@@ -54,6 +42,12 @@ class SFToolbar {
 
             // Ctrl+Enter - queue
             if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                this._queuePrompt();
+            }
+
+            // Space - quick queue
+            if (e.key === ' ' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
                 e.preventDefault();
                 this._queuePrompt();
             }
@@ -117,7 +111,7 @@ class SFToolbar {
                 // Check for image outputs
                 if (data.output && data.output.images) {
                     data.output.images.forEach(img => {
-                        if (window.sfPreview) {
+                        if (sfPreview) {
                             sfPreview.showImage(this.api.viewUrl(img.filename, img.subfolder, img.type));
                         }
                     });
@@ -130,7 +124,7 @@ class SFToolbar {
                 const node = this.canvas.nodes.get(data.node_id);
                 if (node) node.setExecutionState('error');
             }
-            this._toast('Execution error: ' + (data.exception_message || 'unknown'));
+            this._toast('Execution error: ' + (data.exception_message || 'unknown'), 'error');
         });
 
         this.api.on('progress', (data) => {
@@ -143,17 +137,17 @@ class SFToolbar {
     async _queuePrompt() {
         const prompt = serializeWorkflow(this.canvas);
         if (Object.keys(prompt).length === 0) {
-            this._toast('No nodes to execute');
+            this._toast('No nodes to execute', 'error');
             return;
         }
 
         try {
             const result = await this.api.queuePrompt(prompt);
             if (result.error) {
-                this._toast('Queue error: ' + result.error);
+                this._toast('Queue error: ' + result.error, 'error');
             }
         } catch (e) {
-            this._toast('Failed to queue: ' + e.message);
+            this._toast('Failed to queue: ' + e.message, 'error');
         }
     }
 
@@ -182,7 +176,7 @@ class SFToolbar {
         a.click();
         URL.revokeObjectURL(url);
 
-        this._toast('Workflow saved');
+        this._toast('Workflow saved', 'success');
     }
 
     _loadWorkflow(file) {
@@ -193,7 +187,7 @@ class SFToolbar {
                 loadWorkflow(this.canvas, data, this.canvas.nodeInfo);
                 this._toast('Workflow loaded');
             } catch (err) {
-                this._toast('Failed to load: ' + err.message);
+                this._toast('Failed to load: ' + err.message, 'error');
             }
         };
         reader.readAsText(file);
@@ -204,13 +198,13 @@ class SFToolbar {
      */
     async loadWorkflowFromUrl(url) {
         try {
-            const r = await fetch(url);
+            const r = await fetch(url + '?t=' + Date.now(), {cache: 'no-store'});
             if (!r.ok) throw new Error('HTTP ' + r.status);
             const data = await r.json();
             loadWorkflow(this.canvas, data, this.canvas.nodeInfo);
             this._toast('Workflow loaded');
         } catch (err) {
-            this._toast('Failed to load workflow: ' + err.message);
+            this._toast('Failed to load workflow: ' + err.message, 'error');
         }
     }
 
@@ -219,14 +213,14 @@ class SFToolbar {
         el.className = 'status-' + status;
     }
 
-    _toast(msg) {
+    _toast(msg, variant) {
         const existing = document.querySelector('.toast');
         if (existing) existing.remove();
 
         const div = document.createElement('div');
-        div.className = 'toast';
+        div.className = 'toast' + (variant ? ' toast-' + variant : '');
         div.textContent = msg;
         document.body.appendChild(div);
-        setTimeout(() => div.remove(), 3000);
+        setTimeout(() => div.remove(), variant === 'error' ? 5000 : 3000);
     }
 }

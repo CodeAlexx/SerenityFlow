@@ -142,7 +142,7 @@ def load_checkpoint(path: str, dtype: str = "float16") -> tuple:
         "bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
     }
     torch_dtype = dtype_map.get(dtype, torch.float16)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    gpu_device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Detect architecture
     model_config = s["detect_from_file"](path)
@@ -152,8 +152,46 @@ def load_checkpoint(path: str, dtype: str = "float16") -> tuple:
     arch = model_config.architecture
     logger.info("Detected architecture: %s", arch.value)
 
-    # Load model
-    model = s["load_model"](path, config=model_config, device=device, dtype=torch_dtype)
+    # Load model to CPU first to avoid OOM on large models (e.g. FLUX 22GB)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    model = s["load_model"](path, config=model_config, device="cpu", dtype=torch_dtype)
+
+    # Attach prediction metadata (same as load_diffusion_model does)
+    from serenity.inference.models.loader import _get_adapter
+    adapter = _get_adapter(model_config)
+    if adapter:
+        model._serenity_prediction_type = adapter.get_prediction_type()
+        model._serenity_arch = model_config.architecture
+        model._serenity_model_config = model_config
+        logger.info("Checkpoint prediction type: %s (arch=%s)", model._serenity_prediction_type, arch.value)
+
+    # VRAM-aware partial GPU loading with block-level CPU↔GPU streaming
+    if torch.cuda.is_available():
+        model_size = sum(p.data.nbytes for p in model.parameters())
+        free_vram = torch.cuda.mem_get_info()[0]
+        headroom = 4 * (1024**3)  # 4GB for CLIP + T5 + VAE + activations
+        gpu_budget = max(0, free_vram - headroom)
+        logger.info(
+            "Checkpoint model: %.1f GB, VRAM free: %.1f GB, GPU budget: %.1f GB",
+            model_size / (1024**3), free_vram / (1024**3), gpu_budget / (1024**3),
+        )
+        if model_size > gpu_budget:
+            # Model doesn't fit — use block-level offloading
+            _enable_layer_offloading(model)
+            from serenity.inference.memory.manager import ModelManager
+            manager = _get_model_manager()
+            lm = manager.load(model, budget=gpu_budget)
+            if lm.offloaded_size > 0:
+                logger.info(
+                    "Loaded %.1f GB to GPU, %.1f GB offloaded to CPU (per-layer streaming)",
+                    lm.loaded_size / (1024**3), lm.offloaded_size / (1024**3),
+                )
+            else:
+                logger.info("Fully loaded to GPU (%.1f GB)", lm.loaded_size / (1024**3))
+        else:
+            # Model fits — load fully to GPU
+            model = model.to(gpu_device)
 
     # Load VAE from checkpoint
     sd = s["load_state_dict"](path)
@@ -165,13 +203,30 @@ def load_checkpoint(path: str, dtype: str = "float16") -> tuple:
             from diffusers.models import AutoencoderKL
 
             vae_sd = convert_ldm_vae_to_diffusers(vae_sd)
+            # Squeeze conv1x1 attention weights to linear format (512,512,1,1) → (512,512)
+            for k in list(vae_sd.keys()):
+                if vae_sd[k].ndim == 4 and vae_sd[k].shape[2:] == (1, 1) and 'attentions' in k:
+                    vae_sd[k] = vae_sd[k].squeeze(-1).squeeze(-1)
             latent_ch = 4
             if "decoder.conv_in.weight" in vae_sd:
                 latent_ch = vae_sd["decoder.conv_in.weight"].shape[1]
 
-            vae = AutoencoderKL(latent_channels=latent_ch)
+            # Use canonical SD1.5/SDXL VAE config
+            vae = AutoencoderKL(
+                in_channels=3,
+                out_channels=3,
+                latent_channels=latent_ch,
+                block_out_channels=(128, 256, 512, 512),
+                layers_per_block=2,
+                down_block_types=("DownEncoderBlock2D",) * 4,
+                up_block_types=("UpDecoderBlock2D",) * 4,
+                norm_num_groups=32,
+                act_fn="silu",
+                sample_size=512,
+            )
             safe_load_state_dict(vae, vae_sd)
-            vae = vae.to(device=device, dtype=torch_dtype).eval()
+            # VAE MUST run in fp32 — fp16 causes green/purple artifacts (known diffusers issue)
+            vae = vae.to(device=gpu_device, dtype=torch.float32).eval()
 
             from serenity.inference.models.base import BaseModelAdapter
             # Get adapter for scaling factor
@@ -179,8 +234,8 @@ def load_checkpoint(path: str, dtype: str = "float16") -> tuple:
             adapter = _get_adapter(model_config)
             scaling = adapter.get_vae_scaling_factor() if adapter else 0.18215
 
-            decoder = s["VAEDecoder"](vae_model=vae, dtype=torch_dtype, device=device, scaling_factor=scaling)
-            encoder = s["VAEEncoder"](vae_model=vae, dtype=torch_dtype, device=device, scaling_factor=scaling)
+            decoder = s["VAEDecoder"](vae_model=vae, dtype=torch.float32, device=gpu_device, scaling_factor=scaling)
+            encoder = s["VAEEncoder"](vae_model=vae, dtype=torch.float32, device=gpu_device, scaling_factor=scaling)
             vae_wrapper = VAEWrapper(decoder, encoder)
         except Exception as e:
             logger.warning("Failed to load VAE from checkpoint: %s", e)
@@ -188,28 +243,31 @@ def load_checkpoint(path: str, dtype: str = "float16") -> tuple:
     # Load text encoders
     text_mgr = s["TextEncoderManager"]()
     try:
-        text_mgr.load_for_model(arch, dtype=torch_dtype, device=device)
+        text_mgr.load_for_model(arch, dtype=torch_dtype, device=gpu_device)
     except Exception as e:
         logger.warning("Failed to load text encoders for %s: %s", arch.value, e)
 
-    clip_wrapper = CLIPWrapper(text_mgr, arch, torch_dtype, device)
+    clip_wrapper = CLIPWrapper(text_mgr, arch, torch_dtype, gpu_device)
 
     return (model, clip_wrapper, vae_wrapper)
 
 
 def load_diffusion_model(path: str, dtype: str = "default") -> nn.Module:
-    """Load standalone diffusion model (UNet/DiT).
+    """Load standalone diffusion model (UNet/DiT) with VRAM-aware offloading.
+
+    Loads model to CPU first, then uses ModelManager for budget-aware partial
+    GPU loading.  Layers that don't fit in VRAM are kept on CPU and streamed
+    to GPU on-demand during forward passes (per-layer offloading).
 
     Attaches _serenity_prediction_type and _serenity_arch to the model
     so the sampler knows how to handle it.
     """
     s = _get()
     torch_dtype = torch.bfloat16 if dtype == "default" else _parse_dtype(dtype)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Detect architecture for prediction type
+    # Always load to CPU first to avoid OOM
     model_config = s["detect_from_file"](path)
-    model = s["load_model"](path, device=device, dtype=torch_dtype)
+    model = s["load_model"](path, device="cpu", dtype=torch_dtype)
 
     if model_config is not None:
         from serenity.inference.models.loader import _get_adapter
@@ -220,7 +278,137 @@ def load_diffusion_model(path: str, dtype: str = "default") -> nn.Module:
             model._serenity_model_config = model_config
             logger.info("Model prediction type: %s", model._serenity_prediction_type)
 
+    # Partially load to GPU, keeping headroom for text encoders + VAE (~4GB).
+    # Blocks that don't fit get CPU↔GPU streaming hooks.
+    if torch.cuda.is_available():
+        model_size = sum(p.data.nbytes for p in model.parameters())
+        free_vram = torch.cuda.mem_get_info()[0]
+        headroom = 4 * (1024**3)  # 4GB for CLIP + T5 + VAE + activations
+        gpu_budget = max(0, free_vram - headroom)
+        logger.info(
+            "Model size: %.1f GB, VRAM free: %.1f GB, GPU budget: %.1f GB (%.1f GB headroom)",
+            model_size / (1024**3), free_vram / (1024**3),
+            gpu_budget / (1024**3), headroom / (1024**3),
+        )
+        _enable_layer_offloading(model)
+        # Move as much as fits within budget
+        from serenity.inference.memory.manager import ModelManager
+        manager = _get_model_manager()
+        lm = manager.load(model, budget=gpu_budget)
+        if lm.offloaded_size > 0:
+            logger.info(
+                "Loaded %.1f GB to GPU, %.1f GB offloaded to CPU (per-layer streaming)",
+                lm.loaded_size / (1024**3), lm.offloaded_size / (1024**3),
+            )
+        else:
+            logger.info("Fully loaded to GPU (%.1f GB)", lm.loaded_size / (1024**3))
+
     return model
+
+
+# Singleton model manager for the SerenityFlow process
+_model_manager = None
+
+
+def _get_model_manager():
+    """Get or create the singleton ModelManager."""
+    global _model_manager
+    if _model_manager is None:
+        from serenity.inference.memory.manager import ModelManager
+        _model_manager = ModelManager()
+    return _model_manager
+
+
+def _enable_layer_offloading(model: nn.Module):
+    """Enable offload_enabled on all leaf modules that support the OffloadMixin.
+
+    For models NOT built with OffloadMixin layers, install forward hooks that
+    stream weights GPU↔CPU per-layer (ComfyUI-style block offloading).
+    """
+    has_offload_layers = False
+    for mod in model.modules():
+        if hasattr(mod, 'offload_enabled') and hasattr(mod, '_init_offload'):
+            has_offload_layers = True
+            break
+
+    if has_offload_layers:
+        # Model uses OffloadMixin layers — just enable them
+        for mod in model.modules():
+            if hasattr(mod, 'offload_enabled'):
+                mod.offload_enabled = True
+        return
+
+    # Fallback: install forward hooks on transformer blocks for GPU↔CPU streaming.
+    # This handles standard nn.Linear/nn.LayerNorm models (e.g. diffusers-style).
+    blocks = _find_transformer_blocks(model)
+    if not blocks:
+        logger.warning("No transformer blocks found for offloading — model may OOM")
+        return
+
+    device = torch.device("cuda")
+    logger.info("Installing block-level CPU offload hooks on %d blocks", len(blocks))
+
+    def make_pre_hook(block):
+        def hook(module, args):
+            module.to(device, non_blocking=True)
+            if torch.cuda.is_available():
+                torch.cuda.current_stream().synchronize()
+        return hook
+
+    def make_post_hook(block):
+        def hook(module, args, output):
+            module.to("cpu", non_blocking=True)
+        return hook
+
+    # Collect all parameters belonging to blocks so we can identify non-block params
+    block_param_ids = set()
+    for block in blocks:
+        for p in block.parameters():
+            block_param_ids.add(id(p))
+
+    # Move non-block params (embeddings, projections, norms) to GPU — they're small
+    non_block_bytes = 0
+    for p in model.parameters():
+        if id(p) not in block_param_ids:
+            non_block_bytes += p.data.nbytes
+            p.data = p.data.to(device, non_blocking=True)
+
+    logger.info(
+        "Moved %.1f MB of non-block params (embeddings/projections/norms) to GPU",
+        non_block_bytes / (1024**2),
+    )
+
+    for block in blocks:
+        block.register_forward_pre_hook(make_pre_hook(block))
+        block.register_forward_hook(make_post_hook(block))
+
+
+def _find_transformer_blocks(model: nn.Module) -> list[nn.Module]:
+    """Find repeated transformer/dit blocks suitable for block-level offloading."""
+    # Common patterns: .transformer_blocks, .joint_transformer_blocks,
+    # .single_transformer_blocks, .layers, .blocks
+    block_attr_names = [
+        "transformer_blocks", "joint_transformer_blocks",
+        "single_transformer_blocks", "layers", "blocks",
+    ]
+
+    found = []
+    for name, mod in model.named_modules():
+        if isinstance(mod, nn.ModuleList) and len(mod) >= 4:
+            # A ModuleList with 4+ children is likely a repeated block stack
+            parent_name = name.split(".")[-1] if "." in name else name
+            if parent_name in block_attr_names or len(mod) >= 10:
+                found.extend(list(mod))
+
+    # Deduplicate (in case nested finds overlap)
+    seen = set()
+    unique = []
+    for block in found:
+        if id(block) not in seen:
+            seen.add(id(block))
+            unique.append(block)
+
+    return unique
 
 
 def load_vae(path: str) -> VAEWrapper:
@@ -382,7 +570,9 @@ def _load_clip_from_sd(text_mgr, enc_type, sd: dict, dtype, device: str) -> None
         tok_kwargs["subfolder"] = "tokenizer_2"
     encoder._tokenizer = CLIPTokenizer.from_pretrained(config_repo, **tok_kwargs)
 
-    # Model from config + local weights
+    # Model from config + local weights.
+    # Create on CPU (not meta) — CLIP is small (~350MB) and meta device
+    # breaks non-persistent buffers like position_ids.
     if enc_type == TextEncoderType.CLIP_G:
         from transformers import CLIPTextModelWithProjection, CLIPTextConfig
         config = CLIPTextConfig.from_pretrained(config_repo, subfolder="text_encoder_2")
@@ -392,7 +582,7 @@ def _load_clip_from_sd(text_mgr, enc_type, sd: dict, dtype, device: str) -> None
         config = CLIPTextConfig.from_pretrained(config_repo)
         model = CLIPTextModel(config)
 
-    model.load_state_dict(sd, strict=False)
+    model.load_state_dict(sd, strict=False, assign=True)
     model = model.to(device=device, dtype=dtype).eval()
     encoder._model = model
     encoder._dtype = dtype
@@ -414,10 +604,11 @@ def _load_t5_from_sd(text_mgr, sd: dict, dtype, device: str) -> None:
     # Tokenizer from HF cache
     encoder._tokenizer = AutoTokenizer.from_pretrained(config_repo)
 
-    # Model from config + local weights
+    # Model from config + local weights.
+    # T5-XXL is ~10GB in fp16 — create on CPU, load weights, convert dtype.
     config = AutoConfig.from_pretrained(config_repo)
     model = T5EncoderModel(config)
-    model.load_state_dict(sd, strict=False)
+    model.load_state_dict(sd, strict=False, assign=True)
     model = model.to(device=device, dtype=dtype).eval()
     encoder._model = model
     encoder._dtype = dtype
@@ -495,7 +686,7 @@ def encode_text(clip: CLIPWrapper, text: str) -> list[dict]:
             clip_skip=clip.clip_skip,
         )
     except Exception as e:
-        logger.warning("Text encoding failed: %s. Using zeros.", e)
+        logger.warning("Text encoding failed: %s. Using zeros.", e, exc_info=True)
         return [{"cross_attn": torch.zeros(1, 77, 768), "pooled_output": torch.zeros(1, 768)}]
 
     cond = result.get("cond")
@@ -571,7 +762,7 @@ def sample(
     if pooled_uncond is not None:
         pooled_uncond = pooled_uncond.to(device)
 
-    logger.debug("Conditioning shapes: cond=%s, uncond=%s, pooled_cond=%s, pooled_uncond=%s",
+    logger.info("Conditioning shapes: cond=%s, uncond=%s, pooled_cond=%s, pooled_uncond=%s",
                  cond_tensor.shape if cond_tensor is not None else None,
                  uncond_tensor.shape if uncond_tensor is not None else None,
                  pooled_cond.shape if pooled_cond is not None else None,
@@ -597,6 +788,9 @@ def sample(
         logger.info("Flux seq_len=%d (from %dx%d latent)", actual_seq_len, lat_h, lat_w)
 
     prediction = s["get_prediction"](prediction_type, **prediction_kwargs)
+    _is_flux_model = hasattr(model, "config") and hasattr(model.config, "joint_attention_dim")
+    logger.info("Sample: prediction=%s, is_flux=%s, latent=%s, steps=%d, cfg=%.1f, scheduler=%s",
+                prediction_type, _is_flux_model, latent.shape, steps, cfg, scheduler)
 
     # Determine sigma range
     if prediction_type in ("flow", "flow_flux"):
@@ -655,6 +849,16 @@ def sample(
     # Detect if model is a Flux DiT (uses keyword-only args) vs UNet (positional timestep)
     _is_flux = hasattr(model, "config") and hasattr(model.config, "joint_attention_dim")
 
+    # Build sigma→timestep lookup for diffusers UNet models (SD1.5, SDXL)
+    # These models expect discrete timesteps (0-999), not continuous sigmas.
+    _log_sigmas = None
+    if not _is_flux:
+        # Standard diffusion schedule: beta_start=0.00085, beta_end=0.012, 1000 steps
+        betas = torch.linspace(0.00085 ** 0.5, 0.012 ** 0.5, 1000) ** 2
+        alphas = 1.0 - betas
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+        _log_sigmas = ((1 - alphas_cumprod) / alphas_cumprod).sqrt().log().to(device)
+
     # Flux latent packing: (B, C, H, W) → (B, H/2*W/2, C*4) and position IDs
     _flux_img_ids = None
     _flux_txt_ids = None
@@ -676,6 +880,17 @@ def sample(
         # txt_ids: (txt_len, 3) — zeros for text positions
         _flux_txt_ids = torch.zeros(txt_len, 3, device=device, dtype=model_dtype)
 
+    # SDXL time_ids: [orig_h, orig_w, crop_top, crop_left, target_h, target_w]
+    _sdxl_time_ids = None
+    if not _is_flux and latent.ndim == 4:
+        _, _, lh, lw = latent.shape
+        # VAE scale factor is 8 for SDXL
+        target_h, target_w = lh * 8, lw * 8
+        _sdxl_time_ids = torch.tensor(
+            [[target_h, target_w, 0, 0, target_h, target_w]],
+            device=device, dtype=model_dtype,
+        )
+
     def _build_model_kwargs(enc_hidden, pooled):
         """Build model forward kwargs for this model type."""
         kwargs: dict[str, Any] = {}
@@ -687,14 +902,39 @@ def sample(
                 kwargs["pooled_projections"] = pooled.to(dtype=model_dtype, device=device)
             else:
                 kwargs["pooled_projections"] = torch.zeros(1, 768, device=device, dtype=model_dtype)
-            # Flux Dev requires guidance input (guidance scale as tensor)
-            kwargs["guidance"] = torch.tensor([cfg], device=device, dtype=model_dtype)
+            # Flux Dev guidance embedding (separate from CFG — CFG should be 1.0).
+            # Default 3.5 for Dev, 0.0 for Schnell.
+            _flux_guidance = 3.5
+            if hasattr(model, "config") and getattr(model.config, "guidance_embeds", True) is False:
+                _flux_guidance = 0.0
+            kwargs["guidance"] = torch.tensor([_flux_guidance], device=device, dtype=model_dtype)
             # Position IDs for RoPE
             kwargs["img_ids"] = _flux_img_ids
             kwargs["txt_ids"] = _flux_txt_ids
         elif pooled is not None:
-            kwargs["pooled_projections"] = pooled.to(dtype=model_dtype, device=device)
+            # UNet2DConditionModel expects pooled in added_cond_kwargs, not as direct kwarg
+            pooled_t = pooled.to(dtype=model_dtype, device=device)
+            # SDXL needs text_embeds + time_ids in added_cond_kwargs
+            kwargs["added_cond_kwargs"] = {
+                "text_embeds": pooled_t,
+                "time_ids": _sdxl_time_ids,
+            }
         return kwargs
+
+    def _sigma_to_discrete_timestep(sigma):
+        """Convert continuous sigma to discrete diffusers timestep (0-999)."""
+        log_sigma = sigma.log()
+        # Find closest index in the log_sigmas table
+        dists = log_sigma - _log_sigmas
+        low_idx = dists.ge(0).cumsum(dim=0).argmax().clamp(max=_log_sigmas.shape[0] - 2)
+        high_idx = low_idx + 1
+        low = _log_sigmas[low_idx]
+        high = _log_sigmas[high_idx]
+        # Interpolate between discrete timesteps
+        w = (low - log_sigma) / (low - high)
+        w = w.clamp(0, 1)
+        t = (1 - w) * low_idx + w * high_idx
+        return t.view(sigma.shape)
 
     def _call_model(inp, timestep, **kwargs):
         """Call model with the right arg convention."""
@@ -703,7 +943,9 @@ def sample(
             return model(inp, timestep=timestep, **kwargs)
         else:
             # UNet2DConditionModel: forward(sample, timestep, encoder_hidden_states=, ...)
-            return model(inp, timestep, **kwargs)
+            # Convert continuous sigma to discrete timestep (0-999)
+            discrete_t = _sigma_to_discrete_timestep(timestep) if _log_sigmas is not None else timestep
+            return model(inp, discrete_t, **kwargs)
 
     # Flux Dev: guidance is an embedding, NOT CFG. Never run uncond pass.
     _use_cfg = not _is_flux and uncond_tensor is not None and cfg > 1.0
@@ -762,8 +1004,8 @@ def sample(
         FLUX1_SHIFT_FACTOR = 0.1159
         result = result + FLUX1_SHIFT_FACTOR
 
-    # Offload model to CPU after sampling to free GPU for VAE
-    model.to("cpu")
+    # Free GPU for VAE decode. Don't model.to("cpu") — that breaks
+    # block offload hooks on subsequent runs. Just clear the cache.
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 

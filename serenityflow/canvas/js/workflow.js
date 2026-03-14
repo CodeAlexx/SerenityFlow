@@ -216,6 +216,9 @@ function loadComfyUIGraph(canvas, graphData, nodeInfo) {
     canvas.nodeLayer.batchDraw();
     canvas.connectionLayer.batchDraw();
     canvas.centerView();
+
+    // Update topbar model badge from the primary loader node
+    _updateModelBadgeFromWorkflow(allNodes);
 }
 
 /**
@@ -332,4 +335,51 @@ function deserializeWorkflow(canvas, prompt, nodePositions, nodeInfo) {
     }
 
     canvas.centerView();
+
+    // Update topbar model badge from the workflow
+    _updateModelBadgeFromPrompt(prompt);
+}
+
+/**
+ * Scan litegraph nodes for a model loader and update the topbar badge.
+ */
+function _updateModelBadgeFromWorkflow(nodes) {
+    var loaderTypes = ['CheckpointLoaderSimple', 'UNETLoader', 'LTXVLoader'];
+    for (var i = 0; i < nodes.length; i++) {
+        var ntype = nodes[i].type || '';
+        if (loaderTypes.indexOf(ntype) < 0) continue;
+        var wvals = nodes[i].widgets_values;
+        if (wvals && wvals.length > 0 && typeof wvals[0] === 'string') {
+            _setModelBadge(wvals[0]);
+            return;
+        }
+    }
+}
+
+/**
+ * Scan API-format prompt for a model loader and update the topbar badge.
+ */
+function _updateModelBadgeFromPrompt(prompt) {
+    var loaderTypes = ['CheckpointLoaderSimple', 'UNETLoader', 'LTXVLoader'];
+    for (var id in prompt) {
+        var nd = prompt[id];
+        if (!nd || !nd.class_type) continue;
+        if (loaderTypes.indexOf(nd.class_type) < 0) continue;
+        var inputs = nd.inputs || {};
+        var modelName = inputs.ckpt_name || inputs.unet_name || inputs.checkpoint_path;
+        if (modelName && typeof modelName === 'string') {
+            _setModelBadge(modelName);
+            return;
+        }
+    }
+}
+
+/**
+ * Set the topbar model badge text.
+ */
+function _setModelBadge(modelName) {
+    var badge = document.querySelector('.model-badge');
+    if (!badge) return;
+    var short = modelName.split('/').pop().replace(/\.\w+$/, '');
+    badge.textContent = short;
 }

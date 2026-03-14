@@ -92,32 +92,38 @@ class SFWidgetManager {
             listening: true,
         });
 
-        // Label
+        // Label (left half)
+        const labelWidth = Math.floor(width * 0.45);
         const label = new Konva.Text({
             x: 6,
             y: 5,
             text: inputName,
             fontSize: 10,
             fill: '#808090',
+            width: labelWidth,
+            ellipsis: true,
+            wrap: 'none',
             listening: false,
         });
 
-        // Value display
+        // Value display (right half)
+        const valueWidth = width - labelWidth - 12;
         const valueText = new Konva.Text({
-            x: width - 6,
+            x: labelWidth + 6,
             y: 5,
             text: String(value),
             fontSize: 10,
             fill: '#e0e0e0',
+            width: valueWidth,
             align: 'right',
+            ellipsis: true,
+            wrap: 'none',
             listening: false,
         });
 
-        // Right-align value text
         const updateValueText = () => {
             const formatted = type === 'INT' ? String(Math.round(value)) : value.toFixed(2);
             valueText.text(formatted);
-            valueText.x(width - 6 - valueText.width());
         };
         updateValueText();
 
@@ -198,23 +204,28 @@ class SFWidgetManager {
             listening: true,
         });
 
+        const strLabelWidth = Math.floor(width * 0.3);
         const label = new Konva.Text({
             x: 6,
-            y: 3,
+            y: multiline ? 3 : 5,
             text: inputName,
-            fontSize: 9,
-            fill: '#606070',
+            fontSize: multiline ? 9 : 10,
+            fill: multiline ? '#606070' : '#808090',
+            width: multiline ? width - 12 : strLabelWidth,
+            ellipsis: true,
+            wrap: 'none',
             listening: false,
         });
 
         const valueText = new Konva.Text({
-            x: 6,
+            x: multiline ? 6 : (strLabelWidth + 6),
             y: multiline ? 14 : 5,
-            width: width - 12,
+            width: multiline ? (width - 12) : (width - strLabelWidth - 12),
             height: multiline ? h - 16 : h - 6,
             text: value || '(empty)',
             fontSize: 10,
             fill: value ? '#e0e0e0' : '#505060',
+            align: multiline ? 'left' : 'right',
             ellipsis: true,
             wrap: multiline ? 'word' : 'none',
             listening: false,
@@ -333,24 +344,32 @@ class SFWidgetManager {
             listening: true,
         });
 
+        const comboLabelWidth = Math.floor(width * 0.35);
         const label = new Konva.Text({
             x: 6,
             y: 5,
             text: inputName,
             fontSize: 10,
             fill: '#808090',
+            width: comboLabelWidth,
+            ellipsis: true,
+            wrap: 'none',
             listening: false,
         });
 
+        const comboValueWidth = width - comboLabelWidth - 22; // 22 for arrow + padding
         const valueText = new Konva.Text({
-            x: width - 6,
+            x: comboLabelWidth + 6,
             y: 5,
             text: String(value),
             fontSize: 10,
             fill: '#e0e0e0',
+            width: comboValueWidth,
+            align: 'right',
+            ellipsis: true,
+            wrap: 'none',
             listening: false,
         });
-        valueText.x(width - 6 - valueText.width());
 
         // Arrow indicator
         const arrow = new Konva.Text({
@@ -372,7 +391,6 @@ class SFWidgetManager {
             this._openComboOverlay(node, bg, inputName, value, options, width, (newVal) => {
                 value = newVal;
                 valueText.text(String(value));
-                valueText.x(width - 20 - valueText.width());
                 node.setWidgetValue(inputName, value);
                 node.canvas.nodeLayer.batchDraw();
             });
@@ -384,7 +402,6 @@ class SFWidgetManager {
             setValue: (v) => {
                 value = v;
                 valueText.text(String(value));
-                valueText.x(width - 20 - valueText.width());
             },
             height: WIDGET_HEIGHT,
         };

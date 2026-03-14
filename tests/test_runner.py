@@ -83,8 +83,8 @@ class TestLinkResolution:
             runner.execute(graph)
 
             assert captured["seed"] == 42
-            assert captured["steps"] == 4
-            assert captured["cfg"] == 1.0
+            assert captured["steps"] == 20
+            assert captured["cfg"] == 3.5
             assert captured["sampler_name"] == "euler"
         finally:
             registry.get("KSampler").fn = original_fn

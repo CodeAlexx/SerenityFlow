@@ -57,10 +57,13 @@ def load_image(image):
     input_types={"required": {"images": ("IMAGE",), "filename_prefix": ("STRING",)}},
 )
 def save_image(images, filename_prefix="SerenityFlow"):
-    from serenityflow.bridge.model_paths import get_model_paths
-
-    paths = get_model_paths()
-    output_dir = os.path.join(paths.base_dir, "output")
+    # Use folder_paths for consistency with server's /view endpoint
+    try:
+        import folder_paths
+        output_dir = folder_paths.get_output_directory()
+    except ImportError:
+        from serenityflow.bridge.model_paths import get_model_paths
+        output_dir = os.path.join(get_model_paths().base_dir, "output")
     os.makedirs(output_dir, exist_ok=True)
 
     results = []
@@ -89,10 +92,12 @@ def save_image(images, filename_prefix="SerenityFlow"):
     input_types={"required": {"images": ("IMAGE",)}},
 )
 def preview_image(images):
-    from serenityflow.bridge.model_paths import get_model_paths
-
-    paths = get_model_paths()
-    temp_dir = os.path.join(paths.base_dir, "temp")
+    try:
+        import folder_paths
+        temp_dir = folder_paths.get_temp_directory()
+    except ImportError:
+        from serenityflow.bridge.model_paths import get_model_paths
+        temp_dir = os.path.join(get_model_paths().base_dir, "temp")
     os.makedirs(temp_dir, exist_ok=True)
 
     results = []

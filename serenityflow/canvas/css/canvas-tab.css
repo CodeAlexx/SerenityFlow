@@ -1,0 +1,469 @@
+/* canvas-tab.css — Canvas tab layout, tools, layers, brush settings */
+
+/* ── Layout ── */
+.cv-layout {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: var(--shell-font);
+}
+
+/* ── Left Panel ── */
+.cv-left {
+    width: 180px;
+    min-width: 180px;
+    background: var(--shell-bg-surface);
+    border-right: 1px solid var(--shell-border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    z-index: 2;
+}
+
+/* ── Tool Rail ── */
+.cv-tools {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 8px;
+    border-bottom: 1px solid var(--shell-border);
+}
+
+.cv-tool-btn {
+    width: 40px;
+    height: 40px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--shell-text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 150ms ease, color 150ms ease;
+    padding: 0;
+    font-family: var(--shell-font);
+}
+.cv-tool-btn:hover {
+    background: var(--shell-bg-hover);
+    color: var(--shell-text);
+}
+.cv-tool-btn.active {
+    background: var(--shell-accent);
+    color: #fff;
+}
+.cv-tool-btn svg {
+    width: 20px;
+    height: 20px;
+    pointer-events: none;
+}
+
+/* ── Layer Panel ── */
+.cv-layers {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.cv-layers-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+}
+
+.cv-layers-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--shell-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.cv-layers-add {
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--shell-border);
+    border-radius: 4px;
+    background: var(--shell-bg-panel);
+    color: var(--shell-text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0;
+    font-family: var(--shell-font);
+}
+.cv-layers-add:hover {
+    border-color: var(--shell-text-muted);
+    color: var(--shell-text);
+}
+
+.cv-layer-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 6px 6px;
+}
+
+.cv-layer-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--shell-text);
+    border-left: 2px solid transparent;
+}
+.cv-layer-row:hover {
+    background: var(--shell-bg-hover);
+}
+.cv-layer-row.active {
+    background: rgba(108, 106, 245, 0.15);
+    border-left-color: var(--shell-accent);
+}
+
+.cv-layer-eye {
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: none;
+    color: var(--shell-text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    flex-shrink: 0;
+}
+.cv-layer-eye:hover {
+    color: var(--shell-text);
+}
+.cv-layer-eye.hidden-layer {
+    opacity: 0.35;
+}
+.cv-layer-eye svg {
+    width: 14px;
+    height: 14px;
+    pointer-events: none;
+}
+
+.cv-layer-badge {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    color: #fff;
+    flex-shrink: 0;
+}
+.cv-layer-badge.raster  { background: #3b82f6; }
+.cv-layer-badge.mask    { background: #ef4444; }
+.cv-layer-badge.control { background: var(--shell-accent); }
+
+.cv-layer-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ── Center — Canvas Stage ── */
+.cv-center {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    background: #13131b;
+    min-width: 0;
+    z-index: 1;
+}
+
+#canvas-stage-container {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+}
+
+#canvas-stage-container canvas {
+    display: block;
+}
+
+/* ── Right Panel ── */
+.cv-right {
+    width: 260px;
+    min-width: 260px;
+    background: var(--shell-bg-surface);
+    border-left: 1px solid var(--shell-border);
+    padding: 12px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    z-index: 2;
+}
+
+.cv-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--shell-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 8px;
+}
+
+.cv-separator {
+    border: none;
+    border-top: 1px solid var(--shell-border);
+    margin: 0;
+}
+
+/* Brush settings */
+.cv-brush-settings {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.cv-setting-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.cv-setting-label {
+    min-width: 50px;
+    font-size: 12px;
+    color: var(--shell-text-muted);
+    flex-shrink: 0;
+}
+
+.cv-setting-value {
+    min-width: 32px;
+    font-size: 12px;
+    color: var(--shell-text);
+    text-align: right;
+    flex-shrink: 0;
+}
+
+.cv-range {
+    flex: 1;
+    accent-color: var(--shell-accent);
+    height: 4px;
+}
+
+.cv-color-swatch {
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--shell-border);
+    border-radius: 4px;
+    cursor: pointer;
+    padding: 0;
+    background: none;
+    flex-shrink: 0;
+}
+.cv-color-swatch::-webkit-color-swatch-wrapper { padding: 0; }
+.cv-color-swatch::-webkit-color-swatch { border: none; border-radius: 3px; }
+
+/* Generation settings */
+.cv-gen-settings {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.cv-textarea {
+    width: 100%;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    border-radius: 6px;
+    padding: 10px;
+    color: var(--shell-text);
+    font-size: 13px;
+    font-family: var(--shell-font);
+    resize: none;
+    box-sizing: border-box;
+    transition: border-color 150ms ease;
+}
+.cv-textarea:focus {
+    outline: none;
+    border-color: var(--shell-accent);
+}
+.cv-textarea::placeholder {
+    color: var(--shell-text-muted);
+}
+
+.cv-select {
+    width: 100%;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    color: var(--shell-text);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-family: var(--shell-font);
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b6b80' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    cursor: pointer;
+    box-sizing: border-box;
+}
+.cv-select:focus {
+    outline: none;
+    border-color: var(--shell-accent);
+}
+
+.cv-number-input {
+    width: 56px;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    color: var(--shell-text);
+    border-radius: 4px;
+    padding: 4px 6px;
+    font-size: 13px;
+    font-family: var(--shell-font);
+    text-align: center;
+}
+.cv-number-input:focus {
+    outline: none;
+    border-color: var(--shell-accent);
+}
+
+.cv-helper-text {
+    font-size: 10px;
+    color: var(--shell-text-muted);
+    font-style: italic;
+}
+
+/* Invoke button */
+.cv-invoke-btn {
+    width: 100%;
+    height: 44px;
+    background: var(--shell-accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: var(--shell-font);
+    cursor: pointer;
+    transition: background 150ms ease, transform 150ms ease;
+}
+.cv-invoke-btn:hover {
+    background: var(--shell-accent-hover);
+}
+.cv-invoke-btn:active {
+    transform: scale(0.98);
+}
+.cv-invoke-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.85;
+}
+@keyframes cv-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+.cv-invoke-btn.invoking {
+    animation: cv-pulse 1s infinite;
+}
+
+/* Import image button */
+.cv-import-btn {
+    width: 100%;
+    height: 36px;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    color: var(--shell-text-muted);
+    border-radius: 6px;
+    font-size: 12px;
+    font-family: var(--shell-font);
+    cursor: pointer;
+    transition: border-color 150ms ease, color 150ms ease;
+}
+.cv-import-btn:hover {
+    border-color: var(--shell-text-muted);
+    color: var(--shell-text);
+}
+
+/* Progress bar */
+.cv-progress {
+    width: 100%;
+    height: 3px;
+    background: transparent;
+    overflow: hidden;
+    border-radius: 2px;
+}
+.cv-progress-bar {
+    height: 100%;
+    width: 0%;
+    background: var(--shell-accent);
+    transition: width 200ms ease;
+}
+@keyframes cv-shimmer {
+    from { background-position: -200% 0; }
+    to { background-position: 200% 0; }
+}
+.cv-progress.active .cv-progress-bar {
+    background: linear-gradient(90deg,
+        var(--shell-accent) 0%,
+        var(--shell-accent-hover) 50%,
+        var(--shell-accent) 100%);
+    background-size: 200% 100%;
+    animation: cv-shimmer 1.5s linear infinite;
+}
+
+.cv-progress-label {
+    font-size: 11px;
+    color: var(--shell-text-muted);
+    text-align: center;
+    display: none;
+}
+.cv-progress-label.visible {
+    display: block;
+}
+
+/* Error banner */
+.cv-error-banner {
+    background: var(--shell-error);
+    color: #1a1a24;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    opacity: 0;
+    transition: opacity 200ms ease;
+    pointer-events: none;
+    text-align: center;
+}
+.cv-error-banner.visible {
+    opacity: 1;
+}
+
+/* Duration hint for video controls */
+.cv-duration-hint {
+    font-size: 11px;
+    color: var(--shell-text-muted);
+    text-align: center;
+    margin-top: 2px;
+}
+
+/* Video overlay on canvas */
+#cv-video-overlay video {
+    border-radius: 4px;
+}
+
+/* ── Topbar model badge truncation ── */
+.model-badge {
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}

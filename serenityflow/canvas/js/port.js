@@ -91,11 +91,12 @@ function createInputPort(node, slotIndex, x, y, typeName, label) {
         listening: false,
     });
 
-    // Label
+    // Label (skip if empty — widget provides its own label)
+    const labelText = label || typeName;
     const text = new Konva.Text({
         x: 10,
         y: -6,
-        text: label || typeName,
+        text: label === '' ? '' : labelText,
         fontSize: 10,
         fill: '#c0c0d0',
         listening: false,
@@ -103,7 +104,7 @@ function createInputPort(node, slotIndex, x, y, typeName, label) {
 
     group.add(hitCircle);
     group.add(circle);
-    group.add(text);
+    if (label !== '') group.add(text);
 
     // Hover + connection drag highlight
     hitCircle.on('mouseenter', () => {

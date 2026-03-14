@@ -2,7 +2,7 @@
  * Node rendering: header, ports, widgets, drag, selection highlight.
  */
 
-const NODE_MIN_WIDTH = 180;
+const NODE_MIN_WIDTH = 220;
 const NODE_HEADER_HEIGHT = 24;
 const NODE_PORT_SPACING = 24;
 const NODE_WIDGET_X_PAD = 14;
@@ -188,17 +188,30 @@ class SFNode {
     }
 
     _calcWidth() {
-        // Estimate based on name lengths
-        let maxLen = this.nodeType.length * 7 + 20;
+        // Estimate based on name lengths and widget content
+        let maxLen = this.nodeType.length * 7 + 30;
 
         for (const inp of this.inputs) {
-            maxLen = Math.max(maxLen, inp.name.length * 6 + 40);
+            // For widgets: label + value need space side by side
+            if (this._isWidgetType(inp.type)) {
+                let valueLen = inp.name.length * 6;
+                // Add space for combo option text or default value
+                if (Array.isArray(inp.config) && Array.isArray(inp.config[0])) {
+                    const longest = inp.config[0].reduce((a, b) => a.length > b.length ? a : b, '');
+                    valueLen = (inp.name.length + longest.length + 4) * 6;
+                } else {
+                    valueLen = inp.name.length * 6 + 60; // room for number/text value
+                }
+                maxLen = Math.max(maxLen, valueLen + NODE_WIDGET_X_PAD * 2);
+            } else {
+                maxLen = Math.max(maxLen, inp.name.length * 6 + 40);
+            }
         }
         for (const out of this.outputs) {
             maxLen = Math.max(maxLen, out.name.length * 6 + 40);
         }
 
-        return Math.max(NODE_MIN_WIDTH, Math.min(maxLen, 300));
+        return Math.max(NODE_MIN_WIDTH, Math.min(maxLen, 360));
     }
 
     _build() {

@@ -592,9 +592,27 @@ def register_routes(app: FastAPI):
     async def get_user_css():
         return Response("", media_type="text/css")
 
+    # === Templates ===
+
+    @app.get("/templates")
+    async def list_templates():
+        templates_dir = os.path.join(os.path.dirname(__file__), "..", "canvas", "workflows")
+        templates_dir = os.path.realpath(templates_dir)
+        if not os.path.isdir(templates_dir):
+            return JSONResponse([])
+        files = sorted(
+            f for f in os.listdir(templates_dir)
+            if f.endswith(".json") and os.path.isfile(os.path.join(templates_dir, f))
+        )
+        result = []
+        for f in files:
+            name = os.path.splitext(f)[0].replace("_", " ").title()
+            result.append({"name": name, "file": f})
+        return JSONResponse(result)
+
     # === SerenityFlow extensions ===
 
-    @app.get("/api/sf/timeline/{prompt_id}")
+    @app.get("/sf/timeline/{prompt_id}")
     async def get_timeline(prompt_id: str):
         state = _state()
         if prompt_id in state.history:

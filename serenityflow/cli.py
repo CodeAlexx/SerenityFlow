@@ -69,14 +69,31 @@ def run_workflow(args):
     # Parse workflow
     with open(args.workflow) as f:
         data = json.load(f)
-    prompt = parse_workflow(data)
+    prompt = parse_workflow(data, registry=registry)
 
     # Build graph
     graph = WorkflowGraph(prompt, registry=registry)
     log.info("Graph: %d nodes, %d output nodes", len(graph.all_node_ids()), len(graph.get_output_nodes()))
 
+    # Create Stagehand coordinator for VRAM-managed block-swap
+    coordinator = None
+    if not args.stagehand_disable:
+        try:
+            from serenityflow.memory.coordinator import StagehandCoordinator
+            coordinator = StagehandCoordinator(
+                pool_mb=args.stagehand_pool_mb or None,
+                vram_budget_mb=args.stagehand_vram_budget or None,
+                prefetch_window=args.stagehand_prefetch,
+                telemetry=args.stagehand_telemetry,
+                block_threshold_mb=args.stagehand_block_threshold,
+            )
+        except ImportError:
+            log.info("Stagehand not installed, running without block-swap")
+        except Exception as e:
+            log.warning("Stagehand init failed: %s", e)
+
     # Create runner
-    runner = WorkflowRunner(registry)
+    runner = WorkflowRunner(registry, coordinator=coordinator)
 
     # Execute
     def on_progress(node_id, class_type):
@@ -95,6 +112,10 @@ def run_workflow(args):
         if node_id in runner.execution_times:
             spec = graph.get_node(node_id)
             log.info("  %s (%s): %.3fs", node_id, spec.class_type, runner.execution_times[node_id])
+
+    # Shutdown coordinator
+    if coordinator is not None:
+        coordinator.shutdown()
 
 
 if __name__ == "__main__":

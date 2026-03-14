@@ -1,0 +1,196 @@
+/* shell.css — Global layout, icon rail, topbar, design tokens */
+/* Loaded AFTER canvas.css so overrides take precedence */
+
+/* Shell tokens (namespaced to avoid canvas.css collision) */
+:root {
+    --shell-bg-base:       #0f0f13;
+    --shell-bg-surface:    #1a1a24;
+    --shell-bg-panel:      #1f1f2e;
+    --shell-bg-hover:      #252538;
+    --shell-accent:        #6c6af5;
+    --shell-accent-hover:  #8583ff;
+    --shell-text:          #e8e8f0;
+    --shell-text-muted:    #6b6b80;
+    --shell-border:        #2a2a3a;
+    --shell-success:       #48bb78;
+    --shell-error:         #fc8181;
+    --shell-warn:          #f6ad55;
+    --shell-rail-width:    52px;
+    --shell-topbar-height: 44px;
+    --shell-font:          'Inter', system-ui, sans-serif;
+}
+
+/* Body: column flex for topbar + app-body */
+body {
+    display: flex;
+    flex-direction: column;
+    background: var(--shell-bg-base);
+    width: 100%;  /* override canvas.css 100vw which ignores scrollbar width */
+}
+
+/* ===== Top Bar ===== */
+#topbar {
+    height: var(--shell-topbar-height);
+    min-height: var(--shell-topbar-height);
+    background: var(--shell-bg-surface);
+    border-bottom: 1px solid var(--shell-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    z-index: 200;
+}
+
+.topbar-left,
+.topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.model-badge {
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    border-radius: 12px;
+    padding: 4px 12px;
+    font-size: 12px;
+    color: var(--shell-text-muted);
+    user-select: none;
+}
+
+.queue-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+.queue-dot.idle    { background: var(--shell-success); }
+.queue-dot.running { background: var(--shell-warn); }
+
+.queue-label {
+    font-size: 12px;
+    color: var(--shell-text-muted);
+}
+
+/* ===== App Body (rail + content) ===== */
+#app-body {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+}
+
+/* ===== Icon Rail ===== */
+#icon-rail {
+    width: var(--shell-rail-width);
+    min-width: var(--shell-rail-width);
+    background: var(--shell-bg-surface);
+    border-right: 1px solid var(--shell-border);
+    display: flex;
+    flex-direction: column;
+    padding: 8px 0;
+    z-index: 200;
+}
+
+.rail-top {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+}
+
+.rail-bottom {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-bottom: 8px;
+}
+
+.nav-btn {
+    width: 40px;
+    height: 40px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--shell-text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    transition: background 150ms ease, color 150ms ease;
+    padding: 0;
+    font-family: var(--shell-font);
+}
+
+.nav-btn:hover {
+    background: var(--shell-bg-hover);
+    color: var(--shell-text);
+}
+
+.nav-btn.active {
+    background: var(--shell-accent);
+    color: #fff;
+}
+
+.nav-btn svg {
+    width: 20px;
+    height: 20px;
+    pointer-events: none;
+}
+
+/* ===== Tooltips ===== */
+.nav-btn .tooltip {
+    position: absolute;
+    left: calc(100% + 12px);
+    top: 50%;
+    transform: translateY(-50%);
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    color: var(--shell-text);
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 150ms ease;
+    z-index: 300;
+}
+
+.nav-btn:hover .tooltip {
+    opacity: 1;
+}
+
+/* ===== Content Area ===== */
+#content-area {
+    flex: 1;
+    min-width: 0;
+    position: relative;
+    background: var(--shell-bg-base);
+}
+
+/* ===== Tab Panels ===== */
+.tab-panel {
+    position: absolute;
+    inset: 0;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.placeholder {
+    margin: auto;
+    color: var(--shell-text-muted);
+    font-size: 14px;
+    user-select: none;
+}
+
+/* ===== Workflows Panel Overrides ===== */
+/* Override canvas.css #main height — now relative to panel, not viewport */
+#panel-workflows #main {
+    height: auto;
+    flex: 1;
+    min-height: 0;
+}

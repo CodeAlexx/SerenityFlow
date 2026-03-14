@@ -17,7 +17,7 @@ class NodeDef:
         self,
         class_type: str,
         fn,
-        input_types: dict | None = None,
+        input_types: dict | callable | None = None,
         return_types: tuple = (),
         return_names: list[str] | None = None,
         category: str = "uncategorized",
@@ -26,12 +26,19 @@ class NodeDef:
     ):
         self.class_type = class_type
         self.fn = fn
-        self.input_types = input_types or {"required": {}, "optional": {}}
+        self._input_types = input_types or {"required": {}, "optional": {}}
         self.return_types = return_types
         self.return_names = return_names or [f"output_{i}" for i in range(len(return_types))]
         self.category = category
         self.is_output = is_output
         self.display_name = display_name or class_type
+
+    @property
+    def input_types(self) -> dict:
+        """Resolve input_types — supports callables for dynamic values."""
+        if callable(self._input_types):
+            return self._input_types()
+        return self._input_types
 
 
 class NodeRegistry:

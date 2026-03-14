@@ -17,27 +17,84 @@ input_directory = os.path.join(base_path, "input")
 # Category → directory paths
 folder_names_and_paths: dict[str, tuple[list[str], set[str]]] = {}
 
+# File extensions per category
+_MODEL_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}
+_MODEL_EXTENSIONS_GGUF = _MODEL_EXTENSIONS | {".gguf"}
+
 # Default categories
 _DEFAULT_CATEGORIES = {
-    "checkpoints": ([os.path.join(models_dir, "checkpoints")], {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}),
+    "checkpoints": ([os.path.join(models_dir, "checkpoints")], _MODEL_EXTENSIONS),
     "configs": ([os.path.join(models_dir, "configs")], {".yaml", ".json"}),
     "loras": ([os.path.join(models_dir, "loras")], {".safetensors", ".ckpt", ".pt", ".pth"}),
-    "vae": ([os.path.join(models_dir, "vae")], {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}),
-    "clip": ([os.path.join(models_dir, "clip")], {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}),
-    "clip_vision": ([os.path.join(models_dir, "clip_vision")], {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}),
-    "style_models": ([os.path.join(models_dir, "style_models")], {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}),
-    "embeddings": ([os.path.join(models_dir, "embeddings")], {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}),
+    "vae": ([os.path.join(models_dir, "vae")], _MODEL_EXTENSIONS),
+    "clip": ([os.path.join(models_dir, "clip")], _MODEL_EXTENSIONS_GGUF),
+    "clip_vision": ([os.path.join(models_dir, "clip_vision")], _MODEL_EXTENSIONS),
+    "style_models": ([os.path.join(models_dir, "style_models")], _MODEL_EXTENSIONS),
+    "embeddings": ([os.path.join(models_dir, "embeddings")], _MODEL_EXTENSIONS),
     "diffusers": ([os.path.join(models_dir, "diffusers")], set()),
-    "controlnet": ([os.path.join(models_dir, "controlnet")], {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}),
-    "gligen": ([os.path.join(models_dir, "gligen")], {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}),
-    "upscale_models": ([os.path.join(models_dir, "upscale_models")], {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}),
-    "hypernetworks": ([os.path.join(models_dir, "hypernetworks")], {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}),
-    "unet": ([os.path.join(models_dir, "unet")], {".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf"}),
-    "text_encoders": ([os.path.join(models_dir, "text_encoders")], {".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf"}),
+    "diffusion_models": ([os.path.join(models_dir, "diffusion_models")], _MODEL_EXTENSIONS_GGUF),
+    "controlnet": ([os.path.join(models_dir, "controlnet")], _MODEL_EXTENSIONS),
+    "gligen": ([os.path.join(models_dir, "gligen")], _MODEL_EXTENSIONS),
+    "upscale_models": ([os.path.join(models_dir, "upscale_models")], _MODEL_EXTENSIONS),
+    "hypernetworks": ([os.path.join(models_dir, "hypernetworks")], _MODEL_EXTENSIONS),
+    "unet": ([os.path.join(models_dir, "unet")], _MODEL_EXTENSIONS_GGUF),
+    "text_encoders": ([os.path.join(models_dir, "text_encoders")], _MODEL_EXTENSIONS_GGUF),
+}
+
+# Aliases: directory names that map to category names (case-insensitive matching)
+_DIR_ALIASES = {
+    "stable-diffusion": "checkpoints",
+    "lora": "loras",
+    "embedding": "embeddings",
 }
 
 for cat, (paths, exts) in _DEFAULT_CATEGORIES.items():
     folder_names_and_paths[cat] = (list(paths), set(exts))
+
+
+def set_base_path(new_base: str):
+    """Reinitialize all model paths from a new base directory.
+
+    Called when --model-dir is specified at startup.
+    Supports two layouts:
+      - Nested: base/models/checkpoints/  (ComfyUI default)
+      - Flat:   base/checkpoints/         (symlink layouts)
+    Also handles directory name aliases (Stable-Diffusion → checkpoints, etc.)
+    """
+    global base_path, models_dir, output_directory, temp_directory, input_directory
+
+    base_path = new_base
+    models_dir = os.path.join(base_path, "models")
+    output_directory = os.path.join(base_path, "output")
+    temp_directory = os.path.join(base_path, "temp")
+    input_directory = os.path.join(base_path, "input")
+
+    # Rebuild folder_names_and_paths with new models_dir (nested layout)
+    for cat, (_, exts) in _DEFAULT_CATEGORIES.items():
+        new_paths = [os.path.join(models_dir, cat)]
+        folder_names_and_paths[cat] = (new_paths, set(exts))
+
+    # Scan base_path for flat layout dirs and aliases
+    if os.path.isdir(base_path):
+        # Build reverse lookup: lowercase dir name → category
+        cat_lookup = {}
+        for cat in _DEFAULT_CATEGORIES:
+            cat_lookup[cat.lower()] = cat
+        for alias, cat in _DIR_ALIASES.items():
+            cat_lookup[alias.lower()] = cat
+
+        try:
+            for entry in os.scandir(base_path):
+                if entry.is_dir() or entry.is_symlink():
+                    resolved = entry.name.lower()
+                    cat = cat_lookup.get(resolved)
+                    if cat and cat in folder_names_and_paths:
+                        real_path = os.path.realpath(entry.path)
+                        paths = folder_names_and_paths[cat][0]
+                        if entry.path not in paths and real_path not in paths:
+                            paths.append(entry.path)
+        except OSError:
+            pass
 
 
 def set_output_directory(directory: str):

@@ -1,0 +1,595 @@
+/**
+ * Generate Tab — SerenityFlow Phase 2
+ * Three-column layout: controls | preview | gallery
+ */
+
+/* ── Layout ── */
+.gen-layout {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+}
+
+/* ── Left Panel — Controls ── */
+.gen-left {
+    width: 280px;
+    min-width: 280px;
+    background: var(--shell-bg-surface);
+    border-right: 1px solid var(--shell-border);
+    padding: 12px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.gen-label {
+    display: block;
+    color: var(--shell-text-muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 6px;
+}
+
+/* Model picker */
+.gen-select {
+    width: 100%;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    color: var(--shell-text);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-family: var(--shell-font);
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b6b80' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    cursor: pointer;
+}
+.gen-select:focus {
+    outline: none;
+    border-color: var(--shell-accent);
+}
+
+/* Textareas */
+.gen-textarea {
+    width: 100%;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    border-radius: 6px;
+    padding: 10px;
+    color: var(--shell-text);
+    font-size: 13px;
+    font-family: var(--shell-font);
+    resize: none;
+    transition: border-color 150ms ease;
+    box-sizing: border-box;
+}
+.gen-textarea:focus {
+    outline: none;
+    border-color: var(--shell-accent);
+}
+.gen-textarea::placeholder {
+    color: var(--shell-text-muted);
+}
+
+/* Negative prompt disclosure */
+.gen-disclosure {
+    cursor: pointer;
+    color: var(--shell-text-muted);
+    font-size: 12px;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.gen-disclosure:hover {
+    color: var(--shell-text);
+}
+.gen-disclosure-arrow {
+    display: inline-block;
+    transition: transform 300ms ease;
+    font-size: 10px;
+}
+.gen-disclosure.open .gen-disclosure-arrow {
+    transform: rotate(90deg);
+}
+.gen-neg-body {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 300ms ease;
+}
+.gen-neg-body.open {
+    max-height: 200px;
+}
+
+/* Aspect ratio grid */
+.gen-aspect-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 6px;
+}
+.gen-aspect-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 8px 4px;
+    border: 1px solid var(--shell-border);
+    background: var(--shell-bg-panel);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: border-color 150ms ease, background 150ms ease;
+}
+.gen-aspect-btn:hover {
+    border-color: var(--shell-text-muted);
+}
+.gen-aspect-btn.active {
+    border: 2px solid var(--shell-accent);
+    background: rgba(108, 106, 245, 0.12);
+}
+.gen-aspect-btn svg {
+    stroke: var(--shell-text-muted);
+}
+.gen-aspect-btn.active svg {
+    stroke: var(--shell-accent);
+}
+.gen-aspect-label {
+    font-size: 10px;
+    color: var(--shell-text-muted);
+}
+.gen-aspect-btn.active .gen-aspect-label {
+    color: var(--shell-text);
+}
+
+/* Custom resolution inputs */
+.gen-custom-res {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+.gen-res-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+}
+.gen-res-label {
+    color: var(--shell-text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    min-width: 14px;
+}
+.gen-res-row .gen-number-input {
+    flex: 1;
+    width: auto;
+    text-align: center;
+}
+
+/* Accordion */
+.gen-accordion-header {
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--shell-text-muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+.gen-accordion-header:hover {
+    color: var(--shell-text);
+}
+.gen-accordion-arrow {
+    transition: transform 200ms ease;
+    font-size: 10px;
+}
+.gen-accordion-header.closed .gen-accordion-arrow {
+    transform: rotate(-90deg);
+}
+.gen-accordion-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow: hidden;
+    transition: max-height 300ms ease, opacity 200ms ease;
+    max-height: 500px;
+    opacity: 1;
+}
+.gen-accordion-body.closed {
+    max-height: 0;
+    opacity: 0;
+}
+
+/* Settings rows */
+.gen-setting-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.gen-setting-row .gen-label {
+    min-width: 52px;
+    margin-bottom: 0;
+    flex-shrink: 0;
+}
+.gen-number-input {
+    width: 56px;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    color: var(--shell-text);
+    border-radius: 4px;
+    padding: 4px 6px;
+    font-size: 13px;
+    font-family: var(--shell-font);
+    text-align: center;
+}
+.gen-number-input:focus {
+    outline: none;
+    border-color: var(--shell-accent);
+}
+.gen-range {
+    flex: 1;
+    accent-color: var(--shell-accent);
+    height: 4px;
+}
+
+/* Seed row */
+.gen-seed-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.gen-seed-row .gen-number-input {
+    flex: 1;
+    text-align: left;
+}
+.gen-seed-shuffle {
+    width: 32px;
+    height: 32px;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    border-radius: 6px;
+    color: var(--shell-text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.gen-seed-shuffle:hover {
+    border-color: var(--shell-text-muted);
+    color: var(--shell-text);
+}
+.gen-seed-shuffle svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* Generate button */
+.gen-btn {
+    width: 100%;
+    height: 44px;
+    background: var(--shell-accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: var(--shell-font);
+    cursor: pointer;
+    transition: background 150ms ease, transform 150ms ease;
+}
+.gen-btn:hover {
+    background: var(--shell-accent-hover);
+}
+.gen-btn:active {
+    transform: scale(0.98);
+}
+.gen-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.85;
+}
+@keyframes gen-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+.gen-btn.generating {
+    animation: gen-pulse 1s infinite;
+}
+
+/* ── Center Panel — Preview ── */
+.gen-center {
+    flex: 1;
+    background: var(--shell-bg-base);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    min-width: 0;
+}
+
+/* Empty state */
+.gen-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    color: var(--shell-text-muted);
+    user-select: none;
+}
+.gen-empty svg {
+    width: 64px;
+    height: 64px;
+    opacity: 0.3;
+    stroke: var(--shell-text-muted);
+}
+.gen-empty-text {
+    font-size: 14px;
+}
+
+/* Image display */
+@keyframes gen-fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+.gen-preview-img {
+    max-width: calc(100% - 32px);
+    max-height: calc(100vh - var(--shell-topbar-height) - 96px);
+    object-fit: contain;
+    border-radius: 8px;
+    animation: gen-fadeIn 300ms ease;
+}
+
+/* Video display */
+.gen-preview-video {
+    max-width: calc(100% - 32px);
+    max-height: calc(100vh - var(--shell-topbar-height) - 96px);
+    object-fit: contain;
+    border-radius: 8px;
+    animation: gen-fadeIn 300ms ease;
+}
+
+/* Action bar */
+.gen-action-bar {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+}
+.gen-action-btn {
+    width: 36px;
+    height: 36px;
+    background: var(--shell-bg-surface);
+    border: 1px solid var(--shell-border);
+    border-radius: 8px;
+    color: var(--shell-text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.gen-action-btn:hover {
+    border-color: var(--shell-text-muted);
+    color: var(--shell-text);
+}
+.gen-action-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.gen-action-btn svg {
+    width: 18px;
+    height: 18px;
+}
+
+/* Progress bar */
+.gen-progress {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: transparent;
+    overflow: hidden;
+}
+.gen-progress-bar {
+    height: 100%;
+    width: 0%;
+    background: var(--shell-accent);
+    transition: width 200ms ease;
+}
+@keyframes gen-shimmer {
+    from { background-position: -200% 0; }
+    to { background-position: 200% 0; }
+}
+.gen-progress.active .gen-progress-bar {
+    background: linear-gradient(90deg,
+        var(--shell-accent) 0%,
+        var(--shell-accent-hover) 50%,
+        var(--shell-accent) 100%);
+    background-size: 200% 100%;
+    animation: gen-shimmer 1.5s linear infinite;
+}
+.gen-progress-label {
+    position: absolute;
+    bottom: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 11px;
+    color: var(--shell-text-muted);
+    display: none;
+}
+.gen-progress-label.visible {
+    display: block;
+}
+
+/* Error banner */
+.gen-error-banner {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--shell-error);
+    color: #1a1a24;
+    padding: 8px 20px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    z-index: 10;
+    opacity: 0;
+    transition: opacity 200ms ease;
+    pointer-events: none;
+    max-width: 80%;
+    text-align: center;
+}
+.gen-error-banner.visible {
+    opacity: 1;
+}
+
+/* WS reconnect indicator */
+.gen-ws-indicator {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--shell-warn);
+    opacity: 0;
+    transition: opacity 200ms ease;
+}
+.gen-ws-indicator.visible {
+    opacity: 1;
+}
+.gen-ws-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--shell-warn);
+}
+
+/* ── Right Panel — Gallery ── */
+.gen-right {
+    width: 260px;
+    min-width: 260px;
+    background: var(--shell-bg-surface);
+    border-left: 1px solid var(--shell-border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.gen-gallery-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--shell-border);
+}
+.gen-gallery-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--shell-text);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.gen-gallery-clear {
+    background: none;
+    border: none;
+    color: var(--shell-text-muted);
+    font-size: 11px;
+    cursor: pointer;
+    font-family: var(--shell-font);
+}
+.gen-gallery-clear:hover {
+    color: var(--shell-text);
+}
+
+.gen-gallery-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    padding: 8px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.gen-thumb-wrap {
+    position: relative;
+    aspect-ratio: 1;
+    border-radius: 6px;
+    overflow: hidden;
+    cursor: pointer;
+    border: 2px solid transparent;
+}
+.gen-thumb-wrap.active {
+    border-color: var(--shell-accent);
+}
+.gen-thumb-wrap img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+.gen-thumb-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 150ms ease;
+}
+.gen-thumb-wrap:hover .gen-thumb-overlay {
+    opacity: 1;
+}
+.gen-thumb-overlay svg {
+    width: 24px;
+    height: 24px;
+    stroke: #fff;
+}
+
+/* Model warning inline */
+.gen-model-warning {
+    color: var(--shell-warn);
+    font-size: 12px;
+    padding: 6px 0;
+    display: none;
+}
+.gen-model-warning.visible {
+    display: block;
+}
+
+/* Video gallery thumbnails */
+.gen-thumb-video {
+    position: relative;
+}
+.gen-thumb-play {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.3);
+    pointer-events: none;
+    border-radius: 4px;
+}
+.gen-thumb-video:hover .gen-thumb-play {
+    background: rgba(0, 0, 0, 0.5);
+}
+
+/* Duration hint */
+.gen-duration-hint {
+    font-size: 11px;
+    color: var(--shell-text-muted);
+    text-align: center;
+    margin-top: 2px;
+}
