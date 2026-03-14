@@ -348,6 +348,7 @@ var CanvasTab = (function() {
                     });
                     layer.konvaLayer.add(kImg);
                     layer.konvaLayer.batchDraw();
+                    History.push();
                 };
                 img.src = ev.target.result;
             }
@@ -1519,34 +1520,60 @@ var CanvasTab = (function() {
         if (undoBtn) undoBtn.addEventListener('click', function() { History.undo(); });
         if (redoBtn) redoBtn.addEventListener('click', function() { History.redo(); });
 
-        // Control layer type panel sliders
+        // Control layer type panel sliders — persist values to active layer object
+        var controlType = document.getElementById('cv-control-type');
+        if (controlType) {
+            controlType.addEventListener('change', function() {
+                var layer = getLayerById(activeLayerId);
+                if (layer) layer.controlType = this.value;
+            });
+        }
         var controlWeight = document.getElementById('cv-control-weight');
         var controlWeightVal = document.getElementById('cv-control-weight-val');
         if (controlWeight) {
             controlWeight.addEventListener('input', function() {
-                if (controlWeightVal) controlWeightVal.textContent = parseFloat(this.value).toFixed(2);
+                var val = parseFloat(this.value);
+                if (controlWeightVal) controlWeightVal.textContent = val.toFixed(2);
+                var layer = getLayerById(activeLayerId);
+                if (layer) layer.weight = val;
             });
         }
         var controlStart = document.getElementById('cv-control-start');
         var controlStartVal = document.getElementById('cv-control-start-val');
         if (controlStart) {
             controlStart.addEventListener('input', function() {
-                if (controlStartVal) controlStartVal.textContent = parseFloat(this.value).toFixed(2);
+                var val = parseFloat(this.value);
+                if (controlStartVal) controlStartVal.textContent = val.toFixed(2);
+                var layer = getLayerById(activeLayerId);
+                if (layer) layer.startStep = val;
             });
         }
         var controlEnd = document.getElementById('cv-control-end');
         var controlEndVal = document.getElementById('cv-control-end-val');
         if (controlEnd) {
             controlEnd.addEventListener('input', function() {
-                if (controlEndVal) controlEndVal.textContent = parseFloat(this.value).toFixed(2);
+                var val = parseFloat(this.value);
+                if (controlEndVal) controlEndVal.textContent = val.toFixed(2);
+                var layer = getLayerById(activeLayerId);
+                if (layer) layer.endStep = val;
             });
         }
-        // IP-Adapter weight slider
+        // IP-Adapter weight and method — persist to layer
         var ipaWeight = document.getElementById('cv-ipa-weight');
         var ipaWeightVal = document.getElementById('cv-ipa-weight-val');
         if (ipaWeight) {
             ipaWeight.addEventListener('input', function() {
-                if (ipaWeightVal) ipaWeightVal.textContent = parseFloat(this.value).toFixed(2);
+                var val = parseFloat(this.value);
+                if (ipaWeightVal) ipaWeightVal.textContent = val.toFixed(2);
+                var layer = getLayerById(activeLayerId);
+                if (layer) layer.weight = val;
+            });
+        }
+        var ipaMethod = document.getElementById('cv-ipa-method');
+        if (ipaMethod) {
+            ipaMethod.addEventListener('change', function() {
+                var layer = getLayerById(activeLayerId);
+                if (layer) layer.ipaMethod = this.value;
             });
         }
 
@@ -1710,6 +1737,7 @@ var CanvasTab = (function() {
                 if (!layer || layer.type !== 'mask') return;
                 layer.konvaLayer.destroyChildren();
                 layer.konvaLayer.batchDraw();
+                History.push();
             });
         }
     }
@@ -1986,11 +2014,81 @@ var CanvasTab = (function() {
             .then(function(data) { return data.name; });
     }
 
+    function collectControlLayers() {
+        var controls = [];
+        rasterLayers.forEach(function(l) {
+            if (l.type === 'control' && l.visible && l.refImageSrc) {
+                controls.push({
+                    imageName: l.refImageName || null,
+                    refImageSrc: l.refImageSrc,
+                    controlNetModel: l.controlType ? ('control_v11p_sd15_' + l.controlType + '.safetensors') : undefined,
+                    weight: l.weight || 1.0,
+                    startStep: l.startStep || 0,
+                    endStep: l.endStep || 1
+                });
+            }
+        });
+        return controls;
+    }
+
+    function collectIPALayers() {
+        var ipas = [];
+        rasterLayers.forEach(function(l) {
+            if (l.type === 'ipadapter' && l.visible && l.refImageSrc) {
+                ipas.push({
+                    imageName: l.refImageName || null,
+                    refImageSrc: l.refImageSrc,
+                    weight: l.weight || 0.6,
+                    ipaMethod: l.ipaMethod || 'style'
+                });
+            }
+        });
+        return ipas;
+    }
+
+    function uploadLayerImages(layers) {
+        // Upload ref images that haven't been uploaded yet
+        var promises = layers.map(function(l) {
+            if (l.imageName) return Promise.resolve(l);
+            if (!l.refImageSrc) return Promise.resolve(l);
+            var base64 = l.refImageSrc.split(',')[1];
+            if (!base64) return Promise.resolve(l);
+            return uploadInitImage(base64).then(function(name) {
+                l.imageName = name;
+                return l;
+            });
+        });
+        return Promise.all(promises);
+    }
+
     function queueWorkflow(workflow) {
-        fetch('/prompt', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt: workflow, client_id: SerenityWS.getClientId() })
+        // Apply ControlNet and IP-Adapter nodes if layers exist
+        var controlLayers = collectControlLayers();
+        var ipaLayers = collectIPALayers();
+
+        var prepare = Promise.resolve();
+        if (controlLayers.length > 0 || ipaLayers.length > 0) {
+            prepare = Promise.all([
+                uploadLayerImages(controlLayers),
+                uploadLayerImages(ipaLayers)
+            ]).then(function(results) {
+                var controls = results[0].filter(function(l) { return l.imageName; });
+                var ipas = results[1].filter(function(l) { return l.imageName; });
+                if (controls.length > 0) {
+                    workflow = WorkflowBuilder.applyControlNetNodes(workflow, controls);
+                }
+                if (ipas.length > 0) {
+                    workflow = WorkflowBuilder.applyIPAdapterNodes(workflow, ipas);
+                }
+            });
+        }
+
+        prepare.then(function() {
+            return fetch('/prompt', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt: workflow, client_id: SerenityWS.getClientId() })
+            });
         })
         .then(function(resp) {
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
