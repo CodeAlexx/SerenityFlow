@@ -1208,12 +1208,28 @@ def load_ltxv_model(
         quantization = QuantizationPolicy.fp8_cast()
         logger.info("FP8 checkpoint detected — using fp8_cast quantization policy")
 
+    # Auto-find spatial upsampler (needed for two-stage pipeline)
+    import os
+    spatial_upsampler_path = None
+    for base in [
+        os.path.dirname(checkpoint_path),
+        os.path.expanduser("~/SwarmUI/Models/ltx2"),
+        os.path.expanduser("~/models/LTX-2"),
+    ]:
+        candidate = os.path.join(base, "ltx-2.3-spatial-upscaler-x2-1.0.safetensors")
+        if os.path.exists(candidate):
+            spatial_upsampler_path = candidate
+            break
+    if spatial_upsampler_path:
+        logger.info("Spatial upsampler found: %s", spatial_upsampler_path)
+
     logger.info("Creating ModelLedger: ckpt=%s, gemma=%s", checkpoint_path, gemma_path)
     ledger = ModelLedger(
         dtype=torch_dtype,
         device=device,
         checkpoint_path=checkpoint_path,
         gemma_root_path=gemma_path,
+        spatial_upsampler_path=spatial_upsampler_path,
         loras=(),
         quantization=quantization,
     )
@@ -1576,16 +1592,20 @@ def sample_ltxv(
             denoise_fn=wrapped_fn,
         )
 
-    output_shape = VideoPixelShape(
-        batch=1, frames=num_frames, width=width, height=height, fps=frame_rate,
+    # ---------------------------------------------------------------
+    # Stage 1: Denoise at HALF resolution
+    # ---------------------------------------------------------------
+    s1_w, s1_h = width // 2, height // 2
+    s1_shape = VideoPixelShape(
+        batch=1, frames=num_frames, width=s1_w, height=s1_h, fps=frame_rate,
     )
 
     logger.info(
-        "Denoising %d steps at %dx%d, %d frames (mode=%s)...",
-        n_steps, width, height, num_frames, resolved_mode,
+        "Stage 1: Denoising %d steps at %dx%d, %d frames (mode=%s)...",
+        n_steps, s1_w, s1_h, num_frames, resolved_mode,
     )
     video_state, audio_state = denoise_audio_video(
-        output_shape=output_shape,
+        output_shape=s1_shape,
         conditionings=[],
         noiser=noiser,
         sigmas=sigmas,
@@ -1595,9 +1615,118 @@ def sample_ltxv(
         dtype=model.dtype,
         device=device,
     )
+    logger.info("Stage 1 complete")
 
+    s1_video_latent = video_state.latent.cpu()
+    s1_audio_latent = audio_state.latent.cpu() if audio_state.latent is not None else None
     xfm_runtime.shutdown()
     del xfm_runtime, transformer, xfm_inner, base_fn
+    gc.collect()
+    cleanup_memory()
+    logger.info("Stage 1 transformer freed")
+
+    # ---------------------------------------------------------------
+    # Stage 2: Spatial upsample + refine at full resolution
+    # ---------------------------------------------------------------
+    from ltx_core.model.upsampler import upsample_video
+    from ltx_pipelines.utils.constants import STAGE_2_DISTILLED_SIGMA_VALUES
+
+    logger.info("Stage 2: Spatial upsampling...")
+    video_encoder = ledger.video_encoder()
+    try:
+        upsampler = ledger.spatial_upsampler()
+    except Exception:
+        logger.warning("No spatial upsampler available — skipping stage 2, using stage 1 output directly")
+        upsampler = None
+
+    if upsampler is not None:
+        upscaled = upsample_video(
+            latent=s1_video_latent.to(device)[:1],
+            video_encoder=video_encoder,
+            upsampler=upsampler,
+        )
+        del video_encoder, upsampler, s1_video_latent
+        gc.collect()
+        cleanup_memory()
+        logger.info("Upscaled latent: %s", list(upscaled.shape))
+
+        # Reload transformer for stage 2 refinement
+        logger.info("Stage 2: Loading transformer for refinement...")
+        ledger.device = torch.device("cpu")
+        transformer2 = ledger.transformer()
+        ledger.device = device
+
+        xfm_inner2 = _unwrap_to_blocks(transformer2)
+        _move_non_blocks_to_device(transformer2, xfm_inner2, device)
+        transformer2.requires_grad_(False)
+
+        xfm_runtime2 = StagehandRuntime(
+            model=xfm_inner2,
+            config=_stagehand_config_xfm(),
+            block_pattern=r"^transformer_blocks\.\d+$",
+            group="transformer",
+            dtype=model.dtype,
+            inference_mode=True,
+        )
+        logger.info("Stage 2 Stagehand ready (%d blocks)", len(xfm_runtime2._registry))
+
+        # Stage 2 always uses simple denoising (distilled sigmas, no CFG)
+        s2_sigmas = torch.tensor(STAGE_2_DISTILLED_SIGMA_VALUES, dtype=torch.float32, device=device)
+        s2_base_fn = simple_denoising_func(
+            video_context=video_context,
+            audio_context=audio_context,
+            transformer=transformer2,
+        )
+
+        _call2 = [0]
+        s2_n_steps = len(s2_sigmas) - 1
+
+        def s2_wrapped_fn(video_state, audio_state, sigmas_arg, step_index):
+            xfm_runtime2.begin_step(_call2[0])
+            with xfm_runtime2.managed_forward():
+                result = s2_base_fn(video_state, audio_state, sigmas_arg, step_index)
+            xfm_runtime2.end_step()
+            _call2[0] += 1
+            logger.info("Stage 2 step %d/%d complete", _call2[0], s2_n_steps)
+            return result
+
+        def s2_loop(sigmas_arg, video_state, audio_state, stepper_arg):
+            return euler_denoising_loop(
+                sigmas=sigmas_arg,
+                video_state=video_state,
+                audio_state=audio_state,
+                stepper=stepper_arg,
+                denoise_fn=s2_wrapped_fn,
+            )
+
+        s2_shape = VideoPixelShape(
+            batch=1, frames=num_frames, width=width, height=height, fps=frame_rate,
+        )
+
+        logger.info("Stage 2: Refining %d steps at %dx%d...", s2_n_steps, width, height)
+        video_state, audio_state = denoise_audio_video(
+            output_shape=s2_shape,
+            conditionings=[],
+            noiser=noiser,
+            sigmas=s2_sigmas,
+            stepper=EulerDiffusionStep(),
+            denoising_loop_fn=s2_loop,
+            components=components,
+            dtype=model.dtype,
+            device=device,
+            noise_scale=s2_sigmas[0].item(),
+            initial_video_latent=upscaled,
+            initial_audio_latent=s1_audio_latent.to(device) if s1_audio_latent is not None else None,
+        )
+        logger.info("Stage 2 complete")
+
+        xfm_runtime2.shutdown()
+        del xfm_runtime2, transformer2, xfm_inner2, s2_base_fn, upscaled
+    else:
+        # No upsampler — use stage 1 output directly
+        video_state.latent = s1_video_latent.to(device)
+        del video_encoder
+
     gc.collect()
     cleanup_memory()
     logger.info("Transformer freed")
