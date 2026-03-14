@@ -116,6 +116,15 @@ class SFToolbar {
                         }
                     });
                 }
+
+                // Check for video outputs (SaveVideo, SaveAnimatedWEBP)
+                if (data.output && data.output.videos) {
+                    data.output.videos.forEach(vid => {
+                        if (sfPreview) {
+                            sfPreview.showVideo(this.api.viewUrl(vid.filename, vid.subfolder, vid.type));
+                        }
+                    });
+                }
             }
         });
 
