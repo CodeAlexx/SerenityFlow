@@ -23,7 +23,12 @@ var GenerateTab = (function() {
         gallery: [],
         arch: 'sd15',
         frames: 97,
-        fps: 24
+        fps: 24,
+        lastSeed: null,
+        batchCount: 1,
+        loras: [],  // [{name, strength}]
+        aspectLocked: false,
+        lockedRatio: 1
     };
 
     var initialized = false;
@@ -96,22 +101,34 @@ var GenerateTab = (function() {
         '<div class="gen-section">' +
             '<label class="gen-label">Prompt</label>' +
             '<textarea id="gen-prompt" class="gen-textarea" rows="4" placeholder="Describe your image..."></textarea>' +
+            '<div id="gen-token-count" class="gen-token-count">~0 tokens</div>' +
         '</div>' +
 
         // Negative prompt
         '<div class="gen-section" id="gen-neg-section">' +
-            '<div id="gen-neg-toggle" class="gen-disclosure">' +
-                '<span class="gen-disclosure-arrow">&#9654;</span> Negative Prompt' +
-            '</div>' +
-            '<div id="gen-neg-body" class="gen-neg-body">' +
-                '<textarea id="gen-neg-prompt" class="gen-textarea" rows="2" placeholder="What to avoid..." style="margin-top:6px"></textarea>' +
-            '</div>' +
+            '<label class="gen-label">Negative Prompt</label>' +
+            '<textarea id="gen-neg-prompt" class="gen-textarea" rows="2" placeholder="What to avoid..."></textarea>' +
+        '</div>' +
+
+        // LoRA
+        '<div class="gen-section" id="gen-lora-section">' +
+            '<label class="gen-label">LoRA</label>' +
+            '<div id="gen-lora-list" class="gen-lora-list"></div>' +
+            '<button id="gen-lora-add" class="gen-lora-add-btn">+ Add LoRA</button>' +
+            '<select id="gen-lora-picker" class="gen-select" style="display:none">' +
+                '<option disabled selected>Select LoRA...</option>' +
+            '</select>' +
         '</div>' +
 
         // Aspect ratio
         '<div class="gen-section">' +
             '<label class="gen-label">Aspect Ratio</label>' +
             '<div id="gen-aspects" class="gen-aspect-grid"></div>' +
+            '<div class="gen-lock-row">' +
+                '<button id="gen-aspect-lock" class="gen-aspect-lock" title="Lock aspect ratio">' +
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>' +
+                '</button>' +
+            '</div>' +
             '<div class="gen-custom-res">' +
                 '<div class="gen-res-row">' +
                     '<label class="gen-res-label">W</label>' +
@@ -169,14 +186,14 @@ var GenerateTab = (function() {
                 '<div class="gen-setting-row">' +
                     '<span class="gen-label">Sampler</span>' +
                     '<select id="gen-scheduler" class="gen-select" style="flex:1">' +
-                        '<option value="euler">euler</option>' +
-                        '<option value="euler_ancestral">euler_ancestral</option>' +
-                        '<option value="dpm_2">dpm_2</option>' +
-                        '<option value="dpm_2_ancestral">dpm_2_ancestral</option>' +
-                        '<option value="dpmpp_2m">dpm++_2m</option>' +
-                        '<option value="dpmpp_sde">dpm++_sde</option>' +
-                        '<option value="ddim">ddim</option>' +
-                        '<option value="lcm">lcm</option>' +
+                        '<option value="euler" title="Fast, general-purpose sampler">euler</option>' +
+                        '<option value="euler_ancestral" title="Adds noise each step for more creative results">euler_ancestral</option>' +
+                        '<option value="dpm_2" title="Second-order DPM solver, good quality">dpm_2</option>' +
+                        '<option value="dpm_2_ancestral" title="DPM-2 with ancestral sampling for variety">dpm_2_ancestral</option>' +
+                        '<option value="dpmpp_2m" title="Fast multistep solver, good for fewer steps">dpm++_2m</option>' +
+                        '<option value="dpmpp_sde" title="Stochastic solver, great detail at higher steps">dpm++_sde</option>' +
+                        '<option value="ddim" title="Deterministic sampler, supports image-to-image well">ddim</option>' +
+                        '<option value="lcm" title="Latent consistency model, very fast (4-8 steps)">lcm</option>' +
                     '</select>' +
                 '</div>' +
             '</div>' +
@@ -190,6 +207,16 @@ var GenerateTab = (function() {
                 '<button id="gen-seed-shuffle" class="gen-seed-shuffle" title="Random seed">' +
                     '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/></svg>' +
                 '</button>' +
+                '<button id="gen-seed-prev" class="gen-seed-shuffle" title="Use previous seed" style="font-size:12px">&#8634;</button>' +
+            '</div>' +
+        '</div>' +
+
+        // Batch
+        '<div class="gen-section">' +
+            '<label class="gen-label">Batch</label>' +
+            '<div class="gen-batch-row">' +
+                '<input id="gen-batch" type="number" class="gen-number-input" min="1" max="8" value="1">' +
+                '<span class="gen-batch-hint">images per run</span>' +
             '</div>' +
         '</div>' +
 
@@ -232,8 +259,6 @@ var GenerateTab = (function() {
         els.modelWarn = document.getElementById('gen-model-warn');
         els.prompt = document.getElementById('gen-prompt');
         els.negPrompt = document.getElementById('gen-neg-prompt');
-        els.negToggle = document.getElementById('gen-neg-toggle');
-        els.negBody = document.getElementById('gen-neg-body');
         els.negSection = document.getElementById('gen-neg-section');
         els.aspectGrid = document.getElementById('gen-aspects');
         els.customWidth = document.getElementById('gen-custom-width');
@@ -309,15 +334,10 @@ var GenerateTab = (function() {
             state.prompt = this.value;
             this.style.height = 'auto';
             this.style.height = this.scrollHeight + 'px';
+            updateTokenCount();
         });
         els.negPrompt.addEventListener('input', function() {
             state.negPrompt = this.value;
-        });
-
-        // Negative prompt disclosure
-        els.negToggle.addEventListener('click', function() {
-            this.classList.toggle('open');
-            els.negBody.classList.toggle('open');
         });
 
         // Settings accordion
@@ -367,6 +387,18 @@ var GenerateTab = (function() {
             els.guidance.value = this.value;
         });
 
+        // Aspect ratio lock
+        var lockBtn = document.getElementById('gen-aspect-lock');
+        if (lockBtn) {
+            lockBtn.addEventListener('click', function() {
+                state.aspectLocked = !state.aspectLocked;
+                this.classList.toggle('active', state.aspectLocked);
+                if (state.aspectLocked) {
+                    state.lockedRatio = state.width / state.height;
+                }
+            });
+        }
+
         // Custom resolution inputs
         els.customWidth.addEventListener('blur', function() {
             var isVideo = ModelUtils.isVideoModel(state.model);
@@ -375,6 +407,13 @@ var GenerateTab = (function() {
                 : ModelUtils.clampDimension(parseInt(this.value) || 1024);
             this.value = v;
             state.width = v;
+            if (state.aspectLocked && state.lockedRatio) {
+                var newH = isVideo
+                    ? ModelUtils.clampVideoDimension(Math.round(v / state.lockedRatio))
+                    : ModelUtils.clampDimension(Math.round(v / state.lockedRatio));
+                state.height = newH;
+                els.customHeight.value = newH;
+            }
             deselectAspectButtons();
         });
         els.customHeight.addEventListener('blur', function() {
@@ -384,6 +423,13 @@ var GenerateTab = (function() {
                 : ModelUtils.clampDimension(parseInt(this.value) || 1024);
             this.value = v;
             state.height = v;
+            if (state.aspectLocked && state.lockedRatio) {
+                var newW = isVideo
+                    ? ModelUtils.clampVideoDimension(Math.round(v * state.lockedRatio))
+                    : ModelUtils.clampDimension(Math.round(v * state.lockedRatio));
+                state.width = newW;
+                els.customWidth.value = newW;
+            }
             deselectAspectButtons();
         });
 
@@ -396,6 +442,41 @@ var GenerateTab = (function() {
             state.seed = s;
             els.seed.value = s;
         });
+
+        // Seed previous
+        var seedPrev = document.getElementById('gen-seed-prev');
+        if (seedPrev) {
+            seedPrev.addEventListener('click', function() {
+                if (state.lastSeed !== null) {
+                    state.seed = state.lastSeed;
+                    els.seed.value = state.lastSeed;
+                }
+            });
+        }
+
+        // Batch count
+        var batchInput = document.getElementById('gen-batch');
+        if (batchInput) {
+            batchInput.addEventListener('input', function() {
+                state.batchCount = Math.max(1, Math.min(8, parseInt(this.value) || 1));
+            });
+        }
+
+        // LoRA add/picker
+        var loraAdd = document.getElementById('gen-lora-add');
+        var loraPicker = document.getElementById('gen-lora-picker');
+        if (loraAdd && loraPicker) {
+            loraAdd.addEventListener('click', function() {
+                loraPicker.style.display = loraPicker.style.display === 'none' ? 'block' : 'none';
+            });
+            loraPicker.addEventListener('change', function() {
+                if (this.value) {
+                    addLora(this.value);
+                    this.selectedIndex = 0;
+                    this.style.display = 'none';
+                }
+            });
+        }
 
         // Frames sync
         els.framesInput.addEventListener('input', function() {
@@ -533,6 +614,71 @@ var GenerateTab = (function() {
         });
     }
 
+    // ── Token Counter ──
+    function updateTokenCount() {
+        var count = state.prompt.trim() ? state.prompt.trim().split(/\s+/).length : 0;
+        var el = document.getElementById('gen-token-count');
+        if (el) el.textContent = '~' + count + ' tokens';
+    }
+
+    // ── LoRA Management ──
+    function loadLoras() {
+        fetch('/models/loras')
+            .then(function(r) { return r.ok ? r.json() : []; })
+            .then(function(list) {
+                if (!list || !list.length) return;
+                var picker = document.getElementById('gen-lora-picker');
+                if (!picker) return;
+                picker.innerHTML = '<option disabled selected>Select LoRA...</option>';
+                list.forEach(function(name) {
+                    var opt = document.createElement('option');
+                    opt.value = name;
+                    opt.textContent = name;
+                    picker.appendChild(opt);
+                });
+            })
+            .catch(function() {});
+    }
+
+    function addLora(name) {
+        if (state.loras.some(function(l) { return l.name === name; })) return;
+        state.loras.push({ name: name, strength: 1.0 });
+        renderLoraList();
+    }
+
+    function removeLora(idx) {
+        state.loras.splice(idx, 1);
+        renderLoraList();
+    }
+
+    function renderLoraList() {
+        var list = document.getElementById('gen-lora-list');
+        if (!list) return;
+        list.innerHTML = '';
+        state.loras.forEach(function(lora, idx) {
+            var row = document.createElement('div');
+            row.className = 'gen-lora-row';
+            row.innerHTML =
+                '<span class="gen-lora-name">' + lora.name + '</span>' +
+                '<input type="range" class="gen-range gen-lora-strength" min="-2" max="2" step="0.05" value="' + lora.strength + '">' +
+                '<span class="gen-lora-val">' + lora.strength.toFixed(2) + '</span>' +
+                '<button class="gen-lora-remove" data-idx="' + idx + '">&times;</button>';
+            list.appendChild(row);
+        });
+        // Bind events
+        list.querySelectorAll('.gen-lora-strength').forEach(function(slider, idx) {
+            slider.addEventListener('input', function() {
+                state.loras[idx].strength = parseFloat(this.value);
+                this.nextElementSibling.textContent = state.loras[idx].strength.toFixed(2);
+            });
+        });
+        list.querySelectorAll('.gen-lora-remove').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                removeLora(parseInt(this.dataset.idx));
+            });
+        });
+    }
+
     // ── Workflow Builder ──
     function buildWorkflow() {
         return WorkflowBuilder.build({
@@ -547,7 +693,8 @@ var GenerateTab = (function() {
             scheduler: state.scheduler,
             seed: state.seed,
             frames: state.frames,
-            fps: state.fps
+            fps: state.fps,
+            loras: state.loras
         });
     }
 
@@ -564,20 +711,38 @@ var GenerateTab = (function() {
         }
 
         setGenerating(true);
-        var workflow = buildWorkflow();
 
-        fetch('/prompt', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt: workflow, client_id: SerenityWS.getClientId() })
-        })
-        .then(function(resp) {
-            if (!resp.ok) throw new Error('HTTP ' + resp.status);
-            return resp.json();
-        })
-        .catch(function(err) {
-            showError('Failed to queue: ' + err.message);
-            setGenerating(false);
+        var batchN = state.batchCount || 1;
+        var resolvedSeed = state.seed === -1 ? Math.floor(Math.random() * 4294967296) : state.seed;
+        state.lastSeed = resolvedSeed;
+
+        // Build and queue all batch workflows upfront
+        var originalSeed = state.seed;
+        var workflows = [];
+        for (var i = 0; i < batchN; i++) {
+            state.seed = (i === 0) ? resolvedSeed : Math.floor(Math.random() * 4294967296);
+            workflows.push(buildWorkflow());
+        }
+        state.seed = originalSeed;
+
+        // Queue all batch items (server handles sequencing)
+        var queueFailed = false;
+        workflows.forEach(function(workflow) {
+            if (queueFailed) return;
+            fetch('/prompt', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt: workflow, client_id: SerenityWS.getClientId() })
+            })
+            .then(function(resp) {
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                return resp.json();
+            })
+            .catch(function(err) {
+                queueFailed = true;
+                showError('Failed to queue: ' + err.message);
+                setGenerating(false);
+            });
         });
     }
 
@@ -782,6 +947,7 @@ var GenerateTab = (function() {
         buildAspectButtons();
         bindEvents();
         loadModels();
+        loadLoras();
         restoreGallery();
         connectWS();
     }
@@ -789,6 +955,11 @@ var GenerateTab = (function() {
     return {
         state: state,
         init: init,
-        generate: generate
+        generate: generate,
+        displayResult: function(src, isVideo) {
+            if (!initialized) init();
+            if (isVideo) displayVideo(src);
+            else displayImage(src);
+        }
     };
 })();

@@ -9,28 +9,117 @@ var WorkflowBuilder = (function() {
 
     function build(params) {
         var arch = ModelUtils.detectArchFromFilename(params.model);
+        var workflow;
         switch (arch) {
-            case 'flux':  return buildFlux(params);
-            case 'sd3':   return buildSD3(params);
-            case 'sdxl':  return buildSDXL(params);
-            case 'ltxv':  return buildLTXV(params);
-            case 'wan':   return buildWan(params);
-            default:      return buildSD15(params);
+            case 'flux':  workflow = buildFlux(params); break;
+            case 'sd3':   workflow = buildSD3(params); break;
+            case 'sdxl':  workflow = buildSDXL(params); break;
+            case 'ltxv':  workflow = buildLTXV(params); break;
+            case 'wan':   workflow = buildWan(params); break;
+            default:      workflow = buildSD15(params); break;
         }
+        if (params.loras && params.loras.length > 0) {
+            workflow = injectLoRAs(workflow, params.loras);
+        }
+        return workflow;
     }
 
     function buildImg2Img(params) {
         var arch = ModelUtils.detectArchFromFilename(params.model);
+        var workflow;
         switch (arch) {
-            case 'flux':  return buildFluxImg2Img(params);
-            case 'sd3':   return buildSD3Img2Img(params);
-            case 'sdxl':  return buildSDXLImg2Img(params);
-            default:      return buildSD15Img2Img(params);
+            case 'flux':  workflow = buildFluxImg2Img(params); break;
+            case 'sd3':   workflow = buildSD3Img2Img(params); break;
+            case 'sdxl':  workflow = buildSDXLImg2Img(params); break;
+            default:      workflow = buildSD15Img2Img(params); break;
         }
+        if (params.loras && params.loras.length > 0) {
+            workflow = injectLoRAs(workflow, params.loras);
+        }
+        return workflow;
+    }
+
+    function buildInpaint(params) {
+        // For now, use img2img workflow when mask is present.
+        // Full inpaint nodes (SetLatentNoiseMask) can be added later.
+        var workflow = buildImg2Img(params);
+        if (!workflow) return build(params);
+        return workflow;
     }
 
     function resolveSeed(seed) {
         return seed === -1 ? Math.floor(Math.random() * 4294967296) : seed;
+    }
+
+    /**
+     * Inject LoRA loader nodes into a completed workflow.
+     * Finds the model/clip source nodes, chains LoRA loaders, and rewires
+     * downstream consumers to use the last LoRA output.
+     */
+    function injectLoRAs(workflow, loras) {
+        // Find model and clip source nodes
+        var modelNodeId = null;
+        var clipNodeId = null;
+        var modelIsCheckpoint = false;
+
+        Object.keys(workflow).forEach(function(key) {
+            var node = workflow[key];
+            if (node.class_type === 'CheckpointLoaderSimple') {
+                modelNodeId = key;
+                clipNodeId = key;
+                modelIsCheckpoint = true;
+            } else if (node.class_type === 'UNETLoader' || node.class_type === 'LTXVLoader') {
+                modelNodeId = key;
+            } else if (node.class_type === 'DualCLIPLoader' || node.class_type === 'CLIPLoader') {
+                clipNodeId = key;
+            }
+        });
+
+        if (!modelNodeId) return workflow;
+
+        var nextId = Math.max.apply(null, Object.keys(workflow).map(Number)) + 1;
+        var origModelOut = [modelNodeId, 0];
+        var origClipOut = clipNodeId ? [clipNodeId, modelIsCheckpoint ? 1 : 0] : null;
+        var prevModelRef = origModelOut;
+        var prevClipRef = origClipOut;
+
+        loras.forEach(function(lora) {
+            var id = String(nextId++);
+            var inputs = {
+                lora_name: lora.name,
+                strength_model: lora.strength,
+                strength_clip: lora.strength,
+                model: prevModelRef
+            };
+            if (prevClipRef) {
+                inputs.clip = prevClipRef;
+            }
+            workflow[id] = { class_type: 'LoraLoader', inputs: inputs };
+            prevModelRef = [id, 0];
+            if (prevClipRef) prevClipRef = [id, 1];
+        });
+
+        // Rewire nodes that referenced the original model/clip outputs
+        Object.keys(workflow).forEach(function(key) {
+            var node = workflow[key];
+            if (node.class_type === 'LoraLoader') return;
+            if (!node.inputs) return;
+            Object.keys(node.inputs).forEach(function(k) {
+                var v = node.inputs[k];
+                if (!Array.isArray(v) || v.length < 2) return;
+                // Rewire model references
+                if (v[0] === origModelOut[0] && v[1] === origModelOut[1] &&
+                    (k === 'model' || k === 'ltxv_model')) {
+                    node.inputs[k] = prevModelRef;
+                }
+                // Rewire clip references (only direct clip, not conditioning)
+                if (origClipOut && v[0] === origClipOut[0] && v[1] === origClipOut[1] && k === 'clip') {
+                    node.inputs[k] = prevClipRef;
+                }
+            });
+        });
+
+        return workflow;
     }
 
     // ─── FLUX ───────────────────────────────────────────────────────────────
@@ -277,5 +366,5 @@ var WorkflowBuilder = (function() {
         };
     }
 
-    return { build: build, buildImg2Img: buildImg2Img };
+    return { build: build, buildImg2Img: buildImg2Img, buildInpaint: buildInpaint };
 })();

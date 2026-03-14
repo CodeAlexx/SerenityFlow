@@ -460,10 +460,264 @@
     border-radius: 4px;
 }
 
+/* Layer type menu */
+.cv-layers-add-wrap {
+    position: relative;
+}
+.cv-layer-type-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    border-radius: 6px;
+    padding: 4px;
+    z-index: 100;
+    min-width: 140px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+.cv-layer-type-item {
+    padding: 6px 10px;
+    font-size: 12px;
+    color: var(--shell-text);
+    cursor: pointer;
+    border-radius: 4px;
+    white-space: nowrap;
+}
+.cv-layer-type-item:hover {
+    background: var(--shell-bg-hover);
+}
+
+/* Layer badges for new types */
+.cv-layer-badge.ipadapter { background: #14b8a6; }
+.cv-layer-badge.regional  { background: #f97316; }
+
+/* Layer delete button */
+.cv-layer-delete {
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: none;
+    color: var(--shell-text-muted);
+    cursor: pointer;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-radius: 4px;
+    flex-shrink: 0;
+    opacity: 0;
+    transition: opacity 150ms ease;
+}
+.cv-layer-row:hover .cv-layer-delete {
+    display: flex;
+    opacity: 1;
+}
+.cv-layer-delete:hover {
+    color: var(--shell-error);
+}
+.cv-layer-delete svg {
+    width: 14px;
+    height: 14px;
+    pointer-events: none;
+}
+
+/* Tool separator */
+.cv-tool-separator {
+    border: none;
+    border-top: 1px solid var(--shell-border);
+    width: 32px;
+    margin: 4px 0;
+}
+
+/* Bbox floating toolbar */
+.cv-bbox-toolbar {
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: var(--shell-bg-surface);
+    border: 1px solid var(--shell-border);
+    border-radius: 8px;
+    z-index: 10;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.cv-bbox-input {
+    width: 56px;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    color: var(--shell-text);
+    border-radius: 4px;
+    padding: 3px 6px;
+    font-size: 12px;
+    font-family: var(--shell-font);
+    text-align: center;
+}
+.cv-bbox-input:focus {
+    outline: none;
+    border-color: var(--shell-accent);
+}
+.cv-bbox-x {
+    color: var(--shell-text-muted);
+    font-size: 12px;
+}
+.cv-bbox-sep {
+    color: var(--shell-border);
+    font-size: 14px;
+    margin: 0 2px;
+}
+.cv-bbox-snap {
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    color: var(--shell-text);
+    border-radius: 4px;
+    padding: 3px 6px;
+    font-size: 11px;
+    font-family: var(--shell-font);
+    cursor: pointer;
+    appearance: none;
+}
+.cv-bbox-snap:focus {
+    outline: none;
+    border-color: var(--shell-accent);
+}
+.cv-bbox-btn {
+    padding: 3px 8px;
+    border: 1px solid var(--shell-border);
+    background: var(--shell-bg-panel);
+    border-radius: 4px;
+    color: var(--shell-text-muted);
+    font-size: 11px;
+    font-family: var(--shell-font);
+    cursor: pointer;
+    transition: all 150ms ease;
+}
+.cv-bbox-btn:hover {
+    border-color: var(--shell-text-muted);
+    color: var(--shell-text);
+}
+
 /* ── Topbar model badge truncation ── */
 .model-badge {
     max-width: 320px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* Mask actions */
+.cv-mask-actions {
+    display: flex;
+    gap: 4px;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--shell-border);
+}
+.cv-mask-action-btn {
+    flex: 1;
+    padding: 5px 8px;
+    border: 1px solid var(--shell-border);
+    background: var(--shell-bg-panel);
+    border-radius: 4px;
+    color: var(--shell-text-muted);
+    font-size: 11px;
+    font-family: var(--shell-font);
+    cursor: pointer;
+    transition: all 150ms ease;
+}
+.cv-mask-action-btn:hover {
+    border-color: var(--shell-text-muted);
+    color: var(--shell-text);
+}
+
+/* Layer opacity slider */
+.cv-layer-opacity {
+    width: 40px;
+    height: 3px;
+    accent-color: var(--shell-accent);
+    flex-shrink: 0;
+    opacity: 0;
+    transition: opacity 150ms ease;
+}
+.cv-layer-row:hover .cv-layer-opacity {
+    opacity: 1;
+}
+
+/* Layer lock */
+.cv-layer-lock {
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: none;
+    color: var(--shell-text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    flex-shrink: 0;
+    opacity: 0.3;
+    transition: opacity 150ms ease;
+}
+.cv-layer-row:hover .cv-layer-lock,
+.cv-layer-lock.locked {
+    opacity: 1;
+}
+.cv-layer-lock svg {
+    width: 14px;
+    height: 14px;
+    pointer-events: none;
+}
+
+/* Layer rename input */
+.cv-layer-rename-input {
+    flex: 1;
+    min-width: 0;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-accent);
+    color: var(--shell-text);
+    border-radius: 3px;
+    padding: 1px 4px;
+    font-size: 12px;
+    font-family: var(--shell-font);
+    outline: none;
+}
+
+/* Frame indicator */
+.cv-frame-indicator {
+    padding: 6px 10px;
+    font-size: 10px;
+    color: var(--shell-text-muted);
+    text-align: center;
+    border-top: 1px solid var(--shell-border);
+    margin-top: 4px;
+}
+
+/* Bbox lock active */
+.cv-bbox-btn.active {
+    background: var(--shell-accent);
+    border-color: var(--shell-accent);
+    color: #fff;
+}
+
+/* Layer drag reorder */
+.cv-layer-row[draggable="true"] {
+    cursor: grab;
+}
+.cv-layer-row.cv-layer-dragging {
+    opacity: 0.4;
+}
+.cv-layer-row.cv-layer-dragover {
+    border-top: 2px solid var(--shell-accent);
+}
+
+/* Type-specific panels */
+.cv-type-panel {
+    padding-bottom: 12px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--shell-border);
 }

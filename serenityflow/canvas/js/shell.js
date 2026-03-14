@@ -1,8 +1,36 @@
 /**
  * Shell — Global navigation shell for SerenityFlow.
- * Handles icon rail, tab switching, Lucide icons, Konva resize,
- * templates dropdown, and workflow execution state via SerenityWS.
+ * Handles icon rail, tab switching, mode toggle (Simple/Advanced),
+ * Lucide icons, Konva resize, templates dropdown, and workflow
+ * execution state via SerenityWS.
  */
+
+var currentMode = localStorage.getItem('sf-mode') || 'simple';
+
+function setMode(mode) {
+    currentMode = mode;
+    localStorage.setItem('sf-mode', mode);
+
+    var isAdvanced = mode === 'advanced';
+    document.getElementById('icon-rail').style.display = isAdvanced ? 'flex' : 'none';
+    document.getElementById('simple-mode-container').style.display = isAdvanced ? 'none' : 'flex';
+    document.getElementById('content-area').style.display = isAdvanced ? '' : 'none';
+
+    // Update toggle button states
+    document.getElementById('mode-simple-btn').classList.toggle('active', !isAdvanced);
+    document.getElementById('mode-advanced-btn').classList.toggle('active', isAdvanced);
+
+    // Init Simple mode on first switch
+    if (!isAdvanced && typeof SimpleMode !== 'undefined') {
+        SimpleMode.init();
+    }
+
+    // If switching to advanced, restore the saved tab
+    if (isAdvanced) {
+        var savedTab = localStorage.getItem('sf-active-tab') || 'generate';
+        switchTab(savedTab);
+    }
+}
 
 function switchTab(tabId) {
     // Update icon rail active state
@@ -18,12 +46,28 @@ function switchTab(tabId) {
     // Init Generate tab on first switch
     if (tabId === 'generate' && typeof GenerateTab !== 'undefined') {
         GenerateTab.init();
+        // Check for pending image from Queue tab
+        var pendingView = localStorage.getItem('sf-view-image');
+        if (pendingView) {
+            localStorage.removeItem('sf-view-image');
+            try {
+                var viewData = JSON.parse(pendingView);
+                if (viewData.src && GenerateTab.displayResult) {
+                    GenerateTab.displayResult(viewData.src, viewData.isVideo);
+                }
+            } catch(e) {}
+        }
     }
 
     // Init Canvas tab on first switch
     if (tabId === 'canvas' && typeof CanvasTab !== 'undefined') {
         CanvasTab.init();
         requestAnimationFrame(function() { CanvasTab.resize(); });
+    }
+
+    // Init Queue tab on first switch
+    if (tabId === 'queue' && typeof QueueTab !== 'undefined') {
+        QueueTab.init();
     }
 
     // Resize Konva stage when workflows tab becomes visible
@@ -263,10 +307,18 @@ document.addEventListener('DOMContentLoaded', function() {
     setupWorkflowExecution();
     setupTemplatesDropdown();
 
-    // Restore saved tab (default: generate)
-    // Note: panel-workflows starts visible so app.js can init Konva with correct
-    // container dimensions. app.js DOMContentLoaded runs before this handler
-    // (loaded earlier in script order). Now we switch to the user's saved tab.
-    var savedTab = localStorage.getItem('sf-active-tab') || 'generate';
-    switchTab(savedTab);
+    // Mode toggle buttons
+    var simpleModeBtn = document.getElementById('mode-simple-btn');
+    var advancedModeBtn = document.getElementById('mode-advanced-btn');
+    if (simpleModeBtn) {
+        simpleModeBtn.addEventListener('click', function() { setMode('simple'); });
+    }
+    if (advancedModeBtn) {
+        advancedModeBtn.addEventListener('click', function() { setMode('advanced'); });
+    }
+
+    // Restore mode (default: simple for new users).
+    // setMode('advanced') internally calls switchTab to restore the saved tab.
+    var savedMode = localStorage.getItem('sf-mode') || 'simple';
+    setMode(savedMode);
 });

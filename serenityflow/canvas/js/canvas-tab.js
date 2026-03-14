@@ -37,6 +37,14 @@ var CanvasTab = (function() {
     var activeHandle = null;
     var handleStartBox = null;
     var handleStartMouse = null;
+    var brushHardness = 1;
+    var bboxAspectLocked = false;
+    var bboxLockedRatio = 1;
+
+    // Undo/redo
+    var undoStack = [];
+    var redoStack = [];
+    var MAX_UNDO = 50;
 
     // Generation state
     var genState = {
@@ -66,7 +74,13 @@ var CanvasTab = (function() {
         move: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>',
         maximize: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>',
         eye: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>',
-        eyeOff: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/></svg>'
+        eyeOff: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/></svg>',
+        mask: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 3v18"/><path d="M3 12h18"/></svg>',
+        undo: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>',
+        redo: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>',
+        trash: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>',
+        lock: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+        unlock: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>'
     };
 
     // ── Helpers ──
@@ -94,6 +108,71 @@ var CanvasTab = (function() {
             if (rasterLayers[i].id === activeLayerId) return rasterLayers[i].konvaLayer;
         }
         return rasterLayers.length > 0 ? rasterLayers[0].konvaLayer : null;
+    }
+
+    function getLayerById(id) {
+        for (var i = 0; i < rasterLayers.length; i++) {
+            if (rasterLayers[i].id === id) return rasterLayers[i];
+        }
+        return null;
+    }
+
+    function pushUndo(action) {
+        undoStack.push(action);
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+        redoStack = [];
+    }
+
+    function undo() {
+        if (undoStack.length === 0) return;
+        var action = undoStack.pop();
+        redoStack.push(action);
+        applyUndoAction(action, true);
+    }
+
+    function redo() {
+        if (redoStack.length === 0) return;
+        var action = redoStack.pop();
+        undoStack.push(action);
+        applyUndoAction(action, false);
+    }
+
+    function applyUndoAction(action, isUndo) {
+        if (action.type === 'stroke') {
+            if (isUndo) {
+                action.line.remove();
+            } else {
+                var layer = getLayerById(action.layerId);
+                if (layer) layer.konvaLayer.add(action.line);
+            }
+            var kl = getLayerById(action.layerId);
+            if (kl) kl.konvaLayer.batchDraw();
+        } else if (action.type === 'addLayer') {
+            if (isUndo) {
+                removeLayerById(action.layerId, true);
+            } else {
+                // Re-add is complex; for simplicity, skip
+            }
+        } else if (action.type === 'deleteLayer') {
+            if (isUndo) {
+                // Restore layer
+                rasterLayers.splice(action.index, 0, action.layerInfo);
+                stage.add(action.layerInfo.konvaLayer);
+                if (uiLayer && uiLayer.parent) uiLayer.moveToTop();
+                renderLayerList();
+            } else {
+                removeLayerById(action.layerId, true);
+            }
+        } else if (action.type === 'image') {
+            if (isUndo) {
+                action.image.remove();
+            } else {
+                var layer = getLayerById(action.layerId);
+                if (layer) layer.konvaLayer.add(action.image);
+            }
+            var kl = getLayerById(action.layerId);
+            if (kl) kl.konvaLayer.batchDraw();
+        }
     }
 
     // ── Checkerboard ──
@@ -130,6 +209,26 @@ var CanvasTab = (function() {
         var center = document.createElement('div');
         center.className = 'cv-center';
         center.innerHTML = '<div id="canvas-stage-container"></div>';
+
+        // Add bbox toolbar to center
+        var bboxToolbar = document.createElement('div');
+        bboxToolbar.id = 'cv-bbox-toolbar';
+        bboxToolbar.className = 'cv-bbox-toolbar';
+        bboxToolbar.innerHTML =
+            '<input type="number" id="cv-bbox-w" class="cv-bbox-input" min="64" max="4096" step="64" value="1024">' +
+            '<span class="cv-bbox-x">&times;</span>' +
+            '<input type="number" id="cv-bbox-h" class="cv-bbox-input" min="64" max="4096" step="64" value="1024">' +
+            '<span class="cv-bbox-sep">|</span>' +
+            '<select id="cv-bbox-snap" class="cv-bbox-snap">' +
+                '<option value="32">Snap: 32</option>' +
+                '<option value="64" selected>Snap: 64</option>' +
+                '<option value="128">Snap: 128</option>' +
+            '</select>' +
+            '<button id="cv-bbox-reset" class="cv-bbox-btn" title="Reset to 1024x1024">Reset</button>' +
+            '<button id="cv-bbox-lock" class="cv-bbox-btn" title="Lock aspect ratio">&#128274;</button>' +
+            '<button id="cv-bbox-fit" class="cv-bbox-btn" title="Fit to active layer">Fit</button>';
+        center.appendChild(bboxToolbar);
+
         layout.appendChild(center);
 
         var right = document.createElement('div');
@@ -147,13 +246,30 @@ var CanvasTab = (function() {
                 '<button class="cv-tool-btn active" data-tool="select" title="Select / Move (V)">' + ICONS.mousePointer + '</button>' +
                 '<button class="cv-tool-btn" data-tool="brush" title="Brush (B)">' + ICONS.brush + '</button>' +
                 '<button class="cv-tool-btn" data-tool="eraser" title="Eraser (E)">' + ICONS.eraser + '</button>' +
+                '<button class="cv-tool-btn" data-tool="mask" title="Inpaint Mask (M)">' + ICONS.mask + '</button>' +
                 '<button class="cv-tool-btn" data-tool="pan" title="Pan (H)">' + ICONS.move + '</button>' +
                 '<button class="cv-tool-btn" data-tool="resetView" title="Reset View (F)">' + ICONS.maximize + '</button>' +
+                '<hr class="cv-tool-separator">' +
+                '<button class="cv-tool-btn cv-undo-btn" id="cv-undo" title="Undo (Ctrl+Z)">' + ICONS.undo + '</button>' +
+                '<button class="cv-tool-btn cv-redo-btn" id="cv-redo" title="Redo (Ctrl+Y)">' + ICONS.redo + '</button>' +
+            '</div>' +
+            '<div id="cv-mask-actions" class="cv-mask-actions" style="display:none">' +
+                '<button class="cv-mask-action-btn" id="cv-mask-fill">Fill All</button>' +
+                '<button class="cv-mask-action-btn" id="cv-mask-clear">Clear Mask</button>' +
             '</div>' +
             '<div class="cv-layers">' +
                 '<div class="cv-layers-header">' +
                     '<span class="cv-layers-title">Layers</span>' +
-                    '<button class="cv-layers-add" title="Add raster layer">+</button>' +
+                    '<div class="cv-layers-add-wrap">' +
+                        '<button class="cv-layers-add" id="cv-layers-add-btn" title="Add layer">+</button>' +
+                        '<div id="cv-layer-type-menu" class="cv-layer-type-menu" style="display:none">' +
+                            '<div class="cv-layer-type-item" data-type="raster">Raster Layer</div>' +
+                            '<div class="cv-layer-type-item" data-type="mask">Inpaint Mask</div>' +
+                            '<div class="cv-layer-type-item" data-type="control">Control Layer</div>' +
+                            '<div class="cv-layer-type-item" data-type="ipadapter">IP-Adapter</div>' +
+                            '<div class="cv-layer-type-item" data-type="regional">Regional Prompt</div>' +
+                        '</div>' +
+                    '</div>' +
                 '</div>' +
                 '<div class="cv-layer-list" id="cv-layer-list"></div>' +
             '</div>';
@@ -169,10 +285,74 @@ var CanvasTab = (function() {
                     '<span id="cv-brush-size-val" class="cv-setting-value">20</span>' +
                 '</div>' +
                 '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Hardness</span>' +
+                    '<input type="range" id="cv-brush-hardness" class="cv-range" min="0" max="1" step="0.05" value="1">' +
+                    '<span id="cv-brush-hardness-val" class="cv-setting-value">1.0</span>' +
+                '</div>' +
+                '<div class="cv-setting-row">' +
                     '<span class="cv-setting-label">Color</span>' +
                     '<input type="color" id="cv-brush-color" class="cv-color-swatch" value="#ffffff">' +
                 '</div>' +
                 '<hr class="cv-separator">' +
+            '</div>' +
+
+            '<div id="cv-control-panel" class="cv-type-panel" style="display:none">' +
+                '<div class="cv-section-title">Control Layer</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Type</span>' +
+                    '<select id="cv-control-type" class="cv-select">' +
+                        '<option value="depth">Depth</option>' +
+                        '<option value="canny">Canny Edge</option>' +
+                        '<option value="pose">Pose</option>' +
+                        '<option value="normal">Normal Map</option>' +
+                        '<option value="lineart">Lineart</option>' +
+                    '</select>' +
+                '</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Weight</span>' +
+                    '<input type="range" id="cv-control-weight" class="cv-range" min="0" max="2" step="0.05" value="1">' +
+                    '<span id="cv-control-weight-val" class="cv-setting-value">1.00</span>' +
+                '</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Start</span>' +
+                    '<input type="range" id="cv-control-start" class="cv-range" min="0" max="1" step="0.05" value="0">' +
+                    '<span id="cv-control-start-val" class="cv-setting-value">0.00</span>' +
+                '</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">End</span>' +
+                    '<input type="range" id="cv-control-end" class="cv-range" min="0" max="1" step="0.05" value="1">' +
+                    '<span id="cv-control-end-val" class="cv-setting-value">1.00</span>' +
+                '</div>' +
+                '<button class="cv-import-btn" id="cv-control-img-btn">Add Control Image</button>' +
+                '<div class="cv-helper-text">ControlNet nodes will be added when available on the backend.</div>' +
+            '</div>' +
+
+            '<div id="cv-ipadapter-panel" class="cv-type-panel" style="display:none">' +
+                '<div class="cv-section-title">IP-Adapter</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Weight</span>' +
+                    '<input type="range" id="cv-ipa-weight" class="cv-range" min="0" max="2" step="0.05" value="1">' +
+                    '<span id="cv-ipa-weight-val" class="cv-setting-value">1.00</span>' +
+                '</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Method</span>' +
+                    '<select id="cv-ipa-method" class="cv-select">' +
+                        '<option value="style">Style</option>' +
+                        '<option value="composition">Composition</option>' +
+                        '<option value="style_composition">Style + Composition</option>' +
+                    '</select>' +
+                '</div>' +
+                '<button class="cv-import-btn" id="cv-ipa-img-btn">Add Reference Image</button>' +
+                '<div class="cv-helper-text">IP-Adapter nodes will be added when available on the backend.</div>' +
+            '</div>' +
+
+            '<div id="cv-regional-panel" class="cv-type-panel" style="display:none">' +
+                '<div class="cv-section-title">Regional Prompt</div>' +
+                '<label class="cv-setting-label">Region Prompt</label>' +
+                '<textarea id="cv-regional-prompt" class="cv-textarea" rows="3" placeholder="Prompt for this region..."></textarea>' +
+                '<label class="cv-setting-label" style="margin-top:8px">Negative</label>' +
+                '<textarea id="cv-regional-neg" class="cv-textarea" rows="2" placeholder="Negative for this region..."></textarea>' +
+                '<div class="cv-helper-text">Draw the region on the canvas. Regional conditioning will be applied when supported.</div>' +
             '</div>' +
 
             '<div class="cv-gen-settings">' +
@@ -508,6 +688,14 @@ var CanvasTab = (function() {
         sizeLabel.x(boundingBox.x() + bw / 2 - sizeLabel.width() / 2);
         sizeLabel.y(boundingBox.y() + bh + 8);
         uiLayer.batchDraw();
+        updateBboxInputs();
+    }
+
+    function updateBboxInputs() {
+        var bboxW = document.getElementById('cv-bbox-w');
+        var bboxH = document.getElementById('cv-bbox-h');
+        if (bboxW && boundingBox) bboxW.value = Math.round(boundingBox.width());
+        if (bboxH && boundingBox) bboxH.value = Math.round(boundingBox.height());
     }
 
     // ── Stage Events ──
@@ -574,19 +762,24 @@ var CanvasTab = (function() {
 
         // Drawing
         stage.on('mousedown', function(e) {
-            if (activeTool !== 'brush' && activeTool !== 'eraser') return;
+            if (activeTool !== 'brush' && activeTool !== 'eraser' && activeTool !== 'mask') return;
+            var activeLayer = getLayerById(activeLayerId);
+            if (activeLayer && activeLayer.locked) return;
             if (isPanning || isSpaceHeld) return;
             var target = e.target;
             if (target && target.name() && (target.name() === 'bounding-box' || target.name().indexOf('handle-') === 0)) return;
 
             isDrawing = true;
             var pos = getRelativePointerPosition();
+            var strokeColor = activeTool === 'mask' ? 'rgba(239, 68, 68, 0.5)' : (activeTool === 'eraser' ? '#000' : brushColor);
+            var compositeOp = activeTool === 'eraser' ? 'destination-out' : 'source-over';
             currentLine = new Konva.Line({
-                stroke: activeTool === 'eraser' ? '#000' : brushColor,
+                stroke: strokeColor,
                 strokeWidth: brushSize,
-                globalCompositeOperation: activeTool === 'eraser' ? 'destination-out' : 'source-over',
+                globalCompositeOperation: compositeOp,
                 lineCap: 'round',
                 lineJoin: 'round',
+                opacity: brushHardness,
                 points: [pos.x, pos.y, pos.x, pos.y],
                 listening: false
             });
@@ -595,7 +788,7 @@ var CanvasTab = (function() {
         });
 
         stage.on('mousemove', function() {
-            if ((activeTool === 'brush' || activeTool === 'eraser') && brushCursor) {
+            if ((activeTool === 'brush' || activeTool === 'eraser' || activeTool === 'mask') && brushCursor) {
                 var pos = getRelativePointerPosition();
                 brushCursor.x(pos.x);
                 brushCursor.y(pos.y);
@@ -613,6 +806,9 @@ var CanvasTab = (function() {
         });
 
         stage.on('mouseup', function() {
+            if (isDrawing && currentLine) {
+                pushUndo({ type: 'stroke', line: currentLine, layerId: activeLayerId });
+            }
             isDrawing = false;
             currentLine = null;
         });
@@ -669,7 +865,7 @@ var CanvasTab = (function() {
         // Keep uiLayer on top
         if (uiLayer && uiLayer.parent) uiLayer.moveToTop();
 
-        var info = { id: id, name: name, type: type || 'raster', visible: true, konvaLayer: konvaLayer };
+        var info = { id: id, name: name, type: type || 'raster', visible: true, opacity: 1, locked: false, konvaLayer: konvaLayer };
         rasterLayers.push(info);
         activeLayerId = id;
         renderLayerList();
@@ -685,6 +881,32 @@ var CanvasTab = (function() {
             var row = document.createElement('div');
             row.className = 'cv-layer-row' + (layer.id === activeLayerId ? ' active' : '');
             row.dataset.layerId = layer.id;
+            row.draggable = true;
+
+            (function(dragLayer, dragRow) {
+                dragRow.addEventListener('dragstart', function(e) {
+                    e.dataTransfer.setData('text/plain', String(dragLayer.id));
+                    dragRow.classList.add('cv-layer-dragging');
+                });
+                dragRow.addEventListener('dragend', function() {
+                    dragRow.classList.remove('cv-layer-dragging');
+                });
+                dragRow.addEventListener('dragover', function(e) {
+                    e.preventDefault();
+                    dragRow.classList.add('cv-layer-dragover');
+                });
+                dragRow.addEventListener('dragleave', function() {
+                    dragRow.classList.remove('cv-layer-dragover');
+                });
+                dragRow.addEventListener('drop', function(e) {
+                    e.preventDefault();
+                    dragRow.classList.remove('cv-layer-dragover');
+                    var draggedId = parseInt(e.dataTransfer.getData('text/plain'));
+                    var targetId = dragLayer.id;
+                    if (draggedId === targetId) return;
+                    reorderLayer(draggedId, targetId);
+                });
+            })(layer, row);
 
             var eyeBtn = document.createElement('button');
             eyeBtn.className = 'cv-layer-eye' + (layer.visible ? '' : ' hidden-layer');
@@ -699,16 +921,88 @@ var CanvasTab = (function() {
             nameSpan.className = 'cv-layer-name';
             nameSpan.textContent = layer.name;
 
+            var deleteBtn = document.createElement('button');
+            deleteBtn.className = 'cv-layer-delete';
+            deleteBtn.innerHTML = ICONS.trash;
+            deleteBtn.dataset.layerId = layer.id;
+            deleteBtn.title = 'Delete layer';
+
+            var lockBtn = document.createElement('button');
+            lockBtn.className = 'cv-layer-lock' + (layer.locked ? ' locked' : '');
+            lockBtn.innerHTML = layer.locked ? ICONS.lock : ICONS.unlock;
+            lockBtn.dataset.layerId = layer.id;
+            lockBtn.title = layer.locked ? 'Unlock layer' : 'Lock layer';
+
+            var opacitySlider = document.createElement('input');
+            opacitySlider.type = 'range';
+            opacitySlider.className = 'cv-layer-opacity';
+            opacitySlider.min = '0';
+            opacitySlider.max = '1';
+            opacitySlider.step = '0.05';
+            opacitySlider.value = layer.opacity !== undefined ? layer.opacity : 1;
+            opacitySlider.title = 'Opacity';
+            opacitySlider.dataset.layerId = layer.id;
+
+            nameSpan.addEventListener('dblclick', function(e) {
+                e.stopPropagation();
+                var thisLayer = layer;
+                var input = document.createElement('input');
+                input.type = 'text';
+                input.className = 'cv-layer-rename-input';
+                input.value = thisLayer.name;
+                nameSpan.replaceWith(input);
+                input.focus();
+                input.select();
+                function finishRename() {
+                    var newName = input.value.trim() || thisLayer.name;
+                    thisLayer.name = newName;
+                    renderLayerList();
+                }
+                input.addEventListener('blur', finishRename);
+                input.addEventListener('keydown', function(ev) {
+                    if (ev.key === 'Enter') { ev.preventDefault(); finishRename(); }
+                    if (ev.key === 'Escape') { renderLayerList(); }
+                });
+            });
+
             row.appendChild(eyeBtn);
+            row.appendChild(lockBtn);
             row.appendChild(badge);
             row.appendChild(nameSpan);
+            row.appendChild(opacitySlider);
+            row.appendChild(deleteBtn);
             els.layerList.appendChild(row);
         }
 
+        if (isVideoArch()) {
+            var frameIndicator = document.createElement('div');
+            frameIndicator.className = 'cv-frame-indicator';
+            frameIndicator.textContent = genState.frames + ' frames @ ' + genState.fps + 'fps';
+            els.layerList.appendChild(frameIndicator);
+        }
+
         els.layerList.onclick = function(e) {
+            var delEl = e.target.closest('.cv-layer-delete');
+            if (delEl) {
+                var delId = parseInt(delEl.dataset.layerId);
+                deleteLayer(delId);
+                e.stopPropagation();
+                return;
+            }
             var eyeEl = e.target.closest('.cv-layer-eye');
             if (eyeEl) {
                 toggleLayerVisibility(parseInt(eyeEl.dataset.layerId));
+                e.stopPropagation();
+                return;
+            }
+            var lockEl = e.target.closest('.cv-layer-lock');
+            if (lockEl) {
+                var lockId = parseInt(lockEl.dataset.layerId);
+                var lyr = getLayerById(lockId);
+                if (lyr) {
+                    lyr.locked = !lyr.locked;
+                    renderLayerList();
+                }
                 e.stopPropagation();
                 return;
             }
@@ -718,6 +1012,61 @@ var CanvasTab = (function() {
                 renderLayerList();
             }
         };
+
+        els.layerList.addEventListener('input', function(e) {
+            if (e.target.classList.contains('cv-layer-opacity')) {
+                var lid = parseInt(e.target.dataset.layerId);
+                var lyr = getLayerById(lid);
+                if (lyr) {
+                    lyr.opacity = parseFloat(e.target.value);
+                    lyr.konvaLayer.opacity(lyr.opacity);
+                    lyr.konvaLayer.batchDraw();
+                }
+            }
+        });
+
+        updateMaskActions();
+        updateTypePanels();
+    }
+
+    function updateMaskActions() {
+        var maskActions = document.getElementById('cv-mask-actions');
+        if (!maskActions) return;
+        var activeLayer = getLayerById(activeLayerId);
+        maskActions.style.display = (activeLayer && activeLayer.type === 'mask') ? 'flex' : 'none';
+    }
+
+    function updateTypePanels() {
+        var controlPanel = document.getElementById('cv-control-panel');
+        var ipaPanel = document.getElementById('cv-ipadapter-panel');
+        var regionalPanel = document.getElementById('cv-regional-panel');
+
+        var activeLayer = getLayerById(activeLayerId);
+        var type = activeLayer ? activeLayer.type : 'raster';
+
+        if (controlPanel) controlPanel.style.display = type === 'control' ? 'block' : 'none';
+        if (ipaPanel) ipaPanel.style.display = type === 'ipadapter' ? 'block' : 'none';
+        if (regionalPanel) regionalPanel.style.display = type === 'regional' ? 'block' : 'none';
+    }
+
+    function reorderLayer(fromId, toId) {
+        var fromIdx = -1, toIdx = -1;
+        for (var i = 0; i < rasterLayers.length; i++) {
+            if (rasterLayers[i].id === fromId) fromIdx = i;
+            if (rasterLayers[i].id === toId) toIdx = i;
+        }
+        if (fromIdx === -1 || toIdx === -1) return;
+        var moved = rasterLayers.splice(fromIdx, 1)[0];
+        rasterLayers.splice(toIdx, 0, moved);
+        // Reorder Konva layers to match
+        rasterLayers.forEach(function(l) {
+            l.konvaLayer.moveToBottom();
+        });
+        // Background stays at bottom, UI at top
+        if (backgroundLayer) backgroundLayer.moveToBottom();
+        if (uiLayer) uiLayer.moveToTop();
+        stage.batchDraw();
+        renderLayerList();
     }
 
     function toggleLayerVisibility(layerId) {
@@ -732,6 +1081,37 @@ var CanvasTab = (function() {
         }
     }
 
+    function deleteLayer(layerId) {
+        if (rasterLayers.length <= 1) return; // Keep at least one
+        var idx = -1;
+        for (var i = 0; i < rasterLayers.length; i++) {
+            if (rasterLayers[i].id === layerId) { idx = i; break; }
+        }
+        if (idx === -1) return;
+        var info = rasterLayers[idx];
+        info.konvaLayer.remove();
+        rasterLayers.splice(idx, 1);
+        pushUndo({ type: 'deleteLayer', layerId: layerId, layerInfo: info, index: idx });
+        if (activeLayerId === layerId) {
+            activeLayerId = rasterLayers.length > 0 ? rasterLayers[rasterLayers.length - 1].id : null;
+        }
+        renderLayerList();
+    }
+
+    function removeLayerById(layerId, skipUndo) {
+        var idx = -1;
+        for (var i = 0; i < rasterLayers.length; i++) {
+            if (rasterLayers[i].id === layerId) { idx = i; break; }
+        }
+        if (idx === -1) return;
+        rasterLayers[idx].konvaLayer.remove();
+        rasterLayers.splice(idx, 1);
+        if (activeLayerId === layerId && rasterLayers.length > 0) {
+            activeLayerId = rasterLayers[rasterLayers.length - 1].id;
+        }
+        renderLayerList();
+    }
+
     // ── Tool Switching ──
     function setTool(tool) {
         if (tool === 'resetView') { resetView(); return; }
@@ -742,7 +1122,7 @@ var CanvasTab = (function() {
         });
 
         if (els.brushSection) {
-            els.brushSection.style.display = (tool === 'brush' || tool === 'eraser') ? 'flex' : 'none';
+            els.brushSection.style.display = (tool === 'brush' || tool === 'eraser' || tool === 'mask') ? 'flex' : 'none';
         }
 
         if (brushCursor) { brushCursor.visible(false); uiLayer.batchDraw(); }
@@ -761,7 +1141,7 @@ var CanvasTab = (function() {
         var c = stage.container();
         switch (activeTool) {
             case 'select': c.style.cursor = 'default'; break;
-            case 'brush': case 'eraser': c.style.cursor = 'none'; break;
+            case 'brush': case 'eraser': case 'mask': c.style.cursor = 'none'; break;
             case 'pan': c.style.cursor = 'grab'; break;
             default: c.style.cursor = 'default';
         }
@@ -796,10 +1176,22 @@ var CanvasTab = (function() {
         var tag = e.target.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
+        if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
+            e.preventDefault();
+            if (e.shiftKey) { redo(); } else { undo(); }
+            return;
+        }
+        if ((e.ctrlKey || e.metaKey) && e.code === 'KeyY') {
+            e.preventDefault();
+            redo();
+            return;
+        }
+
         switch (e.code) {
             case 'KeyV': setTool('select'); break;
             case 'KeyB': setTool('brush'); break;
             case 'KeyE': setTool('eraser'); break;
+            case 'KeyM': setTool('mask'); break;
             case 'KeyH': setTool('pan'); break;
             case 'KeyF': resetView(); break;
             case 'Space':
@@ -825,6 +1217,15 @@ var CanvasTab = (function() {
             brushSize = parseInt(this.value);
             els.brushSizeVal.textContent = brushSize;
         });
+
+        var hardnessInput = document.getElementById('cv-brush-hardness');
+        var hardnessVal = document.getElementById('cv-brush-hardness-val');
+        if (hardnessInput) {
+            hardnessInput.addEventListener('input', function() {
+                brushHardness = parseFloat(this.value);
+                if (hardnessVal) hardnessVal.textContent = brushHardness.toFixed(1);
+            });
+        }
 
         els.brushColorInput.addEventListener('input', function() {
             brushColor = this.value;
@@ -914,10 +1315,161 @@ var CanvasTab = (function() {
             btn.addEventListener('click', function() { setTool(btn.dataset.tool); });
         });
 
-        var addBtn = document.querySelector('.cv-layers-add');
-        if (addBtn) {
-            addBtn.addEventListener('click', function() {
-                addLayer('Raster Layer ' + (rasterLayers.length + 1), 'raster');
+        // Undo/redo buttons
+        var undoBtn = document.getElementById('cv-undo');
+        var redoBtn = document.getElementById('cv-redo');
+        if (undoBtn) undoBtn.addEventListener('click', function() { undo(); });
+        if (redoBtn) redoBtn.addEventListener('click', function() { redo(); });
+
+        // Control layer type panel sliders
+        var controlWeight = document.getElementById('cv-control-weight');
+        var controlWeightVal = document.getElementById('cv-control-weight-val');
+        if (controlWeight) {
+            controlWeight.addEventListener('input', function() {
+                if (controlWeightVal) controlWeightVal.textContent = parseFloat(this.value).toFixed(2);
+            });
+        }
+        var controlStart = document.getElementById('cv-control-start');
+        var controlStartVal = document.getElementById('cv-control-start-val');
+        if (controlStart) {
+            controlStart.addEventListener('input', function() {
+                if (controlStartVal) controlStartVal.textContent = parseFloat(this.value).toFixed(2);
+            });
+        }
+        var controlEnd = document.getElementById('cv-control-end');
+        var controlEndVal = document.getElementById('cv-control-end-val');
+        if (controlEnd) {
+            controlEnd.addEventListener('input', function() {
+                if (controlEndVal) controlEndVal.textContent = parseFloat(this.value).toFixed(2);
+            });
+        }
+        // IP-Adapter weight slider
+        var ipaWeight = document.getElementById('cv-ipa-weight');
+        var ipaWeightVal = document.getElementById('cv-ipa-weight-val');
+        if (ipaWeight) {
+            ipaWeight.addEventListener('input', function() {
+                if (ipaWeightVal) ipaWeightVal.textContent = parseFloat(this.value).toFixed(2);
+            });
+        }
+
+        // Layer add menu
+        var addBtn = document.getElementById('cv-layers-add-btn');
+        var typeMenu = document.getElementById('cv-layer-type-menu');
+        if (addBtn && typeMenu) {
+            addBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                typeMenu.style.display = typeMenu.style.display === 'none' ? 'block' : 'none';
+            });
+            typeMenu.addEventListener('click', function(e) {
+                var item = e.target.closest('.cv-layer-type-item');
+                if (!item) return;
+                var type = item.dataset.type;
+                var names = {
+                    raster: 'Raster Layer',
+                    mask: 'Inpaint Mask',
+                    control: 'Control Layer',
+                    ipadapter: 'IP-Adapter',
+                    regional: 'Regional Prompt'
+                };
+                addLayer((names[type] || 'Layer') + ' ' + (rasterLayers.length + 1), type);
+                typeMenu.style.display = 'none';
+            });
+            document.addEventListener('click', function() {
+                typeMenu.style.display = 'none';
+            });
+        }
+
+        // Bbox toolbar
+        var bboxW = document.getElementById('cv-bbox-w');
+        var bboxH = document.getElementById('cv-bbox-h');
+        var bboxSnap = document.getElementById('cv-bbox-snap');
+        var bboxReset = document.getElementById('cv-bbox-reset');
+
+        if (bboxW) {
+            bboxW.addEventListener('change', function() {
+                var v = clampDimForArch(parseInt(this.value) || 1024);
+                this.value = v;
+                boundingBox.width(v);
+                updateHandles();
+                updateSizeLabel();
+            });
+        }
+        if (bboxH) {
+            bboxH.addEventListener('change', function() {
+                var v = clampDimForArch(parseInt(this.value) || 1024);
+                this.value = v;
+                boundingBox.height(v);
+                updateHandles();
+                updateSizeLabel();
+            });
+        }
+        if (bboxReset) {
+            bboxReset.addEventListener('click', function() {
+                var container = document.getElementById('canvas-stage-container');
+                if (!container) return;
+                var w = 1024, h = 1024;
+                boundingBox.width(w);
+                boundingBox.height(h);
+                boundingBox.x(container.offsetWidth / 2 / stage.scaleX() - w / 2 - stage.x() / stage.scaleX());
+                boundingBox.y(container.offsetHeight / 2 / stage.scaleY() - h / 2 - stage.y() / stage.scaleY());
+                updateHandles();
+                updateSizeLabel();
+                updateBboxInputs();
+                stage.batchDraw();
+            });
+        }
+
+        var bboxLock = document.getElementById('cv-bbox-lock');
+        if (bboxLock) {
+            bboxLock.addEventListener('click', function() {
+                bboxAspectLocked = !bboxAspectLocked;
+                this.classList.toggle('active', bboxAspectLocked);
+                if (bboxAspectLocked) {
+                    bboxLockedRatio = boundingBox.width() / boundingBox.height();
+                }
+            });
+        }
+
+        var bboxFit = document.getElementById('cv-bbox-fit');
+        if (bboxFit) {
+            bboxFit.addEventListener('click', function() {
+                var layer = getActiveKonvaLayer();
+                if (!layer) return;
+                var rect = layer.getClientRect({ skipTransform: true });
+                if (rect.width < 1 || rect.height < 1) return;
+                boundingBox.x(rect.x);
+                boundingBox.y(rect.y);
+                boundingBox.width(clampDimForArch(rect.width));
+                boundingBox.height(clampDimForArch(rect.height));
+                updateHandles();
+                updateSizeLabel();
+                stage.batchDraw();
+            });
+        }
+
+        var maskFill = document.getElementById('cv-mask-fill');
+        var maskClear = document.getElementById('cv-mask-clear');
+        if (maskFill) {
+            maskFill.addEventListener('click', function() {
+                var layer = getLayerById(activeLayerId);
+                if (!layer || layer.type !== 'mask') return;
+                var rect = new Konva.Rect({
+                    x: boundingBox.x(), y: boundingBox.y(),
+                    width: boundingBox.width(), height: boundingBox.height(),
+                    fill: 'rgba(239, 68, 68, 0.5)',
+                    listening: false
+                });
+                layer.konvaLayer.add(rect);
+                layer.konvaLayer.batchDraw();
+                pushUndo({ type: 'stroke', line: rect, layerId: activeLayerId });
+            });
+        }
+        if (maskClear) {
+            maskClear.addEventListener('click', function() {
+                var layer = getLayerById(activeLayerId);
+                if (!layer || layer.type !== 'mask') return;
+                layer.konvaLayer.destroyChildren();
+                layer.konvaLayer.batchDraw();
             });
         }
     }
@@ -975,6 +1527,43 @@ var CanvasTab = (function() {
         if (!els.durationHint) return;
         var secs = (genState.frames / genState.fps).toFixed(1);
         els.durationHint.textContent = '\u2248 ' + secs + 's at ' + genState.fps + 'fps';
+    }
+
+    function getMaskLayer() {
+        for (var i = 0; i < rasterLayers.length; i++) {
+            if (rasterLayers[i].type === 'mask' && rasterLayers[i].visible) return rasterLayers[i];
+        }
+        return null;
+    }
+
+    function exportMaskImage() {
+        var maskLayer = getMaskLayer();
+        if (!maskLayer) return Promise.resolve(null);
+        var children = maskLayer.konvaLayer.getChildren();
+        if (children.length === 0) return Promise.resolve(null);
+
+        // Hide all layers except mask, export as black/white
+        rasterLayers.forEach(function(l) {
+            if (l !== maskLayer) l.konvaLayer.hide();
+        });
+        uiLayer.hide();
+        backgroundLayer.hide();
+
+        var dataURL = stage.toDataURL({
+            x: boundingBox.x(), y: boundingBox.y(),
+            width: boundingBox.width(), height: boundingBox.height(),
+            pixelRatio: 1
+        });
+
+        // Restore visibility
+        rasterLayers.forEach(function(l) {
+            if (l.visible) l.konvaLayer.show();
+        });
+        uiLayer.show();
+        backgroundLayer.show();
+        stage.batchDraw();
+
+        return uploadInitImage(dataURL.split(',')[1]);
     }
 
     function invoke() {
@@ -1302,6 +1891,36 @@ var CanvasTab = (function() {
         requestAnimationFrame(function() {
             initKonva();
             restoreState();
+
+            // Check for image sent from Simple mode
+            var pendingImage = localStorage.getItem('sf-send-to-canvas');
+            if (pendingImage) {
+                localStorage.removeItem('sf-send-to-canvas');
+                try {
+                    var data = JSON.parse(pendingImage);
+                    if (data.src && !data.isVideo) {
+                        var img = new Image();
+                        img.crossOrigin = 'anonymous';
+                        img.onload = function() {
+                            var kImg = new Konva.Image({
+                                image: img,
+                                x: boundingBox.x(),
+                                y: boundingBox.y(),
+                                width: boundingBox.width(),
+                                height: boundingBox.height(),
+                                draggable: activeTool === 'select'
+                            });
+                            var layer = getActiveKonvaLayer();
+                            if (layer) {
+                                layer.add(kImg);
+                                layer.batchDraw();
+                            }
+                        };
+                        img.src = data.src;
+                    }
+                } catch(e) {}
+            }
+
             resetView();
             updateCursor();
             setInterval(saveState, 5000);

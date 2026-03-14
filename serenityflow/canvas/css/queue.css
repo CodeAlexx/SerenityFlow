@@ -1,0 +1,273 @@
+/* queue.css — Queue tab layout */
+
+.queue-layout {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: var(--shell-font);
+}
+
+/* Header */
+.queue-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--shell-border);
+    background: var(--shell-bg-surface);
+}
+
+.queue-header-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--shell-text);
+}
+
+.queue-clear-btn {
+    padding: 4px 12px;
+    border: 1px solid var(--shell-border);
+    background: var(--shell-bg-panel);
+    border-radius: 6px;
+    color: var(--shell-text-muted);
+    font-size: 12px;
+    font-family: var(--shell-font);
+    cursor: pointer;
+    transition: all 150ms ease;
+}
+.queue-clear-btn:hover {
+    border-color: var(--shell-text-muted);
+    color: var(--shell-text);
+}
+
+/* Current job */
+.queue-current {
+    display: none;
+    padding: 16px;
+    border-bottom: 1px solid var(--shell-border);
+    background: var(--shell-bg-surface);
+}
+
+.queue-current.active {
+    display: flex;
+    gap: 16px;
+}
+
+.queue-current-thumb {
+    width: 80px;
+    height: 80px;
+    border-radius: 8px;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    overflow: hidden;
+}
+.queue-current-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.queue-current-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+}
+
+.queue-current-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--shell-text);
+}
+
+.queue-current-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--shell-warn);
+    flex-shrink: 0;
+    animation: queue-dot-pulse 1s infinite;
+}
+@keyframes queue-dot-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+.queue-current-node {
+    font-size: 12px;
+    color: var(--shell-text-muted);
+}
+
+.queue-progress-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.queue-progress-text {
+    font-size: 12px;
+    color: var(--shell-text-muted);
+    white-space: nowrap;
+    min-width: 80px;
+}
+
+.queue-progress-track {
+    flex: 1;
+    height: 4px;
+    background: var(--shell-bg-panel);
+    border-radius: 2px;
+    overflow: hidden;
+}
+.queue-progress-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--shell-accent);
+    border-radius: 2px;
+    transition: width 200ms ease;
+}
+
+.queue-progress-pct {
+    font-size: 12px;
+    color: var(--shell-text);
+    font-weight: 500;
+    min-width: 36px;
+    text-align: right;
+}
+
+.queue-cancel-btn {
+    padding: 6px 14px;
+    border: 1px solid var(--shell-error);
+    background: transparent;
+    border-radius: 6px;
+    color: var(--shell-error);
+    font-size: 12px;
+    font-family: var(--shell-font);
+    cursor: pointer;
+    align-self: flex-start;
+    margin-top: 4px;
+    transition: all 150ms ease;
+}
+.queue-cancel-btn:hover {
+    background: var(--shell-error);
+    color: #1a1a24;
+}
+
+/* History list */
+.queue-history-label {
+    padding: 10px 16px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--shell-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 1px solid var(--shell-border);
+    background: var(--shell-bg-surface);
+}
+
+.queue-history {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.queue-history-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--shell-text-muted);
+    font-size: 13px;
+    user-select: none;
+}
+
+.queue-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--shell-border);
+    transition: background 150ms ease;
+}
+.queue-item:hover {
+    background: var(--shell-bg-hover);
+}
+
+.queue-item-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+    width: 20px;
+    text-align: center;
+}
+.queue-item-icon.success { color: var(--shell-success); }
+.queue-item-icon.error { color: var(--shell-error); }
+
+.queue-item-name {
+    flex: 1;
+    font-size: 13px;
+    color: var(--shell-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.queue-item-error {
+    font-size: 11px;
+    color: var(--shell-error);
+    margin-top: 2px;
+}
+
+.queue-item-time {
+    font-size: 11px;
+    color: var(--shell-text-muted);
+    flex-shrink: 0;
+}
+
+.queue-item-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.queue-item-btn {
+    padding: 3px 8px;
+    border: 1px solid var(--shell-border);
+    background: var(--shell-bg-panel);
+    border-radius: 4px;
+    color: var(--shell-text-muted);
+    font-size: 11px;
+    font-family: var(--shell-font);
+    cursor: pointer;
+    transition: all 150ms ease;
+}
+.queue-item-btn:hover {
+    border-color: var(--shell-text-muted);
+    color: var(--shell-text);
+}
+
+.queue-item-dismiss {
+    width: 20px;
+    height: 20px;
+    border: none;
+    background: none;
+    color: var(--shell-text-muted);
+    cursor: pointer;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-radius: 4px;
+    flex-shrink: 0;
+}
+.queue-item-dismiss:hover {
+    color: var(--shell-text);
+    background: var(--shell-bg-hover);
+}

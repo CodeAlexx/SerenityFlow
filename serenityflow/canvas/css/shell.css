@@ -39,13 +39,21 @@ body {
     justify-content: space-between;
     padding: 0 16px;
     z-index: 200;
+    position: relative;
 }
 
 .topbar-left,
+.topbar-center,
 .topbar-right {
     display: flex;
     align-items: center;
     gap: 8px;
+}
+
+.topbar-center {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
 }
 
 .model-badge {

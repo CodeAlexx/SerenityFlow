@@ -9,6 +9,8 @@
     <link rel="stylesheet" href="css/generate.css">
     <link rel="stylesheet" href="css/workflows.css">
     <link rel="stylesheet" href="css/canvas-tab.css">
+    <link rel="stylesheet" href="css/simple.css">
+    <link rel="stylesheet" href="css/queue.css">
     <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
 </head>
 <body>
@@ -16,6 +18,12 @@
     <div id="topbar">
         <div class="topbar-left">
             <div class="model-badge">No model loaded</div>
+        </div>
+        <div class="topbar-center">
+            <div id="mode-toggle">
+                <button id="mode-simple-btn" class="mode-btn active">&#9889; Simple</button>
+                <button id="mode-advanced-btn" class="mode-btn">&#9881; Advanced</button>
+            </div>
         </div>
         <div class="topbar-right">
             <span class="queue-dot idle"></span>
@@ -57,7 +65,10 @@
             </div>
         </nav>
 
-        <!-- Content Area -->
+        <!-- Simple Mode Container (shown by default for new users) -->
+        <div id="simple-mode-container"></div>
+
+        <!-- Content Area (Advanced Mode) -->
         <div id="content-area">
             <!-- Tab Panels -->
             <div class="tab-panel" id="panel-generate" style="display: none">
@@ -206,6 +217,12 @@
 
     <!-- Canvas tab -->
     <script src="js/canvas-tab.js"></script>
+
+    <!-- Simple mode -->
+    <script src="js/simple.js"></script>
+
+    <!-- Queue tab -->
+    <script src="js/queue.js"></script>
 
     <!-- Shell navigation (runs after app.js init, switches to saved tab) -->
     <script src="js/shell.js"></script>

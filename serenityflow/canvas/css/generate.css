@@ -146,6 +146,38 @@
     color: var(--shell-text);
 }
 
+/* Aspect lock */
+.gen-lock-row {
+    display: flex;
+    justify-content: center;
+    margin-top: 4px;
+}
+.gen-aspect-lock {
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--shell-border);
+    background: var(--shell-bg-panel);
+    border-radius: 6px;
+    color: var(--shell-text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 150ms ease;
+}
+.gen-aspect-lock:hover {
+    border-color: var(--shell-text-muted);
+    color: var(--shell-text);
+}
+.gen-aspect-lock.active {
+    background: var(--shell-accent);
+    border-color: var(--shell-accent);
+    color: #fff;
+}
+.gen-aspect-lock svg {
+    pointer-events: none;
+}
+
 /* Custom resolution inputs */
 .gen-custom-res {
     display: flex;
@@ -592,4 +624,94 @@
     color: var(--shell-text-muted);
     text-align: center;
     margin-top: 2px;
+}
+
+/* Token counter */
+.gen-token-count {
+    font-size: 11px;
+    color: var(--shell-text-muted);
+    text-align: right;
+    margin-top: 4px;
+}
+
+/* LoRA section */
+.gen-lora-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+.gen-lora-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    border-radius: 6px;
+}
+.gen-lora-name {
+    font-size: 11px;
+    color: var(--shell-text);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.gen-lora-strength {
+    width: 60px !important;
+    flex: none !important;
+}
+.gen-lora-val {
+    font-size: 11px;
+    color: var(--shell-text-muted);
+    min-width: 32px;
+    text-align: right;
+}
+.gen-lora-remove {
+    width: 20px;
+    height: 20px;
+    border: none;
+    background: none;
+    color: var(--shell-text-muted);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    flex-shrink: 0;
+}
+.gen-lora-remove:hover {
+    color: var(--shell-error);
+    background: var(--shell-bg-hover);
+}
+.gen-lora-add-btn {
+    width: 100%;
+    padding: 6px;
+    border: 1px dashed var(--shell-border);
+    background: transparent;
+    border-radius: 6px;
+    color: var(--shell-text-muted);
+    font-size: 12px;
+    font-family: var(--shell-font);
+    cursor: pointer;
+    transition: all 150ms ease;
+}
+.gen-lora-add-btn:hover {
+    border-color: var(--shell-text-muted);
+    color: var(--shell-text);
+}
+
+/* Batch */
+.gen-batch-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.gen-batch-hint {
+    font-size: 11px;
+    color: var(--shell-text-muted);
 }
