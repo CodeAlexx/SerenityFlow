@@ -227,6 +227,7 @@ def register_routes(app: FastAPI):
                 "os": os.name,
                 "python_version": sys.version,
                 "pytorch_version": torch.__version__,
+                "cuda_version": torch.version.cuda or "N/A",
             },
             "devices": [],
         }
@@ -639,6 +640,93 @@ def register_routes(app: FastAPI):
         # Rule-based enhancement
         enhanced = _enhance_rule_based(prompt, arch)
         return JSONResponse({"enhanced": enhanced, "source": "rules"})
+
+    # === Output file management ===
+
+    @app.get("/output_files")
+    async def list_output_files():
+        """List recently generated output files."""
+        state = _state()
+        output_dir = state.output_dir
+        if not os.path.isdir(output_dir):
+            return JSONResponse([])
+        files = []
+        try:
+            entries = sorted(
+                os.listdir(output_dir),
+                key=lambda x: os.path.getmtime(os.path.join(output_dir, x)),
+                reverse=True,
+            )
+            for name in entries[:50]:
+                path = os.path.join(output_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in (".png", ".jpg", ".jpeg", ".webp", ".mp4"):
+                    continue
+                stat = os.stat(path)
+                files.append({
+                    "name": name,
+                    "size_bytes": stat.st_size,
+                    "modified": stat.st_mtime,
+                    "type": "video" if ext == ".mp4" else "image",
+                })
+        except Exception:
+            pass
+        return JSONResponse(files)
+
+    @app.delete("/output_files/{filename}")
+    async def delete_output_file(filename: str):
+        """Delete a generated output file."""
+        state = _state()
+        output_dir = state.output_dir
+        # Security: sanitize filename
+        safe_name = os.path.basename(filename)
+        path = os.path.join(output_dir, safe_name)
+        if not os.path.isfile(path):
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        # Verify path is within output_dir
+        if not os.path.realpath(path).startswith(os.path.realpath(output_dir)):
+            return JSONResponse({"error": "Invalid path"}, status_code=403)
+        try:
+            os.unlink(path)
+            return JSONResponse({"status": "deleted"})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    @app.post("/open_output_dir")
+    async def open_output_dir():
+        """Open output directory in OS file manager."""
+        import platform
+        import subprocess
+
+        state = _state()
+        output_dir = state.output_dir
+        try:
+            if platform.system() == "Windows":
+                subprocess.Popen(["explorer", output_dir])
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", output_dir])
+            else:
+                subprocess.Popen(["xdg-open", output_dir])
+            return JSONResponse({"status": "ok"})
+        except Exception as e:
+            return JSONResponse({"status": "error", "message": str(e)})
+
+    # === Stagehand settings ===
+
+    @app.post("/stagehand_settings")
+    async def apply_stagehand_settings(request: Request):
+        """Apply Stagehand memory settings at runtime."""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+        # Stub — Stagehand runtime config not yet implemented
+        return JSONResponse({
+            "status": "ok",
+            "message": "Settings received. Runtime Stagehand config will be supported in a future update.",
+        })
 
     # === Frontend static files ===
     # Priority: SerenityFlow canvas > ComfyUI frontend > API-only

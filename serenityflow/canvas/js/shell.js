@@ -5,6 +5,12 @@
  * execution state via SerenityWS.
  */
 
+// Apply persisted settings immediately (Settings module loaded before shell.js)
+if (typeof Settings !== 'undefined') {
+    Settings.applyTheme(Settings.get('theme'));
+    Settings.applyAccentColor(Settings.get('accentColor'));
+}
+
 var currentMode = localStorage.getItem('sf-mode') || 'simple';
 
 function setMode(mode) {
@@ -73,6 +79,11 @@ function switchTab(tabId) {
     // Init Models tab on first switch
     if (tabId === 'models' && typeof ModelsTab !== 'undefined') {
         ModelsTab.init();
+    }
+
+    // Init Settings tab on first switch
+    if (tabId === 'settings' && typeof SettingsTab !== 'undefined') {
+        SettingsTab.init();
     }
 
     // Resize Konva stage when workflows tab becomes visible
@@ -324,7 +335,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Restore mode (default: simple for new users).
     // setMode('advanced') internally calls switchTab to restore the saved tab.
-    var savedMode = localStorage.getItem('sf-mode') || 'simple';
+    var savedMode = localStorage.getItem('sf-mode') || (typeof Settings !== 'undefined' ? Settings.get('defaultMode') : 'simple');
     setMode(savedMode);
 
     // Warm object_info cache in background
