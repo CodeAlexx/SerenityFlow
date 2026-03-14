@@ -214,6 +214,10 @@ class WorkflowRunner:
 
         fn = node_def.fn
 
+        # Normalize input names: remap workflow keys to registered parameter
+        # names when they differ (e.g. litegraph port "video" → param "images").
+        inputs = self._normalize_input_names(node_def, inputs)
+
         start = time.perf_counter()
         try:
             with torch.inference_mode():
@@ -235,6 +239,53 @@ class WorkflowRunner:
             return result
         # Single value -> wrap in tuple
         return (result,)
+
+
+    @staticmethod
+    def _normalize_input_names(node_def, inputs: dict) -> dict:
+        """Remap input keys to match registered parameter names.
+
+        Handles mismatches between litegraph port names and registered
+        input_types keys (e.g. port ``video`` → param ``images``).
+        Uses positional mapping: the i-th unrecognized key maps to the
+        i-th missing registered name.
+        """
+        it = node_def.input_types
+        registered: list[str] = []
+        for section in ("required", "optional"):
+            s = it.get(section, {})
+            if isinstance(s, dict):
+                registered.extend(s.keys())
+
+        if not registered:
+            return inputs
+
+        # Fast path: all input keys are known
+        unknown = [k for k in inputs if k not in registered]
+        if not unknown:
+            return inputs
+
+        # Find registered names that are missing from inputs
+        missing = [k for k in registered if k not in inputs]
+
+        # Positional remap: pair unknown keys with missing registered names
+        normalized = {}
+        unknown_set = set(unknown)
+        remap = {}
+        for i, uk in enumerate(unknown):
+            if i < len(missing):
+                remap[uk] = missing[i]
+
+        for key, value in inputs.items():
+            if key in unknown_set and key in remap:
+                normalized[remap[key]] = value
+            elif key.startswith("_widget_"):
+                # Skip unmapped widget placeholders
+                continue
+            else:
+                normalized[key] = value
+
+        return normalized
 
 
 __all__ = ["WorkflowRunner", "ExecutionError"]
