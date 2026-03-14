@@ -113,13 +113,18 @@ def ltxv_sampler(ltxv_model, prompt, width=768, height=512, num_frames=25,
     log.info("Raw video tensor shape: %s", list(video.shape))
     # Normalize to [F, H, W, C] float32 [0, 1]
     if video.dim() == 5:
-        # [B, C, T, H, W] → take first batch → [C, T, H, W] → [T, H, W, C]
+        # [B, C, T, H, W] → [T, H, W, C]
         frames = video[0].permute(1, 2, 3, 0).float().clamp(0, 1)
     elif video.dim() == 4:
-        # [C, T, H, W] → [T, H, W, C]
-        frames = video.permute(1, 2, 3, 0).float().clamp(0, 1)
+        # Could be [C, T, H, W] or [T, H, W, C]
+        if video.shape[-1] <= 4:
+            # Already [T, H, W, C]
+            frames = video.float().clamp(0, 1)
+        else:
+            # [C, T, H, W] → [T, H, W, C]
+            frames = video.permute(1, 2, 3, 0).float().clamp(0, 1)
     elif video.dim() == 3:
-        # [T, H, W] grayscale or [H, W, C] single frame — try [T, H, W] → [T, H, W, 1]
+        # [T, H, W] grayscale → [T, H, W, 1]
         frames = video.unsqueeze(-1).float().clamp(0, 1)
     else:
         raise ValueError(f"Unexpected video tensor shape: {list(video.shape)}")
