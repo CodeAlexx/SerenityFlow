@@ -36,8 +36,31 @@ var SimpleMode = (function() {
 
     // ── Presets ──
 
+    var imageStylePresets = [
+        { id: 'none', label: 'None', suffix: '', bg: 'var(--shell-bg-panel)' },
+        { id: 'photo', label: 'Photo', suffix: ', photorealistic, 8k, sharp focus, natural lighting', bg: 'linear-gradient(135deg, #1a1a2e, #2d4a6e)' },
+        { id: 'anime', label: 'Anime', suffix: ', anime style, vibrant colors, cel shaded, detailed', bg: 'linear-gradient(135deg, #ff6b9d, #c44569)' },
+        { id: 'oil', label: 'Oil Paint', suffix: ', oil painting, impressionist, textured brushstrokes, museum quality', bg: 'linear-gradient(135deg, #8b4513, #d2691e)' },
+        { id: '3d', label: '3D Render', suffix: ', 3D render, octane render, subsurface scattering, studio lighting', bg: 'linear-gradient(135deg, #0f3460, #533483)' },
+        { id: 'cinematic', label: 'Cinematic', suffix: ', cinematic, anamorphic lens, film grain, dramatic lighting, color graded', bg: 'linear-gradient(135deg, #0d0d0d, #1a0a00)' },
+        { id: 'watercolor', label: 'Watercolor', suffix: ', watercolor painting, soft edges, paper texture, flowing colors', bg: 'linear-gradient(135deg, #89c4e1, #c3e8f7)' },
+        { id: 'pixel', label: 'Pixel Art', suffix: ', pixel art, 16-bit, retro game style, limited palette', bg: 'linear-gradient(135deg, #2d1b69, #11998e)' },
+        { id: 'sketch', label: 'Sketch', suffix: ', pencil sketch, crosshatching, graphite, detailed linework', bg: 'linear-gradient(135deg, #636363, #a2a2a2)' },
+        { id: 'fantasy', label: 'Fantasy', suffix: ', fantasy art, magical, ethereal lighting, detailed environment, epic', bg: 'linear-gradient(135deg, #6a3093, #a044ff)' },
+        { id: 'neon', label: 'Neon Noir', suffix: ', neon noir, cyberpunk, rain-slicked streets, neon lights, dark atmosphere', bg: 'linear-gradient(135deg, #0f0c29, #302b63)' },
+        { id: 'minimal', label: 'Minimal', suffix: ', minimalist, clean lines, negative space, simple composition, elegant', bg: 'linear-gradient(135deg, #e8e8e8, #c0c0c0)' }
+    ];
+
+    var videoStylePresets = [
+        { id: 'none', label: 'None', suffix: '', bg: 'var(--shell-bg-panel)' },
+        { id: 'cinematic', label: 'Cinematic', suffix: ', cinematic movement, smooth motion, film quality', bg: 'linear-gradient(135deg, #0d0d0d, #1a0a00)' },
+        { id: 'timelapse', label: 'Timelapse', suffix: ', time-lapse, smooth transition, flowing movement', bg: 'linear-gradient(135deg, #1a3a5c, #4a8db7)' },
+        { id: 'dynamic', label: 'Dynamic', suffix: ', dynamic motion, energy, fast movement, action', bg: 'linear-gradient(135deg, #c0392b, #e74c3c)' },
+        { id: 'slow', label: 'Slow-Mo', suffix: ', slow motion, graceful, fluid movement, detail', bg: 'linear-gradient(135deg, #2c3e50, #3498db)' }
+    ];
+
     var qualityPresets = {
-        draft:    { steps: 10 },
+        draft:    { steps: 8 },
         balanced: { steps: 20 },
         quality:  { steps: 40 }
     };
@@ -47,15 +70,6 @@ var SimpleMode = (function() {
         medium: { frames: 97,  fps: 24 },
         long:   { frames: 193, fps: 24 }
     };
-
-    var stylePresets = [
-        { id: 'none',   label: 'None',           suffix: '' },
-        { id: 'photo',  label: 'Photorealistic',  suffix: ', photorealistic, high detail, 8k' },
-        { id: 'anime',  label: 'Anime',           suffix: ', anime style, cel-shaded' },
-        { id: 'oil',    label: 'Oil Painting',     suffix: ', oil painting, textured brushstrokes' },
-        { id: '3d',     label: '3D Render',        suffix: ', 3D render, octane render' },
-        { id: 'cinema', label: 'Cinematic',        suffix: ', cinematic lighting, film grain, dramatic' }
-    ];
 
     var imageAspects = [
         { label: '1:1',  w: 1024, h: 1024, vw: 16, vh: 16 },
@@ -81,6 +95,31 @@ var SimpleMode = (function() {
         return isVideoModel() ? videoAspects : imageAspects;
     }
 
+    function getActiveStylePresets() {
+        return isVideoModel() ? videoStylePresets : imageStylePresets;
+    }
+
+    // ── Quality Config (arch-aware) ──
+
+    function getQualityConfig(quality) {
+        var base = qualityPresets[quality] || qualityPresets.balanced;
+        var cfg, scheduler;
+        if (state.arch === 'flux') {
+            cfg = 1.0;
+            scheduler = 'euler';
+        } else if (quality === 'draft') {
+            cfg = 5.0;
+            scheduler = 'euler';
+        } else if (quality === 'quality') {
+            cfg = 7.5;
+            scheduler = 'dpmpp_2m';
+        } else {
+            cfg = 7.0;
+            scheduler = 'euler';
+        }
+        return { steps: base.steps, cfg: cfg, scheduler: scheduler };
+    }
+
     // ── Build DOM ──
 
     function buildUI() {
@@ -102,34 +141,59 @@ var SimpleMode = (function() {
         layout.appendChild(center);
 
         container.appendChild(layout);
+
+        // Onboarding overlay (appended to container, not layout)
+        var onboarding = document.createElement('div');
+        onboarding.id = 'simple-onboarding';
+        onboarding.className = 'simple-onboarding-backdrop';
+        onboarding.style.display = 'none';
+        onboarding.innerHTML =
+            '<div class="simple-onboarding-card">' +
+                '<div class="onboarding-title">Welcome to SerenityFlow</div>' +
+                '<div class="onboarding-subtitle">Create images and videos with AI in just a few clicks.</div>' +
+                '<div class="onboarding-steps">' +
+                    '<div class="onboarding-step"><span class="onboarding-num">1</span> Pick a model from the sidebar</div>' +
+                    '<div class="onboarding-step"><span class="onboarding-num">2</span> Describe what you want to create</div>' +
+                    '<div class="onboarding-step"><span class="onboarding-num">3</span> Choose a style and hit Create</div>' +
+                '</div>' +
+                '<div class="onboarding-note">You can switch to Advanced mode anytime for full control.</div>' +
+                '<button id="onboarding-start-btn" class="onboarding-start-btn">Get Started</button>' +
+            '</div>';
+        container.appendChild(onboarding);
+
         cacheElements();
     }
 
     function buildLeftHTML() {
-        // Style pills HTML
-        var stylePills = '';
-        stylePresets.forEach(function(s) {
-            var active = s.id === state.activeStyle ? ' active' : '';
-            stylePills += '<button class="simple-style-pill' + active + '" data-style="' + s.id + '">' + s.label + '</button>';
-        });
-
         return '' +
         // Model
         '<div class="simple-section">' +
             '<label class="simple-label">Model</label>' +
             '<select id="simple-model" class="simple-select"><option disabled selected>Loading models...</option></select>' +
+            '<div id="simple-arch-badge" class="simple-arch-badge" data-arch="sd15">SD1.5 \u00b7 Image</div>' +
         '</div>' +
 
         // Prompt
         '<div class="simple-section">' +
             '<label class="simple-label">Prompt</label>' +
             '<textarea id="simple-prompt" class="simple-prompt" rows="5" placeholder="Describe what you want to create..."></textarea>' +
+            '<button id="simple-enhance-btn" class="simple-enhance-btn">+ Enhance prompt</button>' +
+            '<div id="simple-enhance-result" class="simple-enhance-result" style="display:none"></div>' +
             '<div id="simple-adv-toggle" class="simple-disclosure">' +
                 '<span class="simple-disclosure-arrow">&#9654;</span> Advanced prompt' +
             '</div>' +
             '<div id="simple-adv-body" class="simple-disclosure-body">' +
                 '<textarea id="simple-neg-prompt" class="simple-neg-prompt" rows="2" placeholder="What to avoid..."></textarea>' +
-                '<div class="simple-styles" id="simple-styles">' + stylePills + '</div>' +
+            '</div>' +
+        '</div>' +
+
+        // Style presets (cards)
+        '<div class="simple-section">' +
+            '<label class="simple-label">Style</label>' +
+            '<div id="simple-style-scroll" class="simple-style-scroll"></div>' +
+            '<div id="simple-prompt-preview" class="simple-prompt-preview" style="display:none">' +
+                '<span class="simple-prompt-preview-label">Full prompt:</span>' +
+                '<span id="simple-prompt-preview-text" class="simple-prompt-preview-text"></span>' +
             '</div>' +
         '</div>' +
 
@@ -155,21 +219,32 @@ var SimpleMode = (function() {
 
         // Generate button
         '<div class="simple-section">' +
-            '<button id="simple-gen-btn" class="simple-gen-btn">Create Image</button>' +
+            '<button id="simple-gen-btn" class="simple-gen-btn">\u2726 Create Image</button>' +
         '</div>' +
 
         // Recent
         '<div class="simple-recent-section">' +
             '<div class="simple-recent-label">Recent</div>' +
             '<div id="simple-recent-grid" class="simple-recent-grid"></div>' +
+        '</div>' +
+
+        // Show intro link
+        '<div class="simple-show-intro">' +
+            '<a id="simple-show-intro-link">Show intro</a>' +
         '</div>';
     }
 
     function buildCenterHTML() {
         return '' +
             '<div id="simple-empty" class="simple-empty">' +
-                '<svg class="simple-empty-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>' +
-                '<span class="simple-empty-text">Your creation will appear here</span>' +
+                '<div class="simple-empty-icon">\u2726</div>' +
+                '<div class="simple-empty-title">Ready to create</div>' +
+                '<div class="simple-empty-subtitle">Pick a model, describe your idea, and hit Create</div>' +
+                '<div class="simple-empty-examples">' +
+                    '<span class="simple-example-prompt">A fox in a rainy forest at night</span>' +
+                    '<span class="simple-example-prompt">Portrait of an astronaut, oil painting style</span>' +
+                    '<span class="simple-example-prompt">Neon city street at midnight, cinematic</span>' +
+                '</div>' +
             '</div>' +
             '<img id="simple-preview-img" class="simple-preview-img" style="display:none" alt="Generated">' +
             '<video id="simple-preview-video" class="simple-preview-video" style="display:none" autoplay loop muted playsinline controls></video>' +
@@ -214,7 +289,60 @@ var SimpleMode = (function() {
         els.progress = document.getElementById('simple-progress');
         els.progressBar = document.getElementById('simple-progress-bar');
         els.errorBanner = document.getElementById('simple-error-banner');
-        els.stylesContainer = document.getElementById('simple-styles');
+        els.enhanceBtn = document.getElementById('simple-enhance-btn');
+        els.enhanceResult = document.getElementById('simple-enhance-result');
+        els.styleScroll = document.getElementById('simple-style-scroll');
+        els.archBadge = document.getElementById('simple-arch-badge');
+        els.showIntroLink = document.getElementById('simple-show-intro-link');
+    }
+
+    // ── Style Presets (visual cards) ──
+
+    function renderStylePresets(isVideo) {
+        var presets = isVideo ? videoStylePresets : imageStylePresets;
+        var scroll = document.getElementById('simple-style-scroll');
+        if (!scroll) return;
+        scroll.innerHTML = '';
+
+        // Restore saved preset or default to none
+        var savedPreset = localStorage.getItem('sf-simple-preset') || 'none';
+        if (!presets.find(function(p) { return p.id === savedPreset; })) savedPreset = 'none';
+        state.activeStyle = savedPreset;
+
+        presets.forEach(function(p) {
+            var card = document.createElement('div');
+            card.className = 'simple-style-card' + (p.id === savedPreset ? ' active' : '');
+            card.dataset.style = p.id;
+            card.innerHTML =
+                '<div class="simple-style-swatch" style="background:' + p.bg + '"></div>' +
+                '<span class="simple-style-card-label">' + p.label + '</span>';
+            scroll.appendChild(card);
+        });
+
+        scroll.onclick = function(e) {
+            var card = e.target.closest('.simple-style-card');
+            if (!card) return;
+            state.activeStyle = card.dataset.style;
+            localStorage.setItem('sf-simple-preset', state.activeStyle);
+            scroll.querySelectorAll('.simple-style-card').forEach(function(c) {
+                c.classList.toggle('active', c.dataset.style === state.activeStyle);
+            });
+            updatePromptPreview();
+        };
+    }
+
+    // ── Prompt Preview ──
+
+    function updatePromptPreview() {
+        var previewEl = document.getElementById('simple-prompt-preview');
+        var textEl = document.getElementById('simple-prompt-preview-text');
+        if (!previewEl || !textEl) return;
+        if (state.activeStyle === 'none' || !state.prompt.trim()) {
+            previewEl.style.display = 'none';
+            return;
+        }
+        previewEl.style.display = 'block';
+        textEl.textContent = getEffectivePrompt();
     }
 
     // ── Aspect Ratio Buttons ──
@@ -246,14 +374,176 @@ var SimpleMode = (function() {
         });
     }
 
+    // ── Smart Defaults ──
+
+    function applySmartDefaults(arch) {
+        var isVideo = arch === 'ltxv' || arch === 'wan';
+
+        // Set quality
+        setQualityPreset('balanced');
+
+        // Set aspect (16:9 for video, 1:1 for image)
+        var aspects = isVideo ? videoAspects : imageAspects;
+        var defaultIdx = isVideo ? 2 : 0; // 16:9 for video, 1:1 for image
+        if (aspects[defaultIdx]) {
+            state.width = aspects[defaultIdx].w;
+            state.height = aspects[defaultIdx].h;
+        }
+
+        // Duration
+        if (isVideo) setDurationPreset('medium');
+
+        // Render style presets
+        renderStylePresets(isVideo);
+    }
+
+    function setQualityPreset(q) {
+        state.quality = q;
+        var config = getQualityConfig(q);
+        state.steps = config.steps;
+        state.cfg = config.cfg;
+        state.scheduler = config.scheduler;
+        var row = document.getElementById('simple-quality');
+        if (row) {
+            row.querySelectorAll('.simple-quality-btn').forEach(function(b) {
+                b.classList.toggle('active', b.dataset.quality === q);
+            });
+        }
+    }
+
+    function setDurationPreset(d) {
+        state.duration = d;
+        var dp = durationPresets[d];
+        state.frames = dp.frames;
+        state.fps = dp.fps;
+        var row = document.getElementById('simple-duration');
+        if (row) {
+            row.querySelectorAll('.simple-duration-btn').forEach(function(b) {
+                b.classList.toggle('active', b.dataset.duration === d);
+            });
+        }
+    }
+
+    // ── Prompt Enhancer (local, no API) ──
+
+    function enhancePrompt() {
+        var original = state.prompt.trim();
+        if (!original) return;
+
+        var enhanceBtn = document.getElementById('simple-enhance-btn');
+        if (enhanceBtn) enhanceBtn.textContent = 'Enhancing...';
+
+        // Simulate brief processing
+        setTimeout(function() {
+            var enhanced = localEnhance(original, state.arch);
+            showEnhancedResult(original, enhanced);
+            if (enhanceBtn) enhanceBtn.textContent = '+ Enhance prompt';
+        }, 300);
+    }
+
+    function localEnhance(prompt, arch) {
+        var details = [];
+        var lower = prompt.toLowerCase();
+
+        // Add lighting if not mentioned
+        if (lower.indexOf('light') === -1 && lower.indexOf('lit') === -1) {
+            var lightOptions = ['soft natural lighting', 'golden hour lighting', 'dramatic side lighting', 'studio lighting with rim light', 'ambient diffused lighting'];
+            details.push(lightOptions[Math.floor(Math.random() * lightOptions.length)]);
+        }
+
+        // Add composition if not mentioned
+        if (lower.indexOf('composit') === -1 && lower.indexOf('angle') === -1 && lower.indexOf('shot') === -1) {
+            var compOptions = ['carefully composed', 'rule of thirds composition', 'centered symmetrical composition', 'dynamic diagonal composition'];
+            details.push(compOptions[Math.floor(Math.random() * compOptions.length)]);
+        }
+
+        // Add detail level
+        if (lower.indexOf('detail') === -1 && lower.indexOf('quality') === -1) {
+            details.push('highly detailed');
+        }
+
+        // Add mood/atmosphere if not mentioned
+        if (lower.indexOf('mood') === -1 && lower.indexOf('atmosphere') === -1 && lower.indexOf('vibe') === -1) {
+            var moodOptions = ['atmospheric', 'evocative atmosphere', 'rich atmosphere'];
+            details.push(moodOptions[Math.floor(Math.random() * moodOptions.length)]);
+        }
+
+        // Add technical quality
+        if (lower.indexOf('8k') === -1 && lower.indexOf('4k') === -1 && lower.indexOf('hd') === -1) {
+            details.push('high resolution');
+        }
+
+        // Arch-specific additions
+        if (arch === 'flux' || arch === 'sdxl') {
+            details.push('masterful execution');
+        }
+
+        return prompt + ', ' + details.join(', ');
+    }
+
+    function showEnhancedResult(original, enhanced) {
+        var container = document.getElementById('simple-enhance-result');
+        if (!container) return;
+        container.innerHTML =
+            '<div class="enhance-original">' + escapeHtml(original) + '</div>' +
+            '<div class="enhance-arrow">\u2193 Enhanced</div>' +
+            '<div class="enhance-new">' + escapeHtml(enhanced) + '</div>' +
+            '<div class="enhance-actions">' +
+                '<button id="enhance-accept" class="enhance-accept-btn">Use this \u25b6</button>' +
+                '<button id="enhance-dismiss" class="enhance-dismiss-btn">Keep original \u2715</button>' +
+            '</div>';
+        container.style.display = 'block';
+
+        document.getElementById('enhance-accept').onclick = function() {
+            state.prompt = enhanced;
+            els.prompt.value = enhanced;
+            els.prompt.style.height = 'auto';
+            els.prompt.style.height = Math.max(100, els.prompt.scrollHeight) + 'px';
+            container.style.display = 'none';
+            updatePromptPreview();
+        };
+        document.getElementById('enhance-dismiss').onclick = function() {
+            container.style.display = 'none';
+        };
+    }
+
+    function escapeHtml(str) {
+        var div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    // ── Onboarding ──
+
+    function showOnboarding() {
+        var overlay = document.getElementById('simple-onboarding');
+        if (overlay) {
+            overlay.style.display = 'flex';
+            overlay.style.opacity = '0';
+            requestAnimationFrame(function() {
+                overlay.style.opacity = '1';
+            });
+        }
+    }
+
+    function dismissOnboarding() {
+        var overlay = document.getElementById('simple-onboarding');
+        if (overlay) {
+            overlay.style.opacity = '0';
+            setTimeout(function() { overlay.style.display = 'none'; }, 300);
+        }
+        localStorage.setItem('sf-has-visited', '1');
+    }
+
     // ── Event Binding ──
 
     function bindEvents() {
-        // Prompt auto-grow
+        // Prompt auto-grow + preview update
         els.prompt.addEventListener('input', function() {
             state.prompt = this.value;
             this.style.height = 'auto';
             this.style.height = Math.max(100, this.scrollHeight) + 'px';
+            updatePromptPreview();
         });
 
         els.negPrompt.addEventListener('input', function() {
@@ -266,46 +556,26 @@ var SimpleMode = (function() {
             els.advBody.classList.toggle('open');
         });
 
-        // Style presets
-        els.stylesContainer.addEventListener('click', function(e) {
-            var pill = e.target.closest('.simple-style-pill');
-            if (!pill) return;
-            var styleId = pill.dataset.style;
-            state.activeStyle = styleId;
-            els.stylesContainer.querySelectorAll('.simple-style-pill').forEach(function(p) {
-                p.classList.toggle('active', p.dataset.style === styleId);
-            });
-        });
-
-        // Quality presets
+        // Quality presets (with arch-aware config)
         els.qualityRow.addEventListener('click', function(e) {
             var btn = e.target.closest('.simple-quality-btn');
             if (!btn) return;
-            var q = btn.dataset.quality;
-            state.quality = q;
-            state.steps = qualityPresets[q].steps;
-            els.qualityRow.querySelectorAll('.simple-quality-btn').forEach(function(b) {
-                b.classList.toggle('active', b.dataset.quality === q);
-            });
+            setQualityPreset(btn.dataset.quality);
         });
 
         // Duration presets
         els.durationRow.addEventListener('click', function(e) {
             var btn = e.target.closest('.simple-duration-btn');
             if (!btn) return;
-            var d = btn.dataset.duration;
-            state.duration = d;
-            state.frames = durationPresets[d].frames;
-            state.fps = durationPresets[d].fps;
-            els.durationRow.querySelectorAll('.simple-duration-btn').forEach(function(b) {
-                b.classList.toggle('active', b.dataset.duration === d);
-            });
+            setDurationPreset(btn.dataset.duration);
         });
 
         // Model change
         els.model.addEventListener('change', function() {
             state.model = this.value;
-            updateUIForArch(ModelUtils.detectArchFromFilename(this.value));
+            var arch = ModelUtils.detectArchFromFilename(this.value);
+            updateUIForArch(arch);
+            applySmartDefaults(arch);
             // Update topbar model badge
             var badge = document.querySelector('.model-badge');
             if (badge) badge.textContent = this.value;
@@ -315,6 +585,31 @@ var SimpleMode = (function() {
         els.genBtn.addEventListener('click', function() {
             generate();
         });
+
+        // Enhance prompt
+        els.enhanceBtn.addEventListener('click', function() {
+            enhancePrompt();
+        });
+
+        // Show intro link
+        if (els.showIntroLink) {
+            els.showIntroLink.addEventListener('click', function(e) {
+                e.preventDefault();
+                showOnboarding();
+            });
+        }
+
+        // Onboarding dismiss
+        var onboardingStartBtn = document.getElementById('onboarding-start-btn');
+        if (onboardingStartBtn) {
+            onboardingStartBtn.addEventListener('click', dismissOnboarding);
+        }
+        var onboardingBackdrop = document.getElementById('simple-onboarding');
+        if (onboardingBackdrop) {
+            onboardingBackdrop.addEventListener('click', function(e) {
+                if (e.target === onboardingBackdrop) dismissOnboarding();
+            });
+        }
 
         // Action bar
         els.download.addEventListener('click', function() {
@@ -333,14 +628,15 @@ var SimpleMode = (function() {
         });
 
         els.toAdvanced.addEventListener('click', function() {
+            if (!state.currentImage) return;
+            // Store data for Canvas tab
+            localStorage.setItem('sf-send-to-canvas', JSON.stringify({
+                src: state.currentImage,
+                isVideo: state.currentIsVideo,
+                prompt: state.prompt,
+                model: state.model
+            }));
             if (typeof setMode === 'function') {
-                // Store current image for Canvas tab to pick up
-                if (state.currentImage) {
-                    localStorage.setItem('sf-send-to-canvas', JSON.stringify({
-                        src: state.currentImage,
-                        isVideo: state.currentIsVideo
-                    }));
-                }
                 setMode('advanced');
                 switchTab('canvas');
             }
@@ -348,6 +644,17 @@ var SimpleMode = (function() {
 
         els.clearPreview.addEventListener('click', function() {
             clearPreview();
+        });
+
+        // Example prompts
+        document.querySelectorAll('.simple-example-prompt').forEach(function(el) {
+            el.addEventListener('click', function() {
+                state.prompt = this.textContent;
+                els.prompt.value = this.textContent;
+                els.prompt.style.height = 'auto';
+                els.prompt.style.height = Math.max(100, els.prompt.scrollHeight) + 'px';
+                updatePromptPreview();
+            });
         });
     }
 
@@ -365,7 +672,9 @@ var SimpleMode = (function() {
                     els.model.appendChild(opt);
                 });
                 state.model = models[0].name;
-                updateUIForArch(ModelUtils.detectArchFromFilename(models[0].name));
+                var arch = ModelUtils.detectArchFromFilename(models[0].name);
+                updateUIForArch(arch);
+                applySmartDefaults(arch);
                 // Update topbar badge
                 var badge = document.querySelector('.model-badge');
                 if (badge) badge.textContent = models[0].name;
@@ -394,7 +703,7 @@ var SimpleMode = (function() {
         els.durationSection.style.display = isVideo ? 'block' : 'none';
 
         // Button label
-        els.genBtn.textContent = isVideo ? 'Create Video' : 'Create Image';
+        els.genBtn.textContent = isVideo ? '\u2726 Create Video' : '\u2726 Create Image';
 
         // Rebuild aspect buttons
         buildAspectButtons();
@@ -412,6 +721,18 @@ var SimpleMode = (function() {
             state.frames = dp.frames;
             state.fps = dp.fps;
         }
+
+        // Update arch badge
+        var archNames = {
+            flux: 'FLUX \u00b7 Image', sdxl: 'SDXL \u00b7 Image', sd3: 'SD3 \u00b7 Image',
+            sd15: 'SD1.5 \u00b7 Image', ltxv: 'LTX-V \u00b7 Video', wan: 'Wan \u00b7 Video',
+            klein: 'Klein \u00b7 Image'
+        };
+        var badge = document.getElementById('simple-arch-badge');
+        if (badge) {
+            badge.textContent = archNames[arch] || arch;
+            badge.dataset.arch = arch;
+        }
     }
 
     // ── Workflow Builder ──
@@ -419,7 +740,8 @@ var SimpleMode = (function() {
     function getEffectivePrompt() {
         var prompt = state.prompt;
         if (state.activeStyle && state.activeStyle !== 'none') {
-            var style = stylePresets.find(function(s) { return s.id === state.activeStyle; });
+            var presets = getActiveStylePresets();
+            var style = presets.find(function(s) { return s.id === state.activeStyle; });
             if (style && style.suffix) {
                 prompt += style.suffix;
             }
@@ -428,16 +750,18 @@ var SimpleMode = (function() {
     }
 
     function buildWorkflow() {
+        // Apply quality config before building
+        var config = getQualityConfig(state.quality);
         return WorkflowBuilder.build({
             model: state.model,
             prompt: getEffectivePrompt(),
             negPrompt: state.negPrompt,
             width: state.width,
             height: state.height,
-            steps: state.steps,
-            cfg: state.cfg,
+            steps: config.steps,
+            cfg: config.cfg,
             guidance: state.guidance,
-            scheduler: state.scheduler,
+            scheduler: config.scheduler,
             seed: state.seed,
             frames: state.frames,
             fps: state.fps
@@ -480,7 +804,7 @@ var SimpleMode = (function() {
             els.progress.classList.add('active');
             els.progressBar.style.width = '100%';
         } else {
-            els.genBtn.textContent = isVideoModel() ? 'Create Video' : 'Create Image';
+            els.genBtn.textContent = isVideoModel() ? '\u2726 Create Video' : '\u2726 Create Image';
             els.progress.classList.remove('active');
             els.progressBar.style.width = '0%';
         }
@@ -525,7 +849,7 @@ var SimpleMode = (function() {
 
     function addToRecent(src, isVideo) {
         state.recent.unshift({ src: src, isVideo: !!isVideo });
-        if (state.recent.length > 6) state.recent.pop();
+        if (state.recent.length > 8) state.recent.pop();
         renderRecent();
         saveRecent();
     }
@@ -567,7 +891,7 @@ var SimpleMode = (function() {
         try {
             var saved = JSON.parse(localStorage.getItem('sf-simple-recent'));
             if (saved && Array.isArray(saved)) {
-                state.recent = saved.slice(0, 6);
+                state.recent = saved.slice(0, 8);
                 renderRecent();
             }
         } catch(e) { /* ignore */ }
@@ -614,6 +938,21 @@ var SimpleMode = (function() {
             }
             addToRecent(src, isVideo);
             setGenerating(false);
+
+            // Pop animation on preview
+            var previewEl = isVideo ? els.previewVideo : els.previewImg;
+            if (previewEl) {
+                previewEl.classList.add('simple-pop');
+                setTimeout(function() { previewEl.classList.remove('simple-pop'); }, 400);
+            }
+
+            // Brief "Done" on button
+            els.genBtn.textContent = '\u2713 Done';
+            setTimeout(function() {
+                if (!state.generating) {
+                    els.genBtn.textContent = isVideoModel() ? '\u2726 Create Video' : '\u2726 Create Image';
+                }
+            }, 1500);
         });
 
         SerenityWS.on('execution_error', function(data) {
@@ -635,6 +974,12 @@ var SimpleMode = (function() {
         loadModels();
         restoreRecent();
         connectWS();
+        renderStylePresets(false);
+
+        // Show onboarding for first-time visitors
+        if (!localStorage.getItem('sf-has-visited')) {
+            showOnboarding();
+        }
     }
 
     return {

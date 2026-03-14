@@ -2296,6 +2296,8 @@ var CanvasTab = (function() {
                         };
                         img.src = data.src;
                     }
+                    if (data.prompt) setPrompt(data.prompt);
+                    if (data.model) setModel(data.model);
                 } catch(e) {}
             }
 
@@ -2306,9 +2308,57 @@ var CanvasTab = (function() {
         });
     }
 
+    // ── Public API for Simple Mode ──
+
+    function loadImageFromURL(src) {
+        return new Promise(function(resolve) {
+            if (!konvaReady) { resolve(); return; }
+            var img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = function() {
+                var kImg = new Konva.Image({
+                    image: img,
+                    x: boundingBox.x(),
+                    y: boundingBox.y(),
+                    width: boundingBox.width(),
+                    height: boundingBox.height(),
+                    draggable: activeTool === 'select'
+                });
+                var layer = getActiveKonvaLayer();
+                if (layer) {
+                    layer.add(kImg);
+                    layer.batchDraw();
+                }
+                History.push();
+                resolve();
+            };
+            img.onerror = function() { resolve(); };
+            img.src = src;
+        });
+    }
+
+    function setPrompt(text) {
+        if (els.prompt) {
+            els.prompt.value = text || '';
+            genState.prompt = text || '';
+        }
+    }
+
+    function setModel(modelName) {
+        if (els.model && modelName) {
+            els.model.value = modelName;
+            genState.model = modelName;
+            updateTopbarModel(modelName);
+            updateCanvasUIForArch(ModelUtils.detectArchFromFilename(modelName));
+        }
+    }
+
     return {
         init: init,
         resize: resizeStage,
-        saveState: saveState
+        saveState: saveState,
+        loadImageFromURL: loadImageFromURL,
+        setPrompt: setPrompt,
+        setModel: setModel
     };
 })();
