@@ -431,13 +431,19 @@ var SimpleMode = (function() {
         if (!original) return;
 
         var enhanceBtn = document.getElementById('simple-enhance-btn');
-        if (enhanceBtn) enhanceBtn.textContent = 'Enhancing...';
+        if (enhanceBtn) {
+            enhanceBtn.textContent = 'Enhancing...';
+            enhanceBtn.disabled = true;
+        }
 
-        // Simulate brief processing
+        // Local processing (no API calls)
         setTimeout(function() {
             var enhanced = localEnhance(original, state.arch);
             showEnhancedResult(original, enhanced);
-            if (enhanceBtn) enhanceBtn.textContent = '+ Enhance prompt';
+            if (enhanceBtn) {
+                enhanceBtn.textContent = '+ Enhance prompt';
+                enhanceBtn.disabled = false;
+            }
         }, 300);
     }
 
@@ -917,7 +923,7 @@ var SimpleMode = (function() {
         });
 
         SerenityWS.on('executed', function(data) {
-            if (!data || !data.output) return;
+            if (!data || !data.output || !state.generating) return;
             var items = data.output.images;
             var isVideo = false;
             if (!items && data.output.videos) {
