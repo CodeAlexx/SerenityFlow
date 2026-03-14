@@ -1154,13 +1154,15 @@ class LTXVModelWrapper:
     Uses ltx_pipelines ModelLedger directly (same path as LTX2-Desktop app).
     No diffusers — loads ComfyUI-format single-file safetensors via ltx_core.
     """
-    __slots__ = ("model_ledger", "device", "dtype", "_arch")
+    __slots__ = ("model_ledger", "device", "dtype", "_arch", "checkpoint_path")
 
-    def __init__(self, model_ledger: Any, device: torch.device, dtype: torch.dtype):
+    def __init__(self, model_ledger: Any, device: torch.device, dtype: torch.dtype,
+                 checkpoint_path: str = ""):
         self.model_ledger = model_ledger
         self.device = device
         self.dtype = dtype
         self._arch = "ltxv"
+        self.checkpoint_path = checkpoint_path
 
     def vae_decode(self, latent: torch.Tensor) -> torch.Tensor:
         """Decode 5D video latent [B,C,T,H,W] to pixel frames."""
@@ -1171,7 +1173,7 @@ class LTXVModelWrapper:
         decoded = vae_decode_video(latent.to(device=self.device, dtype=self.dtype), video_decoder)
         # decode_video may return Iterator or Tensor — materialise
         if not isinstance(decoded, torch.Tensor):
-            decoded = torch.cat(list(decoded), dim=2)
+            decoded = torch.cat(list(decoded), dim=0)
         del video_decoder
         gc.collect()
         torch.cuda.empty_cache()
@@ -1217,7 +1219,7 @@ def load_ltxv_model(
     )
 
     logger.info("LTX-V ModelLedger created (components load on demand)")
-    return LTXVModelWrapper(ledger, device, torch_dtype)
+    return LTXVModelWrapper(ledger, device, torch_dtype, checkpoint_path=checkpoint_path)
 
 
 def _stagehand_config_te(gemma_root: str = ""):
@@ -1307,6 +1309,28 @@ def _move_non_blocks_to_device(root_module, block_container, device):
                     root_module._buffers[name] = buf.to(device, non_blocking=True)
 
 
+def _detect_ltxv_mode(checkpoint_path: str, mode: str) -> str:
+    """Resolve 'auto' mode to 'distilled' or 'dev' based on checkpoint filename."""
+    if mode != "auto":
+        return mode
+    name = checkpoint_path.lower()
+    if "distilled" in name:
+        return "distilled"
+    if "dev" in name:
+        return "dev"
+    # Default to distilled if unclear (safer -- works without CFG)
+    return "distilled"
+
+
+_DEFAULT_NEGATIVE_PROMPT = (
+    "blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, "
+    "excessive noise, grainy texture, poor lighting, flickering, motion blur, distorted "
+    "proportions, deformed facial features, extra limbs, disfigured hands, artifacts, "
+    "inconsistent perspective, camera shake, cartoonish rendering, 3D CGI look, "
+    "unrealistic materials, uncanny valley effect"
+)
+
+
 @torch.inference_mode()
 def sample_ltxv(
     model: LTXVModelWrapper,
@@ -1316,7 +1340,7 @@ def sample_ltxv(
     width: int = 768,
     height: int = 512,
     num_frames: int = 25,
-    steps: int = 40,
+    steps: int = 8,
     guidance_scale: float = 3.0,
     stg_scale: float = 1.0,
     stg_blocks: list[int] | None = None,
@@ -1324,11 +1348,18 @@ def sample_ltxv(
     seed: int = 42,
     frame_rate: float = 25.0,
     dtype: str = "bfloat16",
+    mode: str = "auto",
 ) -> dict[str, torch.Tensor | None]:
     """Generate video using LTX-V via ltx_pipelines + Stagehand block-swap.
 
     Same pipeline as LTX2-Desktop: load each component to CPU, use Stagehand
     to stream transformer blocks through GPU one at a time. Fits in 24GB VRAM.
+
+    Supports two modes:
+      - "distilled": Fixed 8-step sigma schedule, no CFG (for distilled checkpoints)
+      - "dev": LTX2Scheduler sigma schedule with CFG/STG guidance (for dev checkpoints)
+      - "auto": Auto-detect from checkpoint filename (default)
+
     Returns {"video": [B,C,T,H,W] tensor, "audio": tensor or None}.
     """
     import gc
@@ -1349,6 +1380,20 @@ def sample_ltxv(
 
     ledger = model.model_ledger
     device = model.device
+
+    # Resolve mode from checkpoint name
+    resolved_mode = _detect_ltxv_mode(model.checkpoint_path, mode)
+    is_dev = resolved_mode == "dev"
+
+    if is_dev:
+        # Dev mode: use configured steps (default 30), need negative prompt for CFG
+        if steps <= 8:
+            steps = 30  # override low step counts that were meant for distilled
+        if not negative_prompt:
+            negative_prompt = _DEFAULT_NEGATIVE_PROMPT
+        logger.info("LTX-V dev mode: %d steps, cfg=%.1f, stg=%.1f", steps, guidance_scale, stg_scale)
+    else:
+        logger.info("LTX-V distilled mode: 8 steps (fixed sigma schedule)")
 
     # ---------------------------------------------------------------
     # 1. Text encoding with Stagehand (Gemma 3 12B)
@@ -1371,11 +1416,20 @@ def sample_ltxv(
     )
     logger.info("Stagehand TE ready (%d blocks)", len(te_runtime._registry))
 
-    # Encode prompt
+    # Encode positive prompt
     te_runtime.begin_step(0)
     with te_runtime.managed_forward():
         raw_hs, raw_mask = text_encoder.encode(prompt)
     te_runtime.end_step()
+
+    # Encode negative prompt for dev mode (CFG requires it)
+    neg_raw_hs = None
+    neg_raw_mask = None
+    if is_dev and negative_prompt:
+        te_runtime.begin_step(1)
+        with te_runtime.managed_forward():
+            neg_raw_hs, neg_raw_mask = text_encoder.encode(negative_prompt)
+        te_runtime.end_step()
 
     # Shut down TE Stagehand, free text encoder
     te_runtime.shutdown()
@@ -1393,6 +1447,20 @@ def sample_ltxv(
     audio_context = context_p.audio_encoding
     if audio_context is not None:
         audio_context = audio_context.clone()
+
+    # Process negative embeddings for dev mode
+    neg_video_context = None
+    neg_audio_context = None
+    if neg_raw_hs is not None:
+        neg_raw_hs = tuple(h.to(device=device) for h in neg_raw_hs)
+        neg_raw_mask = neg_raw_mask.to(device=device)
+        neg_context_p = emb_proc.process_hidden_states(neg_raw_hs, neg_raw_mask)
+        neg_video_context = neg_context_p.video_encoding.clone()
+        neg_audio_context = neg_context_p.audio_encoding
+        if neg_audio_context is not None:
+            neg_audio_context = neg_audio_context.clone()
+        del neg_context_p, neg_raw_hs, neg_raw_mask
+
     del emb_proc, raw_hs, raw_mask, context_p
     gc.collect()
     cleanup_memory()
@@ -1423,14 +1491,69 @@ def sample_ltxv(
     generator = torch.Generator(device=device).manual_seed(seed)
     noiser = GaussianNoiser(generator=generator)
     stepper = EulerDiffusionStep()
-    sigmas = torch.tensor(DISTILLED_SIGMA_VALUES, device=device)
     components = PipelineComponents(dtype=model.dtype, device=device)
 
-    base_fn = simple_denoising_func(
-        video_context=video_context,
-        audio_context=audio_context,
-        transformer=transformer,
-    )
+    # Build sigmas and denoising function based on mode
+    if is_dev:
+        # Dev mode: LTX2Scheduler for sigma schedule + CFG/STG guidance
+        from ltx_core.components.schedulers import LTX2Scheduler
+        from ltx_core.components.guiders import (
+            MultiModalGuiderParams,
+            create_multimodal_guider_factory,
+        )
+        from ltx_pipelines.utils.helpers import multi_modal_guider_factory_denoising_func
+
+        sigmas = LTX2Scheduler().execute(steps=steps).to(
+            dtype=torch.float32, device=device,
+        )
+
+        if stg_blocks is None:
+            stg_blocks = [28]  # LTX 2.3 default
+
+        video_guider_params = MultiModalGuiderParams(
+            cfg_scale=guidance_scale,
+            stg_scale=stg_scale,
+            rescale_scale=stg_rescale,
+            modality_scale=3.0,
+            skip_step=0,
+            stg_blocks=stg_blocks,
+        )
+        audio_guider_params = MultiModalGuiderParams(
+            cfg_scale=7.0,
+            stg_scale=stg_scale,
+            rescale_scale=stg_rescale,
+            modality_scale=3.0,
+            skip_step=0,
+            stg_blocks=stg_blocks,
+        )
+
+        video_guider_factory = create_multimodal_guider_factory(
+            params=video_guider_params,
+            negative_context=neg_video_context,
+        )
+        audio_guider_factory = create_multimodal_guider_factory(
+            params=audio_guider_params,
+            negative_context=neg_audio_context,
+        )
+
+        base_fn = multi_modal_guider_factory_denoising_func(
+            video_guider_factory=video_guider_factory,
+            audio_guider_factory=audio_guider_factory,
+            v_context=video_context,
+            a_context=audio_context,
+            transformer=transformer,
+        )
+    else:
+        # Distilled mode: fixed sigma schedule, simple denoising (no CFG)
+        sigmas = torch.tensor(
+            DISTILLED_SIGMA_VALUES, dtype=torch.float32, device=device,
+        )
+
+        base_fn = simple_denoising_func(
+            video_context=video_context,
+            audio_context=audio_context,
+            transformer=transformer,
+        )
 
     _call = [0]
     n_steps = len(sigmas) - 1
@@ -1457,7 +1580,10 @@ def sample_ltxv(
         batch=1, frames=num_frames, width=width, height=height, fps=frame_rate,
     )
 
-    logger.info("Denoising %d steps at %dx%d, %d frames...", n_steps, width, height, num_frames)
+    logger.info(
+        "Denoising %d steps at %dx%d, %d frames (mode=%s)...",
+        n_steps, width, height, num_frames, resolved_mode,
+    )
     video_state, audio_state = denoise_audio_video(
         output_shape=output_shape,
         conditionings=[],
@@ -1483,7 +1609,7 @@ def sample_ltxv(
     video_decoder = ledger.video_decoder()
     decoded_video = vae_decode_video(video_state.latent, video_decoder)
     if not isinstance(decoded_video, torch.Tensor):
-        decoded_video = torch.cat(list(decoded_video), dim=2)
+        decoded_video = torch.cat(list(decoded_video), dim=0)
 
     # ---------------------------------------------------------------
     # 4. Decode audio (optional)

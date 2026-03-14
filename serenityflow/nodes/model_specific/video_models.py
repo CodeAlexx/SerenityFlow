@@ -76,7 +76,7 @@ def ltxv_loader(checkpoint_path, gemma_path, dtype="bfloat16"):
         "width": ("INT", {"default": 768, "min": 64, "max": 1920, "step": 32}),
         "height": ("INT", {"default": 512, "min": 64, "max": 1088, "step": 32}),
         "num_frames": ("INT", {"default": 25, "min": 1, "max": 257, "step": 8}),
-        "steps": ("INT", {"default": 40, "min": 1, "max": 200}),
+        "steps": ("INT", {"default": 8, "min": 1, "max": 200}),
         "cfg": ("FLOAT", {"default": 3.0, "min": 1.0, "max": 20.0, "step": 0.5}),
         "seed": ("INT", {"default": 42}),
     },
@@ -84,12 +84,18 @@ def ltxv_loader(checkpoint_path, gemma_path, dtype="bfloat16"):
         "negative_prompt": ("STRING", {"multiline": True}),
         "frame_rate": ("FLOAT", {"default": 25.0, "min": 1.0, "max": 60.0}),
         "stg_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0}),
+        "mode": (["auto", "distilled", "dev"], {"default": "auto"}),
     }},
 )
 def ltxv_sampler(ltxv_model, prompt, width=768, height=512, num_frames=25,
-                 steps=40, cfg=3.0, seed=42, negative_prompt="",
-                 frame_rate=25.0, stg_scale=1.0):
+                 steps=8, cfg=3.0, seed=42, negative_prompt="",
+                 frame_rate=25.0, stg_scale=1.0, mode="auto"):
     """Generate video frames using LTX-V 19B.
+
+    Mode controls the denoising schedule:
+      - "auto": detect from checkpoint name (distilled vs dev)
+      - "distilled": fixed 8-step sigma schedule, no CFG
+      - "dev": LTX2Scheduler with CFG/STG guidance, more steps
 
     Returns decoded video frames as IMAGE tensor [F, H, W, C].
     """
@@ -107,6 +113,7 @@ def ltxv_sampler(ltxv_model, prompt, width=768, height=512, num_frames=25,
         stg_scale=stg_scale,
         seed=seed,
         frame_rate=frame_rate,
+        mode=mode,
     )
 
     video = result["video"]

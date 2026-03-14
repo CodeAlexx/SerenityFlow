@@ -431,7 +431,7 @@ var GenerateTab = (function() {
             if (!state.currentImage) return;
             var a = document.createElement('a');
             a.href = state.currentImage;
-            var ext = state.currentIsVideo ? '.webp' : '.png';
+            var ext = state.currentIsVideo ? '.mp4' : '.png';
             a.download = 'serenityflow_' + Date.now() + ext;
             a.click();
         });

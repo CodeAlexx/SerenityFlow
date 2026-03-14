@@ -238,12 +238,14 @@ var WorkflowBuilder = (function() {
                 cfg: 3.0,
                 seed: seed,
                 frame_rate: fps,
-                stg_scale: 1.0
+                stg_scale: 1.0,
+                mode: 'auto'
             }},
-            '3': { class_type: 'SaveAnimatedWEBP', inputs: {
-                images: ['2', 0],
+            '3': { class_type: 'SaveVideo', inputs: {
+                video: ['2', 0],
                 filename_prefix: 'sf_video',
-                fps: fps
+                fps: fps,
+                format: 'mp4'
             }}
         };
     }

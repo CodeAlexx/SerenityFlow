@@ -83,9 +83,8 @@ def video_save(images, filename_prefix="SerenityFlow", fps=24.0, format="mp4"):
     import numpy as np
     from PIL import Image
 
-    from serenityflow.bridge.model_paths import get_model_paths
-    paths = get_model_paths()
-    output_dir = os.path.join(paths.base_dir, "output")
+    # Use the server's output directory (CWD-relative "output") so /view can serve it
+    output_dir = os.path.realpath("output")
     os.makedirs(output_dir, exist_ok=True)
 
     # Write frames to temp directory
@@ -122,9 +121,8 @@ def video_preview(images, fps=24.0):
     import numpy as np
     from PIL import Image
 
-    from serenityflow.bridge.model_paths import get_model_paths
-    paths = get_model_paths()
-    temp_dir = os.path.join(paths.base_dir, "temp")
+    # Use the server's temp directory (CWD-relative "temp") so /view can serve it
+    temp_dir = os.path.realpath("temp")
     os.makedirs(temp_dir, exist_ok=True)
 
     frames = []
@@ -331,9 +329,8 @@ def save_animated_webp(images, filename_prefix="SerenityFlow", fps=24.0):
     import numpy as np
     from PIL import Image
 
-    from serenityflow.bridge.model_paths import get_model_paths
-    paths = get_model_paths()
-    output_dir = os.path.join(paths.base_dir, "output")
+    # Use the server's output directory (CWD-relative "output") so /view can serve it
+    output_dir = os.path.realpath("output")
     os.makedirs(output_dir, exist_ok=True)
 
     frames = []
