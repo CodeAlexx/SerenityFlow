@@ -68,3 +68,14 @@ var SerenityAPI = (function() {
         viewUrl: viewUrl
     };
 })();
+
+/**
+ * SFApi — Compatibility shim for the graph editor (app.js).
+ * The old SFApi class was replaced by SerenityAPI in Phase 6,
+ * but app.js still does `new SFApi()` and `sfApi.connect()`.
+ */
+function SFApi() {
+    this.connect = function() {
+        // SerenityWS auto-connects on load — nothing needed here
+    };
+}

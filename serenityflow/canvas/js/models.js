@@ -101,7 +101,7 @@ var ModelsTab = (function() {
 
     function load() {
         allModels = [];
-        return fetch('/object_info')
+        return fetch('/object_info', { cache: 'no-store' })
             .then(function(resp) { return resp.ok ? resp.json() : {}; })
             .then(function(info) {
                 var seen = {};
