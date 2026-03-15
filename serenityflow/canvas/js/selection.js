@@ -99,9 +99,34 @@ class SFSelection {
     }
 
     _setupKeyboard() {
-        document.addEventListener('keydown', (e) => {
-            // Don't handle when typing in input
-            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) {
+        this._onKeyDown = (e) => {
+            // Input guard: don't intercept when typing in form fields (InvokeAI pattern)
+            if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement ||
+                e.target.tagName === 'SELECT' || e.target.isContentEditable) {
+                return;
+            }
+
+            // Space = temporary pan tool (InvokeAI pattern)
+            if (e.key === ' ') {
+                e.preventDefault();
+                this.canvas.startSpacePan();
+                return;
+            }
+
+            // Alt = prevent Chrome menu bar activation (InvokeAI pattern)
+            if (e.key === 'Alt') {
+                e.preventDefault();
+                return;
+            }
+
+            // Escape = cancel current operation / dismiss context menu
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                // Cancel active connection drag
+                if (this.canvas.draggingConnection) {
+                    this.canvas.cancelConnectionDrag();
+                }
+                // Context menu and node search are dismissed by their own Escape handlers
                 return;
             }
 
@@ -185,7 +210,42 @@ class SFSelection {
                 var snapBtn = document.getElementById('vc-snap');
                 if (snapBtn) snapBtn.classList.toggle('active', this.canvas.snapToGrid);
             }
-        });
+        };
+
+        this._onKeyUp = (e) => {
+            // Input guard
+            if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement ||
+                e.target.tagName === 'SELECT' || e.target.isContentEditable) {
+                return;
+            }
+
+            // Space release = revert from pan tool
+            if (e.key === ' ') {
+                e.preventDefault();
+                this.canvas.endSpacePan();
+            }
+
+            // Alt release
+            if (e.key === 'Alt') {
+                e.preventDefault();
+            }
+        };
+
+        // Window-level blur: release space-pan if window loses focus while space is held
+        this._onBlur = () => {
+            this.canvas.endSpacePan();
+        };
+
+        document.addEventListener('keydown', this._onKeyDown);
+        document.addEventListener('keyup', this._onKeyUp);
+        window.addEventListener('blur', this._onBlur);
+
+        // Register cleanups
+        this.canvas._cleanups.push(
+            () => document.removeEventListener('keydown', this._onKeyDown),
+            () => document.removeEventListener('keyup', this._onKeyUp),
+            () => window.removeEventListener('blur', this._onBlur),
+        );
     }
 
     _copy() {

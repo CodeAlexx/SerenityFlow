@@ -47,7 +47,27 @@ def main():
     if args.workflow:
         run_workflow(args)
     else:
-        print("Server mode not implemented yet. Use --workflow to run directly.")
+        from serenityflow.server.__main__ import main as server_main
+        sys.argv = [sys.argv[0],
+                    "--host", args.listen,
+                    "--port", str(args.port)]
+        if args.model_dir and args.model_dir != ".":
+            sys.argv += ["--model-dir", args.model_dir]
+        if args.verbose:
+            sys.argv.append("--verbose")
+        if args.stagehand_disable:
+            sys.argv.append("--stagehand-disable")
+        if args.stagehand_pool_mb:
+            sys.argv += ["--stagehand-pool-mb", str(args.stagehand_pool_mb)]
+        if args.stagehand_vram_budget:
+            sys.argv += ["--stagehand-vram-budget", str(args.stagehand_vram_budget)]
+        if args.stagehand_prefetch != 3:
+            sys.argv += ["--stagehand-prefetch", str(args.stagehand_prefetch)]
+        if args.stagehand_block_threshold != 2048:
+            sys.argv += ["--stagehand-block-threshold", str(args.stagehand_block_threshold)]
+        if args.stagehand_telemetry:
+            sys.argv.append("--stagehand-telemetry")
+        server_main()
 
 
 def run_workflow(args):

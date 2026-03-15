@@ -39,9 +39,22 @@ class SFCanvas {
         this.gridSize = 20;
         this.showMinimap = true;
 
+        // Canvas container: suppress touch/selection defaults (InvokeAI pattern)
+        this.container.style.touchAction = 'none';
+        this.container.style.userSelect = 'none';
+        this.container.style.webkitUserSelect = 'none';
+
+        // Space-to-pan state
+        this._spaceDown = false;
+        this._prePanDraggable = false;
+
+        // Cleanup registry for unmount
+        this._cleanups = [];
+
         this._setupZoom();
         this._setupResize();
         this._setupStageDrag();
+        this._setupMiddleMousePan();
         this._drawGrid();
         this._createViewportControls();
         this._createMinimap();
@@ -95,10 +108,53 @@ class SFCanvas {
 
         // Prevent stage drag when dragging a node
         this.stage.on('mousedown', (e) => {
+            // Space-pan overrides: always allow drag when space is held
+            if (this._spaceDown) {
+                this.stage.draggable(true);
+                return;
+            }
             // Only allow stage drag if clicking on empty space or grid
             const clickedOnEmpty = e.target === this.stage || e.target.getLayer() === this.gridLayer;
             this.stage.draggable(clickedOnEmpty);
         });
+    }
+
+    // Middle mouse button panning (InvokeAI pattern)
+    _setupMiddleMousePan() {
+        this.stage.on('mousedown', (e) => {
+            if (e.evt.button === 1) { // middle click
+                e.evt.preventDefault();
+                this.stage.draggable(true);
+                this.stage.container().style.cursor = 'grabbing';
+            }
+        });
+
+        this.stage.on('mouseup', (e) => {
+            if (e.evt.button === 1) {
+                this.stage.container().style.cursor = '';
+            }
+        });
+
+        this.stage.on('dragend', () => {
+            this.stage.container().style.cursor = '';
+            this._updateMinimap();
+        });
+    }
+
+    // Space-to-pan: enable temporary pan mode
+    startSpacePan() {
+        if (this._spaceDown) return;
+        this._spaceDown = true;
+        this._prePanDraggable = this.stage.draggable();
+        this.stage.draggable(true);
+        this.stage.container().style.cursor = 'grab';
+    }
+
+    endSpacePan() {
+        if (!this._spaceDown) return;
+        this._spaceDown = false;
+        this.stage.draggable(this._prePanDraggable);
+        this.stage.container().style.cursor = '';
     }
 
     _drawGrid() {
@@ -641,5 +697,28 @@ class SFCanvas {
         this.connections.forEach(conn => {
             if (conn.setAnimated) conn.setAnimated(animated);
         });
+    }
+
+    // Disconnect all connections for a given node
+    disconnectAllForNode(nodeId) {
+        const toRemove = this.connections.filter(c => c.sourceNode === nodeId || c.targetNode === nodeId);
+        toRemove.forEach(c => this.removeConnection(c));
+    }
+
+    // Cleanup all event listeners (call on unmount)
+    destroy() {
+        // Run registered cleanups
+        this._cleanups.forEach(fn => fn());
+        this._cleanups = [];
+
+        // Remove minimap window listeners
+        if (this._mmMoveHandler) window.removeEventListener('mousemove', this._mmMoveHandler);
+        if (this._mmUpHandler) window.removeEventListener('mouseup', this._mmUpHandler);
+
+        // Kill connection drag state
+        this._cleanupConnectionDrag();
+
+        // Destroy Konva stage
+        this.stage.destroy();
     }
 }

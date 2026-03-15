@@ -284,6 +284,21 @@ function setupContextMenu(canvas, sidebar) {
             }
         }
 
+        // Helper: position and show menu, keeping it on-screen
+        const showMenu = () => {
+            menu.style.left = e.evt.clientX + 'px';
+            menu.style.top = e.evt.clientY + 'px';
+            menu.classList.remove('hidden');
+
+            const rect = menu.getBoundingClientRect();
+            if (rect.right > window.innerWidth) {
+                menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
+            }
+            if (rect.bottom > window.innerHeight) {
+                menu.style.top = (window.innerHeight - rect.height - 4) + 'px';
+            }
+        };
+
         if (clickedNode) {
             // Node context menu
             addMenuItem(menuItems, 'Properties', () => sfProperties.show(clickedNode));
@@ -298,45 +313,38 @@ function setupContextMenu(canvas, sidebar) {
                 }
             });
             addSeparator(menuItems);
+            const hasConnections = canvas.getConnectionsForNode(clickedNode).length > 0;
+            addMenuItem(menuItems, 'Disconnect All', () => {
+                sfHistory.saveState();
+                canvas.disconnectAllForNode(clickedNode);
+            }, !hasConnections);
             addMenuItem(menuItems, 'Delete', () => {
                 sfHistory.saveState();
                 canvas.removeNode(clickedNode);
             });
+            showMenu();
 
-            // Position and show context menu
-            menu.style.left = e.evt.clientX + 'px';
-            menu.style.top = e.evt.clientY + 'px';
-            menu.classList.remove('hidden');
-
-            // Keep menu on screen
-            const rect = menu.getBoundingClientRect();
-            if (rect.right > window.innerWidth) {
-                menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
-            }
-            if (rect.bottom > window.innerHeight) {
-                menu.style.top = (window.innerHeight - rect.height - 4) + 'px';
-            }
         } else if (clickedConnection) {
             // Connection context menu
             addMenuItem(menuItems, 'Delete Connection', () => {
                 sfHistory.saveState();
                 canvas.removeConnection(clickedConnection);
             });
+            showMenu();
 
-            menu.style.left = e.evt.clientX + 'px';
-            menu.style.top = e.evt.clientY + 'px';
-            menu.classList.remove('hidden');
-
-            const rect = menu.getBoundingClientRect();
-            if (rect.right > window.innerWidth) {
-                menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
-            }
-            if (rect.bottom > window.innerHeight) {
-                menu.style.top = (window.innerHeight - rect.height - 4) + 'px';
-            }
         } else {
-            // Empty canvas — open floating node search
-            showNodeSearch(e.evt.clientX, e.evt.clientY);
+            // Empty canvas context menu
+            addMenuItem(menuItems, 'Add Node', () => {
+                showNodeSearch(e.evt.clientX, e.evt.clientY);
+            });
+            addMenuItem(menuItems, 'Reset View', () => {
+                canvas.fitView(true);
+            });
+            const hasPaste = sfSelection && sfSelection.clipboard;
+            addMenuItem(menuItems, 'Paste', () => {
+                if (sfSelection) sfSelection._paste();
+            }, !hasPaste);
+            showMenu();
         }
     });
 }
