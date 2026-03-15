@@ -547,6 +547,7 @@ def load_vae(path: str) -> VAEWrapper:
                 layers_per_block=2, act_fn="silu", norm_num_groups=32,
                 scaling_factor=0.3611,
             )
+            from safetensors.torch import load_file
             vae_sd = load_file(path)
             # Convert LDM keys if needed
             from serenity.inference.models.convert import convert_vae_keys
