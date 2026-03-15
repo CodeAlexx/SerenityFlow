@@ -34,10 +34,17 @@ class SFCanvas {
         this.draggingConnection = null; // { sourceNode, sourceSlot, line }
         this.tempLine = null;
 
+        // Settings
+        this.snapToGrid = false;
+        this.gridSize = 20;
+        this.showMinimap = true;
+
         this._setupZoom();
         this._setupResize();
         this._setupStageDrag();
         this._drawGrid();
+        this._createViewportControls();
+        this._createMinimap();
     }
 
     _setupZoom() {
@@ -67,6 +74,7 @@ class SFCanvas {
             };
             this.stage.position(newPos);
             this._drawGrid();
+            this._updateMinimap();
         });
     }
 
@@ -360,5 +368,278 @@ class SFCanvas {
         }
         this._connDragMoveHandler = null;
         this.overlayLayer.batchDraw();
+    }
+
+    // ── Phase 1: Fit View ──
+    fitView(animate) {
+        if (this.nodes.size === 0) return;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        this.nodes.forEach(node => {
+            minX = Math.min(minX, node.x);
+            minY = Math.min(minY, node.y);
+            maxX = Math.max(maxX, node.x + node.width);
+            maxY = Math.max(maxY, node.y + node.height);
+        });
+        const pad = 60;
+        const bw = maxX - minX + pad * 2;
+        const bh = maxY - minY + pad * 2;
+        const sw = this.stage.width();
+        const sh = this.stage.height();
+        const newScale = Math.min(sw / bw, sh / bh, 2);
+        const cx = (minX + maxX) / 2;
+        const cy = (minY + maxY) / 2;
+        const newX = sw / 2 - cx * newScale;
+        const newY = sh / 2 - cy * newScale;
+
+        if (animate) {
+            const startScale = this.stage.scaleX();
+            const startPos = this.stage.position();
+            const duration = 300;
+            const startTime = performance.now();
+            const anim = () => {
+                const t = Math.min((performance.now() - startTime) / duration, 1);
+                const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; // easeInOutQuad
+                const s = startScale + (newScale - startScale) * ease;
+                const x = startPos.x + (newX - startPos.x) * ease;
+                const y = startPos.y + (newY - startPos.y) * ease;
+                this.scale = s;
+                this.stage.scale({ x: s, y: s });
+                this.stage.position({ x, y });
+                this._drawGrid();
+                this._updateMinimap();
+                if (t < 1) requestAnimationFrame(anim);
+            };
+            requestAnimationFrame(anim);
+        } else {
+            this.scale = newScale;
+            this.stage.scale({ x: newScale, y: newScale });
+            this.stage.position({ x: newX, y: newY });
+            this._drawGrid();
+            this._updateMinimap();
+        }
+    }
+
+    // ── Phase 1: Snap to Grid ──
+    snapNodeToGrid(node) {
+        if (!this.snapToGrid) return;
+        const g = this.gridSize;
+        node.x = Math.round(node.x / g) * g;
+        node.y = Math.round(node.y / g) * g;
+        node.group.x(node.x);
+        node.group.y(node.y);
+        this.nodeLayer.batchDraw();
+        this.connectionLayer.batchDraw();
+    }
+
+    // ── Phase 1: Viewport Controls ──
+    _createViewportControls() {
+        const html = `
+            <div class="viewport-controls" id="viewport-controls">
+                <button id="vc-zoom-in" title="Zoom In (+)">+</button>
+                <button id="vc-zoom-out" title="Zoom Out (-)">−</button>
+                <button id="vc-fit" title="Fit View (H)">⊞</button>
+                <button id="vc-minimap" title="Toggle Minimap" class="active">◫</button>
+                <button id="vc-snap" title="Snap to Grid (Shift+G)">#</button>
+            </div>`;
+        this.container.insertAdjacentHTML('beforeend', html);
+
+        const self = this;
+        document.getElementById('vc-zoom-in').addEventListener('click', () => {
+            self.scale = Math.min(self.scale * 1.25, 5);
+            self.stage.scale({ x: self.scale, y: self.scale });
+            self._drawGrid();
+            self._updateMinimap();
+        });
+        document.getElementById('vc-zoom-out').addEventListener('click', () => {
+            self.scale = Math.max(self.scale / 1.25, 0.1);
+            self.stage.scale({ x: self.scale, y: self.scale });
+            self._drawGrid();
+            self._updateMinimap();
+        });
+        document.getElementById('vc-fit').addEventListener('click', () => {
+            self.fitView(true);
+        });
+        document.getElementById('vc-minimap').addEventListener('click', function() {
+            self.showMinimap = !self.showMinimap;
+            this.classList.toggle('active', self.showMinimap);
+            const mm = document.getElementById('canvas-minimap');
+            if (mm) mm.style.display = self.showMinimap ? '' : 'none';
+        });
+        document.getElementById('vc-snap').addEventListener('click', function() {
+            self.snapToGrid = !self.snapToGrid;
+            this.classList.toggle('active', self.snapToGrid);
+        });
+    }
+
+    // ── Phase 1: Minimap ──
+    _createMinimap() {
+        const mmSize = 160;
+        const html = `<canvas id="canvas-minimap" class="canvas-minimap" width="${mmSize}" height="${mmSize}"></canvas>`;
+        this.container.insertAdjacentHTML('beforeend', html);
+        this._mmCanvas = document.getElementById('canvas-minimap');
+        this._mmCtx = this._mmCanvas.getContext('2d');
+        this._mmSize = mmSize;
+
+        // Click/drag on minimap to navigate
+        const self = this;
+        let mmDragging = false;
+        const navigateFromMM = (e) => {
+            const rect = self._mmCanvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            const bounds = self._getNodeBounds();
+            if (!bounds) return;
+            const pad = 60;
+            const bw = bounds.maxX - bounds.minX + pad * 2;
+            const bh = bounds.maxY - bounds.minY + pad * 2;
+            const mmScale = Math.min(mmSize / bw, mmSize / bh);
+            const offX = (mmSize - bw * mmScale) / 2;
+            const offY = (mmSize - bh * mmScale) / 2;
+            const worldX = (mx - offX) / mmScale + bounds.minX - pad;
+            const worldY = (my - offY) / mmScale + bounds.minY - pad;
+            const sw = self.stage.width();
+            const sh = self.stage.height();
+            self.stage.position({
+                x: sw / 2 - worldX * self.scale,
+                y: sh / 2 - worldY * self.scale
+            });
+            self._drawGrid();
+            self._updateMinimap();
+        };
+        this._mmCanvas.addEventListener('mousedown', (e) => { mmDragging = true; navigateFromMM(e); });
+        this._mmMoveHandler = (e) => { if (mmDragging) navigateFromMM(e); };
+        this._mmUpHandler = () => { mmDragging = false; };
+        window.addEventListener('mousemove', this._mmMoveHandler);
+        window.addEventListener('mouseup', this._mmUpHandler);
+
+        // Update minimap on zoom/pan
+        this.stage.on('dragmove.minimap', () => this._updateMinimap());
+    }
+
+    _getNodeBounds() {
+        if (this.nodes.size === 0) return null;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        this.nodes.forEach(node => {
+            minX = Math.min(minX, node.x);
+            minY = Math.min(minY, node.y);
+            maxX = Math.max(maxX, node.x + node.width);
+            maxY = Math.max(maxY, node.y + node.height);
+        });
+        return { minX, minY, maxX, maxY };
+    }
+
+    _updateMinimap() {
+        if (!this.showMinimap || !this._mmCtx) return;
+        const ctx = this._mmCtx;
+        const size = this._mmSize;
+        ctx.clearRect(0, 0, size, size);
+
+        const bounds = this._getNodeBounds();
+        if (!bounds) return;
+
+        const pad = 60;
+        const bw = bounds.maxX - bounds.minX + pad * 2;
+        const bh = bounds.maxY - bounds.minY + pad * 2;
+        const mmScale = Math.min(size / bw, size / bh);
+        const offX = (size - bw * mmScale) / 2;
+        const offY = (size - bh * mmScale) / 2;
+
+        // Draw nodes
+        this.nodes.forEach(node => {
+            const nx = (node.x - bounds.minX + pad) * mmScale + offX;
+            const ny = (node.y - bounds.minY + pad) * mmScale + offY;
+            const nw = node.width * mmScale;
+            const nh = node.height * mmScale;
+            const selected = this.selectedNodes.has(node.id);
+            ctx.fillStyle = selected ? '#5b8def' : '#3a3a6a';
+            ctx.fillRect(nx, ny, Math.max(nw, 3), Math.max(nh, 2));
+        });
+
+        // Draw viewport rect
+        const stagePos = this.stage.position();
+        const sw = this.stage.width();
+        const sh = this.stage.height();
+        const vpLeft = (-stagePos.x / this.scale - bounds.minX + pad) * mmScale + offX;
+        const vpTop = (-stagePos.y / this.scale - bounds.minY + pad) * mmScale + offY;
+        const vpW = (sw / this.scale) * mmScale;
+        const vpH = (sh / this.scale) * mmScale;
+        ctx.strokeStyle = 'rgba(91, 141, 239, 0.6)';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(vpLeft, vpTop, vpW, vpH);
+        ctx.fillStyle = 'rgba(91, 141, 239, 0.08)';
+        ctx.fillRect(vpLeft, vpTop, vpW, vpH);
+    }
+
+    // ── Phase 2: Auto-Layout ──
+    autoLayout() {
+        if (this.nodes.size === 0) return;
+
+        // Build adjacency: node → [downstream nodes]
+        const downstream = new Map();
+        const upstream = new Map();
+        this.nodes.forEach((_, id) => { downstream.set(id, new Set()); upstream.set(id, new Set()); });
+        this.connections.forEach(c => {
+            if (downstream.has(c.sourceNode)) downstream.get(c.sourceNode).add(c.targetNode);
+            if (upstream.has(c.targetNode)) upstream.get(c.targetNode).add(c.sourceNode);
+        });
+
+        // Assign layers (longest path from sources, with cycle protection)
+        const layers = new Map();
+        const assignLayer = (id, depth, stack) => {
+            if (stack.has(id)) return; // cycle detected — break
+            const cur = layers.get(id) || 0;
+            if (depth <= cur) return; // already visited at equal or greater depth
+            layers.set(id, depth);
+            stack.add(id);
+            downstream.get(id).forEach(child => assignLayer(child, depth + 1, new Set(stack)));
+            stack.delete(id);
+        };
+        // Start from nodes with no upstream
+        this.nodes.forEach((_, id) => {
+            if (upstream.get(id).size === 0) assignLayer(id, 0, new Set());
+        });
+        // Handle disconnected nodes
+        this.nodes.forEach((_, id) => { if (!layers.has(id)) layers.set(id, 0); });
+
+        // Group nodes by layer
+        const layerGroups = new Map();
+        layers.forEach((layer, id) => {
+            if (!layerGroups.has(layer)) layerGroups.set(layer, []);
+            layerGroups.get(layer).push(id);
+        });
+
+        // Position nodes
+        const hGap = 80;
+        const vGap = 40;
+        let xPos = 0;
+        const sortedLayers = [...layerGroups.keys()].sort((a, b) => a - b);
+        sortedLayers.forEach(layerIdx => {
+            const nodeIds = layerGroups.get(layerIdx);
+            let maxW = 0;
+            let yPos = 0;
+            nodeIds.forEach(id => {
+                const node = this.nodes.get(id);
+                if (!node) return;
+                node.x = xPos;
+                node.y = yPos;
+                node.group.x(xPos);
+                node.group.y(yPos);
+                maxW = Math.max(maxW, node.width);
+                yPos += node.height + vGap;
+            });
+            xPos += maxW + hGap;
+        });
+
+        this.nodeLayer.batchDraw();
+        this.connectionLayer.batchDraw();
+        this.fitView(true);
+        this._updateMinimap();
+    }
+
+    // ── Phase 1: Edge animation support ──
+    setEdgesAnimated(animated) {
+        this.connections.forEach(conn => {
+            if (conn.setAnimated) conn.setAnimated(animated);
+        });
     }
 }

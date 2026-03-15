@@ -70,15 +70,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     setInterval(() => {
         if (sfCanvas.nodes.size > 0) {
             try {
-                const prompt = serializeWorkflow(sfCanvas);
-                const workflow = { version: 1, prompt, nodes: {} };
-                sfCanvas.nodes.forEach((node, id) => {
-                    workflow.nodes[id] = {
-                        type: node.nodeType,
-                        pos: [node.x, node.y],
-                        widgets_values: { ...node.widgetValues },
-                    };
-                });
+                const { prompt, nodePositions } = serializeWorkflow(sfCanvas);
+                const workflow = { version: 2, prompt, nodes: nodePositions };
                 sessionStorage.setItem(STORAGE_KEY, JSON.stringify(workflow));
             } catch (_) {}
         }

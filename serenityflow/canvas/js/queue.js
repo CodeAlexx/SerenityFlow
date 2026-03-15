@@ -11,7 +11,8 @@ var QueueTab = (function() {
     var state = {
         current: null,
         pending: [],
-        history: []
+        history: [],
+        paused: false
     };
 
     var els = {};
@@ -27,8 +28,12 @@ var QueueTab = (function() {
         layout.innerHTML =
             '<div class="queue-header">' +
                 '<span class="queue-header-title">Queue</span>' +
-                '<button id="queue-clear-btn" class="queue-clear-btn">Clear Finished</button>' +
+                '<div class="queue-header-actions">' +
+                    '<button id="queue-pause-btn" class="queue-pause-btn">\u23f8 Pause</button>' +
+                    '<button id="queue-clear-btn" class="queue-clear-btn">Clear Finished</button>' +
+                '</div>' +
             '</div>' +
+            '<div id="queue-stats" class="queue-stats"></div>' +
             '<div class="queue-sections">' +
                 '<div class="queue-section">' +
                     '<div class="queue-section-label">Current</div>' +
@@ -54,14 +59,32 @@ var QueueTab = (function() {
         els.pendingList = document.getElementById('queue-pending-list');
         els.historyList = document.getElementById('queue-history-list');
         els.clearBtn = document.getElementById('queue-clear-btn');
+        els.pauseBtn = document.getElementById('queue-pause-btn');
+        els.statsBar = document.getElementById('queue-stats');
     }
 
     function bindEvents() {
         els.clearBtn.addEventListener('click', function() {
             state.history = [];
             renderHistory();
+            renderStats();
             saveHistory();
         });
+        els.pauseBtn.addEventListener('click', function() {
+            state.paused = !state.paused;
+            renderPauseBtn();
+        });
+    }
+
+    function renderPauseBtn() {
+        if (!els.pauseBtn) return;
+        if (state.paused) {
+            els.pauseBtn.textContent = '\u25b6 Resume';
+            els.pauseBtn.classList.add('paused');
+        } else {
+            els.pauseBtn.textContent = '\u23f8 Pause';
+            els.pauseBtn.classList.remove('paused');
+        }
     }
 
     function connectWS() {
@@ -78,6 +101,7 @@ var QueueTab = (function() {
                 prompt: found ? found.prompt : '',
                 model: found ? found.model : '',
                 batchLabel: found ? found.batchLabel : '',
+                promptData: found ? found.promptData : null,
                 startedAt: Date.now(),
                 step: 0, maxStep: 0, node: null, src: null, filename: null
             };
@@ -117,6 +141,7 @@ var QueueTab = (function() {
                 prompt: state.current.prompt,
                 model: state.current.model,
                 batchLabel: state.current.batchLabel,
+                promptData: state.current.promptData || null,
                 status: 'success',
                 completedAt: Date.now(),
                 filename: state.current.filename,
@@ -135,6 +160,8 @@ var QueueTab = (function() {
                 promptId: state.current.promptId,
                 prompt: state.current.prompt,
                 model: state.current.model,
+                batchLabel: state.current.batchLabel,
+                promptData: state.current.promptData || null,
                 status: 'error',
                 error: (data && data.exception_message) || 'Unknown error',
                 completedAt: Date.now()
@@ -160,10 +187,29 @@ var QueueTab = (function() {
     // ── Rendering ──
 
     function render() {
+        renderStats();
+        renderPauseBtn();
         renderCurrentJob();
         renderPending();
         renderHistory();
         updateQueueBadge();
+    }
+
+    function renderStats() {
+        if (!els.statsBar) return;
+        var pendingCount = state.pending.length;
+        var runningCount = state.current ? 1 : 0;
+        var completedCount = 0;
+        var failedCount = 0;
+        state.history.forEach(function(h) {
+            if (h.status === 'success') completedCount++;
+            else if (h.status === 'error') failedCount++;
+        });
+        els.statsBar.innerHTML =
+            '<span class="queue-stat pending">\u23f3 ' + pendingCount + ' Pending</span>' +
+            '<span class="queue-stat running">\ud83d\udd04 ' + runningCount + ' Running</span>' +
+            '<span class="queue-stat completed">\u2713 ' + completedCount + ' Completed</span>' +
+            '<span class="queue-stat failed">\u2717 ' + failedCount + ' Failed</span>';
     }
 
     function renderCurrentJob() {
@@ -222,6 +268,7 @@ var QueueTab = (function() {
             var id = btn.dataset.id;
             state.pending = state.pending.filter(function(p) { return p.promptId !== id; });
             renderPending();
+            renderStats();
             updateQueueBadge();
         };
     }
@@ -233,10 +280,11 @@ var QueueTab = (function() {
             return;
         }
         els.historyList.innerHTML = '';
-        state.history.forEach(function(entry) {
+        state.history.forEach(function(entry, idx) {
             var row = document.createElement('div');
             row.className = 'queue-history-entry ' + entry.status;
             var isSuccess = entry.status === 'success';
+            var isFailed = entry.status === 'error';
             var timeAgo = formatTimeAgo(entry.completedAt);
 
             row.innerHTML =
@@ -249,14 +297,47 @@ var QueueTab = (function() {
                 '</div>' +
                 '<span class="queue-history-time">' + timeAgo + '</span>' +
                 '<div class="queue-history-actions">' +
+                    (isFailed && entry.promptData ? '<button class="queue-action-btn queue-retry-btn" data-idx="' + idx + '">Retry</button>' : '') +
                     (isSuccess && entry.src ? '<button class="queue-action-btn queue-view-btn" data-src="' + entry.src + '" data-video="' + (/\.(webp|mp4|gif)$/i.test(entry.filename || '') ? '1' : '0') + '">View</button>' : '') +
                     '<button class="queue-action-btn queue-dismiss-btn" data-id="' + entry.promptId + '">\u00d7</button>' +
                 '</div>';
 
-            els.historyList.appendChild(row);
+            // Expandable details panel (hidden by default)
+            var details = document.createElement('div');
+            details.className = 'queue-history-details';
+            details.style.display = 'none';
+            var detailParts = [];
+            if (entry.prompt) detailParts.push('<div class="queue-detail-row"><span class="queue-detail-label">Prompt</span><span class="queue-detail-value">' + escapeHtml(entry.prompt) + '</span></div>');
+            if (entry.model) detailParts.push('<div class="queue-detail-row"><span class="queue-detail-label">Model</span><span class="queue-detail-value">' + escapeHtml(entry.model) + '</span></div>');
+            if (entry.promptData) {
+                var pd = entry.promptData;
+                if (pd.width && pd.height) detailParts.push('<div class="queue-detail-row"><span class="queue-detail-label">Dimensions</span><span class="queue-detail-value">' + pd.width + ' \u00d7 ' + pd.height + '</span></div>');
+                if (pd.seed != null) detailParts.push('<div class="queue-detail-row"><span class="queue-detail-label">Seed</span><span class="queue-detail-value">' + pd.seed + '</span></div>');
+                if (pd.scheduler) detailParts.push('<div class="queue-detail-row"><span class="queue-detail-label">Scheduler</span><span class="queue-detail-value">' + escapeHtml(pd.scheduler) + '</span></div>');
+                if (pd.steps) detailParts.push('<div class="queue-detail-row"><span class="queue-detail-label">Steps</span><span class="queue-detail-value">' + pd.steps + '</span></div>');
+                if (pd.cfg) detailParts.push('<div class="queue-detail-row"><span class="queue-detail-label">CFG</span><span class="queue-detail-value">' + pd.cfg + '</span></div>');
+            }
+            if (detailParts.length > 0) {
+                details.innerHTML = detailParts.join('');
+            }
+
+            var wrapper = document.createElement('div');
+            wrapper.className = 'queue-history-item';
+            wrapper.appendChild(row);
+            if (detailParts.length > 0) wrapper.appendChild(details);
+            els.historyList.appendChild(wrapper);
         });
 
         els.historyList.onclick = function(e) {
+            var retryBtn = e.target.closest('.queue-retry-btn');
+            if (retryBtn) {
+                var idx = parseInt(retryBtn.dataset.idx, 10);
+                var entry = state.history[idx];
+                if (entry && entry.promptData) {
+                    retryJob(entry);
+                }
+                return;
+            }
             var viewBtn = e.target.closest('.queue-view-btn');
             if (viewBtn) {
                 localStorage.setItem('sf-view-image', JSON.stringify({
@@ -271,9 +352,51 @@ var QueueTab = (function() {
                 var id = dismissBtn.dataset.id;
                 state.history = state.history.filter(function(h) { return h.promptId !== id; });
                 renderHistory();
+                renderStats();
                 saveHistory();
+                return;
+            }
+            // Toggle expanded details on row click
+            var item = e.target.closest('.queue-history-item');
+            if (item) {
+                var detailsEl = item.querySelector('.queue-history-details');
+                if (detailsEl) {
+                    var isOpen = detailsEl.style.display !== 'none';
+                    detailsEl.style.display = isOpen ? 'none' : 'block';
+                    item.classList.toggle('expanded', !isOpen);
+                }
             }
         };
+    }
+
+    function retryJob(entry) {
+        if (!entry.promptData) return;
+        var pd = entry.promptData;
+        fetch('/prompt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                prompt: pd.workflow,
+                client_id: typeof SerenityWS !== 'undefined' ? SerenityWS.getClientId() : ''
+            })
+        })
+        .then(function(resp) {
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            return resp.json();
+        })
+        .then(function(data) {
+            registerPending({
+                promptId: data.prompt_id,
+                prompt: entry.prompt || '',
+                model: entry.model || '',
+                queuedAt: Date.now(),
+                batchLabel: entry.batchLabel || '',
+                promptData: pd
+            });
+        })
+        .catch(function(err) {
+            console.error('[QueueTab] Retry failed:', err);
+        });
     }
 
     // ── Queue Badge on Icon Rail ──
@@ -330,6 +453,12 @@ var QueueTab = (function() {
     // ── Public ──
 
     function registerPending(entry) {
+        // If paused, hold items in a paused queue — they won't be sent to backend
+        if (state.paused) {
+            state.pending.push(entry);
+            render();
+            return;
+        }
         state.pending.push(entry);
         render();
     }
@@ -341,6 +470,7 @@ var QueueTab = (function() {
         bindEvents();
         loadHistory();
         connectWS();
+        renderPauseBtn();
         render();
     }
 

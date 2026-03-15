@@ -608,7 +608,7 @@ var CanvasTab = (function() {
                 '<button id="cv-import-btn" class="cv-import-btn">Import Image</button>' +
                 '<input type="file" id="cv-import-file" accept="image/*" style="display:none">' +
 
-                '<button id="cv-invoke-btn" class="cv-invoke-btn">Invoke</button>' +
+                '<button id="cv-generate-btn" class="cv-generate-btn">Generate</button>' +
 
                 '<div id="cv-progress" class="cv-progress"><div id="cv-progress-bar" class="cv-progress-bar"></div></div>' +
                 '<div id="cv-progress-label" class="cv-progress-label"></div>' +
@@ -642,7 +642,7 @@ var CanvasTab = (function() {
         els.model = document.getElementById('cv-model');
         els.importBtn = document.getElementById('cv-import-btn');
         els.importFile = document.getElementById('cv-import-file');
-        els.invokeBtn = document.getElementById('cv-invoke-btn');
+        els.generateBtn = document.getElementById('cv-generate-btn');
         els.progress = document.getElementById('cv-progress');
         els.progressBar = document.getElementById('cv-progress-bar');
         els.progressLabel = document.getElementById('cv-progress-label');
@@ -1523,7 +1523,7 @@ var CanvasTab = (function() {
             }
         });
 
-        els.invokeBtn.addEventListener('click', function() { invoke(); });
+        els.generateBtn.addEventListener('click', function() { startGeneration(); });
 
         document.querySelectorAll('.cv-tool-btn').forEach(function(btn) {
             btn.addEventListener('click', function() { setTool(btn.dataset.tool); });
@@ -1797,8 +1797,8 @@ var CanvasTab = (function() {
         els.guidanceRow.style.display = isFlux ? 'flex' : 'none';
         els.videoSection.style.display = isVideo ? 'block' : 'none';
 
-        // Update invoke button label
-        els.invokeBtn.textContent = isVideo ? 'Generate Video' : 'Invoke';
+        // Update generate button label
+        els.generateBtn.textContent = isVideo ? 'Generate Video' : 'Generate';
 
         // Update size label to show/hide frame count
         updateSizeLabel();
@@ -1881,7 +1881,7 @@ var CanvasTab = (function() {
         });
     }
 
-    function invoke() {
+    function startGeneration() {
         if (canvasGenerating) return;
         if (!genState.model) { showError('No model selected'); return; }
         if (!genState.prompt.trim()) { showError('Enter a prompt'); return; }
@@ -2101,13 +2101,13 @@ var CanvasTab = (function() {
     function setCanvasGenerating(v) {
         canvasGenerating = v;
         var isVideo = isVideoArch();
-        els.invokeBtn.disabled = v;
+        els.generateBtn.disabled = v;
         if (v) {
-            els.invokeBtn.textContent = 'Generating...';
+            els.generateBtn.textContent = 'Generating...';
         } else {
-            els.invokeBtn.textContent = isVideo ? 'Generate Video' : 'Invoke';
+            els.generateBtn.textContent = isVideo ? 'Generate Video' : 'Generate';
         }
-        els.invokeBtn.classList.toggle('invoking', v);
+        els.generateBtn.classList.toggle('generating', v);
         if (v) {
             els.progress.classList.add('active');
             els.progressBar.style.width = '100%';

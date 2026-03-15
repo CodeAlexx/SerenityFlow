@@ -7,6 +7,7 @@
 
 function serializeWorkflow(canvas) {
     const prompt = {};
+    const nodePositions = {};
 
     canvas.nodes.forEach((node, id) => {
         const inputs = {};
@@ -26,10 +27,27 @@ function serializeWorkflow(canvas) {
             class_type: node.nodeType,
             inputs: inputs,
         };
+
+        nodePositions[id] = {
+            type: node.nodeType,
+            pos: [node.x, node.y],
+            size: [node.width, node.height],
+            widgets_values: { ...node.widgetValues },
+            collapsed: node._collapsed || false,
+        };
     });
 
-    return prompt;
+    return { prompt, nodePositions };
 }
+
+// Workflow metadata (stored alongside canvas)
+var workflowMeta = {
+    name: 'Untitled Workflow',
+    author: '',
+    description: '',
+    tags: [],
+    version: '1.0',
+};
 
 /**
  * Detect format and load accordingly.
@@ -37,7 +55,10 @@ function serializeWorkflow(canvas) {
 function loadWorkflow(canvas, data, nodeInfo) {
     try {
         if (data.version && data.prompt) {
-            console.log('[workflow] Loading native format');
+            console.log('[workflow] Loading native format v' + data.version);
+            if (data.metadata && typeof workflowMeta !== 'undefined') {
+                Object.assign(workflowMeta, data.metadata);
+            }
             deserializeWorkflow(canvas, data.prompt, data.nodes, nodeInfo);
         } else if (data.nodes && Array.isArray(data.nodes)) {
             console.log('[workflow] Loading ComfyUI graph format,', data.nodes.length, 'top-level nodes');
@@ -304,6 +325,11 @@ function deserializeWorkflow(canvas, prompt, nodePositions, nodeInfo) {
                     node.widgets[name].setValue(value);
                 }
             }
+        }
+
+        // Restore collapsed state
+        if (nodePositions && nodePositions[origId] && nodePositions[origId].collapsed) {
+            node.toggleCollapse();
         }
 
         if (!nodePositions || !nodePositions[origId]) {

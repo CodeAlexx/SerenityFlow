@@ -1,7 +1,7 @@
 /**
  * Generate Tab — SerenityFlow Phase 2
  * Prompt-to-image generation wired to ComfyUI-compatible backend.
- * InvokeAI-inspired visual overhaul.
+ * SerenityFlow visual overhaul.
  */
 
 var GenerateTab = (function() {
@@ -27,7 +27,7 @@ var GenerateTab = (function() {
         fps: 24,
         lastSeed: null,
         batchCount: 1,
-        loras: [],  // [{name, strength}]
+        loras: [],  // [{name, strength, enabled}]
         aspectLocked: false,
         lockedRatio: 1,
         // New state for overhaul
@@ -37,7 +37,49 @@ var GenerateTab = (function() {
         gallerySubTab: 'images',  // 'images' | 'assets'
         boardsVisible: true,
         selectedAspect: '1:1',
-        pendingBatch: 0
+        pendingBatch: 0,
+        // Prompt history
+        promptHistory: [],
+        promptHistoryIndex: -1,
+        // Style preset
+        stylePreset: 'none',
+        // Model picker search
+        modelPickerOpen: false,
+        modelSearchQuery: '',
+        allModels: [],
+        // Phase 2: gallery enhancements
+        selectedImages: [],
+        lastSelectedIndex: -1,
+        gallerySearch: '',
+        thumbSize: 90,
+        sortNewestFirst: true,
+        starredFirst: false,
+        autoSwitchNew: true,
+        galleryPage: 0,
+        galleryPageSize: 50,
+        contextMenuIndex: -1,
+        gallerySettingsOpen: false,
+        metadataExpanded: false,
+        // Phase 3: Advanced section
+        vae: 'default',
+        clipSkip: 0,
+        cfgRescale: 0,
+        seamlessX: false,
+        seamlessY: false,
+        // Phase 3: Refiner section (SDXL)
+        refinerModel: '',
+        refinerScheduler: 'euler',
+        refinerSteps: 20,
+        refinerCfg: 7.0,
+        refinerStart: 0.8,
+        aestheticScore: 6.0,
+        negAestheticScore: 2.5,
+        // Phase 3: Compositing section (inpaint)
+        coherenceMode: 'gaussian',
+        edgeSize: 32,
+        minDenoise: 0.0,
+        maskBlur: 4,
+        infillMethod: 'patchmatch'
     };
 
     var initialized = false;
@@ -47,23 +89,107 @@ var GenerateTab = (function() {
 
     // ── Aspect ratio definitions ──
     var imageAspects = [
+        { label: 'Free', w: 0,    h: 0,    vw: 16, vh: 16 },
         { label: '1:1',  w: 1024, h: 1024, vw: 16, vh: 16 },
         { label: '4:3',  w: 1152, h: 896,  vw: 18, vh: 14 },
+        { label: '3:2',  w: 1152, h: 768,  vw: 18, vh: 12 },
         { label: '16:9', w: 1344, h: 768,  vw: 20, vh: 11 },
+        { label: '21:9', w: 1344, h: 576,  vw: 21, vh: 9  },
         { label: '3:4',  w: 896,  h: 1152, vw: 14, vh: 18 },
-        { label: '9:16', w: 768,  h: 1344, vw: 11, vh: 20 }
+        { label: '2:3',  w: 768,  h: 1152, vw: 12, vh: 18 },
+        { label: '9:16', w: 768,  h: 1344, vw: 11, vh: 20 },
+        { label: '9:21', w: 576,  h: 1344, vw: 9,  vh: 21 }
     ];
 
     var videoAspects = [
+        { label: 'Free', w: 0,    h: 0,    vw: 16, vh: 16 },
         { label: '1:1',  w: 512, h: 512, vw: 16, vh: 16 },
         { label: '4:3',  w: 768, h: 576, vw: 18, vh: 14 },
+        { label: '3:2',  w: 768, h: 512, vw: 18, vh: 12 },
         { label: '16:9', w: 768, h: 432, vw: 20, vh: 11 },
+        { label: '21:9', w: 768, h: 320, vw: 21, vh: 9  },
         { label: '3:4',  w: 576, h: 768, vw: 14, vh: 18 },
-        { label: '9:16', w: 432, h: 768, vw: 11, vh: 20 }
+        { label: '2:3',  w: 512, h: 768, vw: 12, vh: 18 },
+        { label: '9:16', w: 432, h: 768, vw: 11, vh: 20 },
+        { label: '9:21', w: 320, h: 768, vw: 9,  vh: 21 }
+    ];
+
+    // ── Style Presets ──
+    var stylePresets = [
+        { id: 'none',       label: 'None',       suffix: '' },
+        { id: 'photo',      label: 'Photo',      suffix: ', photorealistic, high quality photo, detailed, sharp focus, natural lighting' },
+        { id: 'anime',      label: 'Anime',      suffix: ', anime style, vibrant colors, detailed illustration, anime art' },
+        { id: 'oil',        label: 'Oil Paint',   suffix: ', oil painting style, textured brushstrokes, rich colors, classical art' },
+        { id: '3d',         label: '3D Render',   suffix: ', 3D render, octane render, detailed, volumetric lighting, CGI' },
+        { id: 'cinematic',  label: 'Cinematic',   suffix: ', cinematic, dramatic lighting, film grain, anamorphic, movie still' },
+        { id: 'watercolor', label: 'Watercolor',  suffix: ', watercolor painting, soft colors, artistic, delicate brushwork' },
+        { id: 'pixel',      label: 'Pixel Art',   suffix: ', pixel art, 8-bit, retro gaming style, low resolution aesthetic' },
+        { id: 'sketch',     label: 'Sketch',      suffix: ', pencil sketch, hand drawn, detailed linework, graphite' },
+        { id: 'fantasy',    label: 'Fantasy',     suffix: ', fantasy art, magical, ethereal, detailed illustration, concept art' },
+        { id: 'neon',       label: 'Neon',        suffix: ', neon lights, cyberpunk, glowing, dark background, vibrant' },
+        { id: 'minimal',    label: 'Minimal',     suffix: ', minimalist, clean, simple, modern design, white space' }
+    ];
+
+    // ── Scheduler/Sampler definitions ──
+    var schedulerOptions = [
+        { value: 'euler',            label: 'Euler' },
+        { value: 'euler_ancestral',  label: 'Euler Ancestral' },
+        { value: 'euler_k',          label: 'Euler Karras' },
+        { value: 'heun',             label: 'Heun' },
+        { value: 'heun_k',           label: 'Heun Karras' },
+        { value: 'dpm_2',            label: 'DPM 2' },
+        { value: 'dpm_2_ancestral',  label: 'DPM 2 Ancestral' },
+        { value: 'dpmpp_2s',         label: 'DPM++ 2S' },
+        { value: 'dpmpp_2s_k',       label: 'DPM++ 2S Karras' },
+        { value: 'dpmpp_2m',         label: 'DPM++ 2M' },
+        { value: 'dpmpp_2m_k',       label: 'DPM++ 2M Karras' },
+        { value: 'dpmpp_2m_sde',     label: 'DPM++ 2M SDE' },
+        { value: 'dpmpp_2m_sde_k',   label: 'DPM++ 2M SDE Karras' },
+        { value: 'dpmpp_3m',         label: 'DPM++ 3M' },
+        { value: 'dpmpp_3m_k',       label: 'DPM++ 3M Karras' },
+        { value: 'dpmpp_sde',        label: 'DPM++ SDE' },
+        { value: 'dpmpp_sde_k',      label: 'DPM++ SDE Karras' },
+        { value: 'ddim',             label: 'DDIM' },
+        { value: 'ddpm',             label: 'DDPM' },
+        { value: 'lcm',              label: 'LCM' },
+        { value: 'deis',             label: 'DEIS' },
+        { value: 'deis_k',           label: 'DEIS Karras' },
+        { value: 'unipc',            label: 'UniPC' },
+        { value: 'unipc_k',          label: 'UniPC Karras' },
+        { value: 'lms',              label: 'LMS' },
+        { value: 'lms_k',            label: 'LMS Karras' },
+        { value: 'pndm',             label: 'PNDM' },
+        { value: 'tcd',              label: 'TCD' }
     ];
 
     function getActiveAspects() {
         return ModelUtils.isVideoModel(state.model) ? videoAspects : imageAspects;
+    }
+
+    function buildAspectOptions() {
+        var aspects = getActiveAspects();
+        var html = '';
+        aspects.forEach(function(a) {
+            html += '<option value="' + a.label + '">' + a.label + '</option>';
+        });
+        html += '<option value="custom">Custom</option>';
+        return html;
+    }
+
+    function buildStyleOptions() {
+        var html = '';
+        stylePresets.forEach(function(s) {
+            html += '<option value="' + s.id + '">' + s.label + '</option>';
+        });
+        return html;
+    }
+
+    function buildSchedulerOptions() {
+        var html = '';
+        schedulerOptions.forEach(function(s) {
+            html += '<option value="' + s.value + '">' + s.label + '</option>';
+        });
+        return html;
     }
 
     // ── Build DOM ──
@@ -132,6 +258,14 @@ var GenerateTab = (function() {
             '</div>' +
             '<textarea id="gen-prompt" class="gen-textarea" rows="4" placeholder="Describe your image..."></textarea>' +
             '<div id="gen-token-count" class="gen-token-count">~0 tokens</div>' +
+            // Style preset dropdown
+            '<div style="margin-top:6px">' +
+                '<label class="gen-label">Style</label>' +
+                '<select id="gen-style-preset" class="gen-select">' +
+                    buildStyleOptions() +
+                '</select>' +
+                '<div id="gen-style-preview" class="gen-style-preview" style="display:none"></div>' +
+            '</div>' +
         '</div>' +
 
         // Negative prompt
@@ -153,12 +287,7 @@ var GenerateTab = (function() {
                         '<div class="gen-aspect-row">' +
                             '<span class="gen-label" style="margin-bottom:0;min-width:44px">Aspect</span>' +
                             '<select id="gen-aspect-dropdown" class="gen-select" style="flex:1">' +
-                                '<option value="1:1">1:1</option>' +
-                                '<option value="4:3">4:3</option>' +
-                                '<option value="16:9">16:9</option>' +
-                                '<option value="3:4">3:4</option>' +
-                                '<option value="9:16">9:16</option>' +
-                                '<option value="custom">Custom</option>' +
+                                buildAspectOptions() +
                             '</select>' +
                             '<button id="gen-swap-btn" class="gen-aspect-action" title="Swap width and height">' +
                                 '<i data-lucide="arrow-left-right"></i>' +
@@ -200,7 +329,7 @@ var GenerateTab = (function() {
                     '</div>' +
                     // Visual aspect preview box
                     '<div class="gen-image-preview-col">' +
-                        '<div id="gen-aspect-preview" class="gen-aspect-preview" style="width:60px;height:60px">' +
+                        '<div id="gen-aspect-preview" class="gen-aspect-preview" style="width:100px;height:100px">' +
                             '<span>1:1</span>' +
                         '</div>' +
                     '</div>' +
@@ -222,10 +351,16 @@ var GenerateTab = (function() {
                 // Model
                 '<label class="gen-label">Model</label>' +
                 '<div class="gen-model-row">' +
-                    '<select id="gen-model" class="gen-select"><option disabled selected>Loading models...</option></select>' +
+                    '<div class="gen-model-picker-wrap" id="gen-model-picker-wrap">' +
+                        '<input type="text" id="gen-model-search" class="gen-select gen-model-search-input" placeholder="Loading models..." autocomplete="off">' +
+                        '<div id="gen-model-dropdown" class="gen-model-dropdown" style="display:none">' +
+                            '<div id="gen-model-dropdown-list" class="gen-model-dropdown-list"></div>' +
+                        '</div>' +
+                    '</div>' +
                     '<button id="gen-model-refresh" class="gen-model-action-btn" title="Refresh models"><i data-lucide="refresh-cw"></i></button>' +
                     '<button class="gen-model-action-btn" title="Model settings (coming soon)"><i data-lucide="settings"></i></button>' +
                 '</div>' +
+                '<input type="hidden" id="gen-model" value="">' +
                 '<div id="gen-model-warn" class="gen-model-warning"></div>' +
                 // Concepts / LoRA
                 '<label class="gen-label" style="margin-top:8px">Concepts</label>' +
@@ -243,13 +378,13 @@ var GenerateTab = (function() {
                     '<div class="gen-setting-row" style="margin-top:6px">' +
                         '<span class="gen-label">Steps</span>' +
                         '<input id="gen-steps-range" type="range" class="gen-range" min="1" max="150" value="20">' +
-                        '<input id="gen-steps" type="number" class="gen-number-input" min="1" max="150" value="20">' +
+                        '<input id="gen-steps" type="number" class="gen-number-input" min="1" max="500" value="20">' +
                     '</div>' +
                     // CFG
                     '<div id="gen-cfg-row" class="gen-setting-row">' +
                         '<span class="gen-label">CFG</span>' +
                         '<input id="gen-cfg-range" type="range" class="gen-range" min="1" max="20" step="0.5" value="7.0">' +
-                        '<input id="gen-cfg" type="number" class="gen-number-input" min="1" max="20" step="0.5" value="7.0">' +
+                        '<input id="gen-cfg" type="number" class="gen-number-input" min="1" max="200" step="0.5" value="7.0">' +
                     '</div>' +
                     // Guidance (FLUX only)
                     '<div id="gen-guidance-row" class="gen-setting-row" style="display:none">' +
@@ -261,14 +396,7 @@ var GenerateTab = (function() {
                     '<div class="gen-setting-row">' +
                         '<span class="gen-label">Sampler</span>' +
                         '<select id="gen-scheduler" class="gen-select" style="flex:1">' +
-                            '<option value="euler" title="Fast, general-purpose sampler">euler</option>' +
-                            '<option value="euler_ancestral" title="Adds noise each step for more creative results">euler_ancestral</option>' +
-                            '<option value="dpm_2" title="Second-order DPM solver, good quality">dpm_2</option>' +
-                            '<option value="dpm_2_ancestral" title="DPM-2 with ancestral sampling for variety">dpm_2_ancestral</option>' +
-                            '<option value="dpmpp_2m" title="Fast multistep solver, good for fewer steps">dpm++_2m</option>' +
-                            '<option value="dpmpp_sde" title="Stochastic solver, great detail at higher steps">dpm++_sde</option>' +
-                            '<option value="ddim" title="Deterministic sampler, supports image-to-image well">ddim</option>' +
-                            '<option value="lcm" title="Latent consistency model, very fast (4-8 steps)">lcm</option>' +
+                            buildSchedulerOptions() +
                         '</select>' +
                     '</div>' +
                     // Batch
@@ -297,50 +425,125 @@ var GenerateTab = (function() {
             '<div id="gen-duration-hint" class="gen-duration-hint"></div>' +
         '</div>' +
 
-        // Compositing section (stub)
+        // Compositing section
         '<div class="gen-section">' +
             '<div id="gen-compositing-header" class="gen-accordion-header closed">' +
                 '<span>Compositing</span>' +
                 '<span class="gen-accordion-arrow"><i data-lucide="chevron-down"></i></span>' +
             '</div>' +
             '<div id="gen-compositing-body" class="gen-accordion-body closed" style="margin-top:8px">' +
-                '<div class="gen-stub-content">Coming soon</div>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">Coherence</span>' +
+                    '<select id="gen-coherence-mode" class="gen-select" style="flex:1">' +
+                        '<option value="gaussian">Gaussian Blur</option>' +
+                        '<option value="box">Box Blur</option>' +
+                        '<option value="staged">Staged</option>' +
+                    '</select>' +
+                '</div>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">Edge Size</span>' +
+                    '<input type="range" id="gen-edge-size-range" class="gen-range" min="0" max="128" step="4" value="32">' +
+                    '<input type="number" id="gen-edge-size" class="gen-number-input" min="0" max="128" step="4" value="32">' +
+                '</div>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">Min Denoise</span>' +
+                    '<input type="range" id="gen-min-denoise-range" class="gen-range" min="0" max="1" step="0.05" value="0">' +
+                    '<input type="number" id="gen-min-denoise" class="gen-number-input" min="0" max="1" step="0.05" value="0">' +
+                '</div>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">Mask Blur</span>' +
+                    '<input type="range" id="gen-mask-blur-range" class="gen-range" min="0" max="128" step="1" value="4">' +
+                    '<input type="number" id="gen-mask-blur" class="gen-number-input" min="0" max="128" step="1" value="4">' +
+                '</div>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">Infill</span>' +
+                    '<select id="gen-infill-method" class="gen-select" style="flex:1">' +
+                        '<option value="patchmatch">PatchMatch</option>' +
+                        '<option value="lama">LaMa</option>' +
+                        '<option value="cv2">CV2 Inpaint</option>' +
+                        '<option value="color">Solid Color</option>' +
+                        '<option value="tile">Tile</option>' +
+                    '</select>' +
+                '</div>' +
             '</div>' +
         '</div>' +
 
-        // Refiner section (stub)
-        '<div class="gen-section">' +
+        // Refiner section (SDXL only)
+        '<div class="gen-section" id="gen-refiner-section">' +
             '<div id="gen-refiner-header" class="gen-accordion-header closed">' +
                 '<span>Refiner</span>' +
                 '<span class="gen-accordion-arrow"><i data-lucide="chevron-down"></i></span>' +
             '</div>' +
             '<div id="gen-refiner-body" class="gen-accordion-body closed" style="margin-top:8px">' +
-                '<div class="gen-stub-content">SDXL Refiner settings</div>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">Model</span>' +
+                    '<select id="gen-refiner-model" class="gen-select" style="flex:1">' +
+                        '<option value="">None</option>' +
+                    '</select>' +
+                '</div>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">Scheduler</span>' +
+                    '<select id="gen-refiner-scheduler" class="gen-select" style="flex:1">' +
+                        buildSchedulerOptions() +
+                    '</select>' +
+                '</div>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">Steps</span>' +
+                    '<input type="range" id="gen-refiner-steps-range" class="gen-range" min="1" max="100" value="20">' +
+                    '<input type="number" id="gen-refiner-steps" class="gen-number-input" min="1" max="500" value="20">' +
+                '</div>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">CFG</span>' +
+                    '<input type="range" id="gen-refiner-cfg-range" class="gen-range" min="1" max="20" step="0.5" value="7.0">' +
+                    '<input type="number" id="gen-refiner-cfg" class="gen-number-input" min="1" max="200" step="0.5" value="7.0">' +
+                '</div>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">Start</span>' +
+                    '<input type="range" id="gen-refiner-start-range" class="gen-range" min="0" max="1" step="0.05" value="0.8">' +
+                    '<input type="number" id="gen-refiner-start" class="gen-number-input" min="0" max="1" step="0.05" value="0.80">' +
+                '</div>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">Aesthetic +</span>' +
+                    '<input type="range" id="gen-aesthetic-pos-range" class="gen-range" min="1" max="10" step="0.5" value="6.0">' +
+                    '<input type="number" id="gen-aesthetic-pos" class="gen-number-input" min="1" max="10" step="0.5" value="6.0">' +
+                '</div>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">Aesthetic -</span>' +
+                    '<input type="range" id="gen-aesthetic-neg-range" class="gen-range" min="1" max="10" step="0.5" value="2.5">' +
+                    '<input type="number" id="gen-aesthetic-neg" class="gen-number-input" min="1" max="10" step="0.5" value="2.5">' +
+                '</div>' +
             '</div>' +
         '</div>' +
 
-        // Advanced section (stub)
+        // Advanced section
         '<div class="gen-section">' +
             '<div id="gen-advanced-header" class="gen-accordion-header closed">' +
                 '<span>Advanced</span>' +
                 '<span class="gen-accordion-arrow"><i data-lucide="chevron-down"></i></span>' +
             '</div>' +
             '<div id="gen-advanced-body" class="gen-accordion-body closed" style="margin-top:8px">' +
-                '<div class="gen-stub-control">' +
-                    '<span class="gen-label">VAE</span>' +
-                    '<select class="gen-select" style="flex:1" disabled><option>Default</option></select>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">VAE</span>' +
+                    '<select id="gen-vae-picker" class="gen-select" style="flex:1">' +
+                        '<option value="default">Default (from checkpoint)</option>' +
+                    '</select>' +
                 '</div>' +
-                '<div class="gen-stub-control">' +
-                    '<span class="gen-label">Clip Skip</span>' +
-                    '<input type="number" class="gen-number-input" value="0" disabled>' +
+                '<div class="gen-setting-row" id="gen-clip-skip-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">CLIP Skip</span>' +
+                    '<input type="range" id="gen-clip-skip-range" class="gen-range" min="0" max="12" step="1" value="0">' +
+                    '<input type="number" id="gen-clip-skip" class="gen-number-input" min="0" max="12" step="1" value="0">' +
                 '</div>' +
-                '<div class="gen-stub-control">' +
-                    '<span class="gen-label">CFG Rescale</span>' +
-                    '<input type="number" class="gen-number-input" value="0" step="0.05" disabled>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">CFG Rescale</span>' +
+                    '<input type="range" id="gen-cfg-rescale-range" class="gen-range" min="0" max="0.99" step="0.01" value="0">' +
+                    '<input type="number" id="gen-cfg-rescale" class="gen-number-input" min="0" max="0.99" step="0.01" value="0">' +
                 '</div>' +
-                '<div class="gen-stub-control">' +
-                    '<span class="gen-label">Seamless</span>' +
-                    '<button class="gen-toggle" disabled></button>' +
+                '<div class="gen-setting-row">' +
+                    '<span class="gen-label" style="min-width:80px;margin-bottom:0">Seamless</span>' +
+                    '<div style="display:flex;gap:8px;align-items:center">' +
+                        '<button id="gen-seamless-x" class="gen-seamless-btn" title="Tile horizontally">X</button>' +
+                        '<button id="gen-seamless-y" class="gen-seamless-btn" title="Tile vertically">Y</button>' +
+                    '</div>' +
                 '</div>' +
             '</div>' +
         '</div>';
@@ -352,7 +555,7 @@ var GenerateTab = (function() {
             // Generate button
             '<button id="gen-toolbar-generate" class="gen-toolbar-btn gen-toolbar-generate" title="Generate">' +
                 '<i data-lucide="wand-2"></i>' +
-                '<span>Invoke</span>' +
+                '<span>Generate</span>' +
             '</button>' +
             // Batch count with spinners
             '<div class="gen-toolbar-batch">' +
@@ -408,6 +611,11 @@ var GenerateTab = (function() {
                     '<button class="gen-action-btn" id="gen-to-canvas" title="Coming in Canvas tab" disabled><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg></button>' +
                     '<button class="gen-action-btn" id="gen-clear-preview" title="Clear"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg></button>' +
                 '</div>' +
+                // Metadata panel (below action bar)
+                '<div id="gen-metadata-panel" class="gen-metadata-panel">' +
+                    '<div id="gen-metadata-summary" class="gen-metadata-summary"></div>' +
+                    '<div id="gen-metadata-full" class="gen-metadata-full"></div>' +
+                '</div>' +
             '</div>' +
             '<div id="gen-progress-label" class="gen-progress-label"></div>' +
             '<div id="gen-progress" class="gen-progress"><div id="gen-progress-bar" class="gen-progress-bar"></div></div>' +
@@ -443,37 +651,70 @@ var GenerateTab = (function() {
                     '</div>' +
                 '</div>' +
                 // Sub-tabs: Images | Assets | actions
-                '<div class="gen-gallery-subtabs">' +
+                '<div class="gen-gallery-subtabs" style="position:relative">' +
                     '<button id="gen-subtab-images" class="gen-gallery-subtab active">Images</button>' +
                     '<button id="gen-subtab-assets" class="gen-gallery-subtab">Assets</button>' +
                     '<div class="gen-gallery-subtab-actions">' +
-                        '<button class="gen-gallery-subtab-btn" title="Upload (coming soon)"><i data-lucide="upload"></i></button>' +
-                        '<button class="gen-gallery-subtab-btn" title="Settings (coming soon)"><i data-lucide="settings"></i></button>' +
+                        '<button id="gen-gallery-upload-btn" class="gen-gallery-subtab-btn" title="Upload image"><i data-lucide="upload"></i></button>' +
+                        '<input type="file" id="gen-gallery-upload-input" accept="image/*" multiple style="display:none">' +
+                        '<button id="gen-gallery-settings-btn" class="gen-gallery-subtab-btn" title="Gallery settings"><i data-lucide="settings"></i></button>' +
                         '<button id="gen-gallery-search-btn" class="gen-gallery-subtab-btn" title="Search"><i data-lucide="search"></i></button>' +
                         '<input id="gen-gallery-search-input" class="gen-gallery-search" type="text" placeholder="Search...">' +
                     '</div>' +
+                    '<div id="gen-gallery-popover" class="gen-gallery-popover">' +
+                        '<div class="gen-popover-row">' +
+                            '<span class="gen-popover-label">Image Size</span>' +
+                            '<input type="range" id="gen-thumb-size-slider" class="gen-range gen-popover-slider" min="45" max="200" step="5" value="90">' +
+                            '<span id="gen-thumb-size-val" style="color:var(--shell-text);font-size:11px;min-width:28px;text-align:right">90</span>' +
+                        '</div>' +
+                        '<div class="gen-popover-row">' +
+                            '<span class="gen-popover-label">Sort Direction</span>' +
+                            '<button id="gen-sort-direction-toggle" class="gen-toggle on"></button>' +
+                            '<span id="gen-sort-direction-label" style="color:var(--shell-text-muted);font-size:10px;min-width:60px">Newest</span>' +
+                        '</div>' +
+                        '<div class="gen-popover-row">' +
+                            '<span class="gen-popover-label">Starred First</span>' +
+                            '<button id="gen-starred-first-toggle" class="gen-toggle"></button>' +
+                        '</div>' +
+                        '<div class="gen-popover-row">' +
+                            '<span class="gen-popover-label">Auto-Switch New</span>' +
+                            '<button id="gen-auto-switch-toggle" class="gen-toggle on"></button>' +
+                        '</div>' +
+                    '</div>' +
                 '</div>' +
-                // Images sub-tab
                 '<div id="gen-images-content">' +
                     '<div class="gen-gallery-header">' +
                         '<span class="gen-gallery-title">Gallery</span>' +
                         '<button id="gen-gallery-clear" class="gen-gallery-clear">Clear</button>' +
                     '</div>' +
-                    '<div id="gen-gallery-grid" class="gen-gallery-grid"></div>' +
+                    '<div class="gen-gallery-grid-wrap">' +
+                        '<div id="gen-gallery-grid" class="gen-gallery-grid"></div>' +
+                        '<div id="gen-selection-badge" class="gen-selection-badge"></div>' +
+                    '</div>' +
                 '</div>' +
-                // Assets sub-tab
                 '<div id="gen-assets-content" style="display:none">' +
                     '<div class="gen-assets-placeholder">No assets uploaded</div>' +
                 '</div>' +
-                // Pagination
-                '<div class="gen-gallery-pagination">' +
-                    '<span>Page 1</span>' +
+                '<div id="gen-bulk-bar" class="gen-bulk-bar">' +
+                    '<button id="gen-bulk-star" class="gen-bulk-btn">Star All</button>' +
+                    '<button id="gen-bulk-unstar" class="gen-bulk-btn">Unstar All</button>' +
+                    '<button id="gen-bulk-download" class="gen-bulk-btn">Download</button>' +
+                    '<button id="gen-bulk-delete" class="gen-bulk-btn destructive">Delete</button>' +
+                '</div>' +
+                '<div id="gen-gallery-pagination" class="gen-gallery-pagination">' +
+                    '<button id="gen-page-prev" disabled>&lt; Prev</button>' +
+                    '<span id="gen-page-info">Page 1</span>' +
+                    '<button id="gen-page-next">&gt; Next</button>' +
                 '</div>' +
             '</div>';
     }
 
     function cacheElements() {
         els.model = document.getElementById('gen-model');
+        els.modelSearch = document.getElementById('gen-model-search');
+        els.modelDropdown = document.getElementById('gen-model-dropdown');
+        els.modelDropdownList = document.getElementById('gen-model-dropdown-list');
+        els.modelPickerWrap = document.getElementById('gen-model-picker-wrap');
         els.modelWarn = document.getElementById('gen-model-warn');
         els.prompt = document.getElementById('gen-prompt');
         els.negPrompt = document.getElementById('gen-neg-prompt');
@@ -530,7 +771,7 @@ var GenerateTab = (function() {
     // ── Aspect Preview Box ──
     function updateAspectPreview() {
         if (!els.aspectPreview) return;
-        var maxDim = 60;
+        var maxDim = 100;
         var w = state.width;
         var h = state.height;
         var scale;
@@ -561,6 +802,7 @@ var GenerateTab = (function() {
         var aspects = getActiveAspects();
         var found = false;
         for (var i = 0; i < aspects.length; i++) {
+            if (aspects[i].label === 'Free') continue; // skip Free when matching
             if (aspects[i].w === state.width && aspects[i].h === state.height) {
                 els.aspectDropdown.value = aspects[i].label;
                 found = true;
@@ -568,7 +810,10 @@ var GenerateTab = (function() {
             }
         }
         if (!found) {
-            els.aspectDropdown.value = 'custom';
+            // If current dropdown is "Free", keep it; otherwise set to custom
+            if (els.aspectDropdown.value !== 'Free') {
+                els.aspectDropdown.value = 'custom';
+            }
         }
     }
 
@@ -580,6 +825,7 @@ var GenerateTab = (function() {
             this.style.height = 'auto';
             this.style.height = this.scrollHeight + 'px';
             updateTokenCount();
+            updateStylePreview();
         });
         els.negPrompt.addEventListener('input', function() {
             state.negPrompt = this.value;
@@ -597,10 +843,46 @@ var GenerateTab = (function() {
             els.settingsBody.classList.toggle('closed');
         });
 
-        // Stub accordions
+        // Section accordions
         bindAccordion('gen-compositing-header', 'gen-compositing-body');
         bindAccordion('gen-refiner-header', 'gen-refiner-body');
         bindAccordion('gen-advanced-header', 'gen-advanced-body');
+
+        // ── Phase 3: Compositing controls ──
+        bindSliderPair('gen-edge-size-range', 'gen-edge-size', function(v) { state.edgeSize = parseInt(v); });
+        bindSliderPair('gen-min-denoise-range', 'gen-min-denoise', function(v) { state.minDenoise = parseFloat(v); });
+        bindSliderPair('gen-mask-blur-range', 'gen-mask-blur', function(v) { state.maskBlur = parseInt(v); });
+        var coherenceEl = document.getElementById('gen-coherence-mode');
+        if (coherenceEl) coherenceEl.addEventListener('change', function() { state.coherenceMode = this.value; });
+        var infillEl = document.getElementById('gen-infill-method');
+        if (infillEl) infillEl.addEventListener('change', function() { state.infillMethod = this.value; });
+
+        // ── Phase 3: Refiner controls ──
+        bindSliderPair('gen-refiner-steps-range', 'gen-refiner-steps', function(v) { state.refinerSteps = parseInt(v); });
+        bindSliderPair('gen-refiner-cfg-range', 'gen-refiner-cfg', function(v) { state.refinerCfg = parseFloat(v); });
+        bindSliderPair('gen-refiner-start-range', 'gen-refiner-start', function(v) { state.refinerStart = parseFloat(v); });
+        bindSliderPair('gen-aesthetic-pos-range', 'gen-aesthetic-pos', function(v) { state.aestheticScore = parseFloat(v); });
+        bindSliderPair('gen-aesthetic-neg-range', 'gen-aesthetic-neg', function(v) { state.negAestheticScore = parseFloat(v); });
+        var refSchedEl = document.getElementById('gen-refiner-scheduler');
+        if (refSchedEl) refSchedEl.addEventListener('change', function() { state.refinerScheduler = this.value; });
+        var refModelEl = document.getElementById('gen-refiner-model');
+        if (refModelEl) refModelEl.addEventListener('change', function() { state.refinerModel = this.value; });
+
+        // ── Phase 3: Advanced controls ──
+        var vaeEl = document.getElementById('gen-vae-picker');
+        if (vaeEl) vaeEl.addEventListener('change', function() { state.vae = this.value; });
+        bindSliderPair('gen-clip-skip-range', 'gen-clip-skip', function(v) { state.clipSkip = parseInt(v); });
+        bindSliderPair('gen-cfg-rescale-range', 'gen-cfg-rescale', function(v) { state.cfgRescale = parseFloat(v); });
+        var seamXBtn = document.getElementById('gen-seamless-x');
+        var seamYBtn = document.getElementById('gen-seamless-y');
+        if (seamXBtn) seamXBtn.addEventListener('click', function() {
+            state.seamlessX = !state.seamlessX;
+            this.classList.toggle('on', state.seamlessX);
+        });
+        if (seamYBtn) seamYBtn.addEventListener('click', function() {
+            state.seamlessY = !state.seamlessY;
+            this.classList.toggle('on', state.seamlessY);
+        });
 
         // Image Advanced Options disclosure
         var imgAdvDisc = document.getElementById('gen-image-adv-disclosure');
@@ -647,11 +929,8 @@ var GenerateTab = (function() {
             state.scheduler = this.value;
         });
 
-        // Model
-        els.model.addEventListener('change', function() {
-            state.model = this.value;
-            updateUIForArch(ModelUtils.detectArchFromFilename(this.value));
-        });
+        // Model searchable picker
+        bindModelPicker();
 
         // Model refresh button
         var modelRefresh = document.getElementById('gen-model-refresh');
@@ -676,7 +955,7 @@ var GenerateTab = (function() {
         if (els.aspectDropdown) {
             els.aspectDropdown.addEventListener('change', function() {
                 var val = this.value;
-                if (val === 'custom') return;
+                if (val === 'custom' || val === 'Free') return; // Free = keep current W/H
                 var aspects = getActiveAspects();
                 for (var i = 0; i < aspects.length; i++) {
                     if (aspects[i].label === val) {
@@ -780,7 +1059,10 @@ var GenerateTab = (function() {
                 state.width = v;
                 els.customWidth.value = v;
                 if (state.aspectLocked && state.lockedRatio) {
-                    var newH = ModelUtils.clampDimension(Math.round(v / state.lockedRatio));
+                    var isVideo = ModelUtils.isVideoModel(state.model);
+                    var newH = isVideo
+                        ? ModelUtils.clampVideoDimension(Math.round(v / state.lockedRatio))
+                        : ModelUtils.clampDimension(Math.round(v / state.lockedRatio));
                     state.height = newH;
                     els.customHeight.value = newH;
                     var hs = document.getElementById('gen-height-slider');
@@ -797,7 +1079,10 @@ var GenerateTab = (function() {
                 state.height = v;
                 els.customHeight.value = v;
                 if (state.aspectLocked && state.lockedRatio) {
-                    var newW = ModelUtils.clampDimension(Math.round(v * state.lockedRatio));
+                    var isVideo = ModelUtils.isVideoModel(state.model);
+                    var newW = isVideo
+                        ? ModelUtils.clampVideoDimension(Math.round(v * state.lockedRatio))
+                        : ModelUtils.clampDimension(Math.round(v * state.lockedRatio));
                     state.width = newW;
                     els.customWidth.value = newW;
                     var ws = document.getElementById('gen-width-slider');
@@ -933,8 +1218,14 @@ var GenerateTab = (function() {
 
         // Gallery clear
         els.galleryClear.addEventListener('click', function() {
+            if (state.gallery.length === 0) return;
+            if (!confirm('Clear all ' + state.gallery.length + ' gallery items?')) return;
             state.gallery = [];
-            els.galleryGrid.innerHTML = '';
+            state.selectedImages = [];
+            state.galleryPage = 0;
+            renderGallery();
+            updateSelectionUI();
+            updateMetadataPanel();
             localStorage.removeItem('sf-gallery');
         });
 
@@ -971,6 +1262,7 @@ var GenerateTab = (function() {
             floatToggleLeft.addEventListener('click', function() {
                 state.leftPanelVisible = !state.leftPanelVisible;
                 els.leftPanel.classList.toggle('gen-panel-hidden', !state.leftPanelVisible);
+                this.classList.toggle('active', state.leftPanelVisible);
             });
         }
         var floatGenerate = document.getElementById('gen-float-generate');
@@ -1020,6 +1312,8 @@ var GenerateTab = (function() {
             galleryClose.addEventListener('click', function() {
                 state.rightPanelVisible = false;
                 els.rightPanel.classList.add('gen-panel-hidden');
+                var galleryToggle = document.getElementById('gen-toolbar-toggle-gallery');
+                if (galleryToggle) galleryToggle.classList.remove('active');
             });
         }
 
@@ -1057,7 +1351,7 @@ var GenerateTab = (function() {
             });
         }
 
-        // Gallery search toggle
+        // Gallery search toggle + filtering
         var searchBtn = document.getElementById('gen-gallery-search-btn');
         var searchInput = document.getElementById('gen-gallery-search-input');
         if (searchBtn && searchInput) {
@@ -1067,6 +1361,44 @@ var GenerateTab = (function() {
                     searchInput.focus();
                 } else {
                     searchInput.value = '';
+                    state.gallerySearch = '';
+                    state.galleryPage = 0;
+                    renderGallery();
+                }
+            });
+            searchInput.addEventListener('input', function() {
+                state.gallerySearch = this.value;
+                state.galleryPage = 0;
+                renderGallery();
+            });
+        }
+
+        // ── Style Preset ──
+        var styleSelect = document.getElementById('gen-style-preset');
+        if (styleSelect) {
+            styleSelect.addEventListener('change', function() {
+                state.stylePreset = this.value;
+                updateStylePreview();
+            });
+        }
+
+        // ── Prompt History (Alt+Up/Down) ──
+        if (els.prompt) {
+            els.prompt.addEventListener('keydown', function(e) {
+                // Prompt attention weight (Ctrl+Up/Down)
+                if (e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+                    e.preventDefault();
+                    handlePromptWeight(this, e.key === 'ArrowUp');
+                    return;
+                }
+                // Prompt history (Alt+Up/Down)
+                if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+                    e.preventDefault();
+                    if (e.key === 'ArrowUp') {
+                        navigatePromptHistory(-1);
+                    } else {
+                        navigatePromptHistory(1);
+                    }
                 }
             });
         }
@@ -1079,6 +1411,27 @@ var GenerateTab = (function() {
             header.addEventListener('click', function() {
                 this.classList.toggle('closed');
                 body.classList.toggle('closed');
+            });
+        }
+    }
+
+    // Helper: bind a range slider ↔ number input pair with state callback
+    function bindSliderPair(rangeId, inputId, onUpdate) {
+        var range = document.getElementById(rangeId);
+        var input = document.getElementById(inputId);
+        if (range && input) {
+            range.addEventListener('input', function() {
+                input.value = this.value;
+                if (onUpdate) onUpdate(this.value);
+            });
+            input.addEventListener('input', function() {
+                var v = parseFloat(this.value);
+                if (!isNaN(v)) {
+                    var min = parseFloat(range.min);
+                    var max = parseFloat(range.max);
+                    range.value = Math.min(max, Math.max(min, v));
+                    if (onUpdate) onUpdate(this.value);
+                }
             });
         }
     }
@@ -1111,22 +1464,61 @@ var GenerateTab = (function() {
             .then(function(models) {
                 if (!models.length) throw new Error('empty');
 
-                els.model.innerHTML = '';
-                models.forEach(function(m) {
-                    var opt = document.createElement('option');
-                    opt.value = m.name;
-                    opt.textContent = m.name;
-                    els.model.appendChild(opt);
-                });
+                state.allModels = models;
+                // Set hidden input value
+                els.model.value = models[0].name;
                 state.model = models[0].name;
+                if (els.modelSearch) {
+                    els.modelSearch.value = models[0].name;
+                    els.modelSearch.placeholder = 'Search models...';
+                }
                 updateUIForArch(ModelUtils.detectArchFromFilename(models[0].name));
                 els.modelWarn.classList.remove('visible');
             })
             .catch(function() {
-                els.model.innerHTML = '<option disabled selected>No models found</option>';
+                state.allModels = [];
+                if (els.modelSearch) {
+                    els.modelSearch.value = '';
+                    els.modelSearch.placeholder = 'No models found';
+                }
                 els.modelWarn.textContent = 'Could not load models \u2014 is the server running?';
                 els.modelWarn.classList.add('visible');
             });
+    }
+
+    // ── Load VAEs and refiner models from /object_info ──
+    function loadAdvancedOptions() {
+        fetch('/object_info', { cache: 'no-store' })
+            .then(function(r) { return r.ok ? r.json() : {}; })
+            .then(function(info) {
+                // Populate VAE picker
+                var vaePicker = document.getElementById('gen-vae-picker');
+                if (vaePicker && info.VAELoader && info.VAELoader.input && info.VAELoader.input.required && info.VAELoader.input.required.vae_name) {
+                    var vaeList = info.VAELoader.input.required.vae_name[0];
+                    if (Array.isArray(vaeList)) {
+                        vaeList.forEach(function(name) {
+                            var opt = document.createElement('option');
+                            opt.value = name;
+                            opt.textContent = name;
+                            vaePicker.appendChild(opt);
+                        });
+                    }
+                }
+                // Populate refiner model picker (SDXL checkpoints)
+                var refinerPicker = document.getElementById('gen-refiner-model');
+                if (refinerPicker && info.CheckpointLoaderSimple && info.CheckpointLoaderSimple.input && info.CheckpointLoaderSimple.input.required && info.CheckpointLoaderSimple.input.required.ckpt_name) {
+                    var ckptList = info.CheckpointLoaderSimple.input.required.ckpt_name[0];
+                    if (Array.isArray(ckptList)) {
+                        ckptList.forEach(function(name) {
+                            var opt = document.createElement('option');
+                            opt.value = name;
+                            opt.textContent = name;
+                            refinerPicker.appendChild(opt);
+                        });
+                    }
+                }
+            })
+            .catch(function() { /* server not available */ });
     }
 
     // ── Arch-aware UI ──
@@ -1162,6 +1554,14 @@ var GenerateTab = (function() {
             archBadge.dataset.arch = arch;
         }
 
+        // Refiner: SDXL only
+        var refinerSection = document.getElementById('gen-refiner-section');
+        if (refinerSection) refinerSection.style.display = (arch === 'sdxl') ? '' : 'none';
+
+        // CLIP Skip: SD1.5 only
+        var clipSkipRow = document.getElementById('gen-clip-skip-row');
+        if (clipSkipRow) clipSkipRow.style.display = (arch === 'sd15') ? 'flex' : 'none';
+
         // Update model name badge
         if (els.modelBadge && state.model) {
             var shortName = state.model.length > 20 ? state.model.substring(0, 18) + '...' : state.model;
@@ -1194,25 +1594,17 @@ var GenerateTab = (function() {
 
         // Update aspect dropdown options for video vs image
         if (els.aspectDropdown) {
-            var aspects = getActiveAspects();
-            els.aspectDropdown.innerHTML = '';
-            aspects.forEach(function(a) {
-                var opt = document.createElement('option');
-                opt.value = a.label;
-                opt.textContent = a.label;
-                els.aspectDropdown.appendChild(opt);
-            });
-            var customOpt = document.createElement('option');
-            customOpt.value = 'custom';
-            customOpt.textContent = 'Custom';
-            els.aspectDropdown.appendChild(customOpt);
+            els.aspectDropdown.innerHTML = buildAspectOptions();
+            els.aspectDropdown.value = '1:1';
         }
 
-        // Select first aspect ratio for the new mode
+        // Select first non-Free aspect ratio for the new mode
         var aspects = getActiveAspects();
-        if (aspects.length > 0) {
-            state.width = aspects[0].w;
-            state.height = aspects[0].h;
+        if (aspects.length > 1) {
+            // Pick the second entry (first non-Free, which is 1:1)
+            var defaultAspect = aspects[1] || aspects[0];
+            state.width = defaultAspect.w;
+            state.height = defaultAspect.h;
             syncDimensionInputs();
             syncAspectDropdown();
             updateAspectPreview();
@@ -1255,7 +1647,7 @@ var GenerateTab = (function() {
 
     function addLora(name) {
         if (state.loras.some(function(l) { return l.name === name; })) return;
-        state.loras.push({ name: name, strength: 1.0 });
+        state.loras.push({ name: name, strength: 1.0, enabled: true });
         renderLoraList();
     }
 
@@ -1269,12 +1661,16 @@ var GenerateTab = (function() {
         if (!list) return;
         list.innerHTML = '';
         state.loras.forEach(function(lora, idx) {
+            // Ensure enabled property exists (migration from old format)
+            if (lora.enabled === undefined) lora.enabled = true;
+            var disabledClass = lora.enabled ? '' : ' gen-lora-disabled';
             var row = document.createElement('div');
-            row.className = 'gen-lora-row';
+            row.className = 'gen-lora-row' + disabledClass;
             row.innerHTML =
+                '<button class="gen-toggle gen-lora-toggle' + (lora.enabled ? ' on' : '') + '" data-idx="' + idx + '"></button>' +
                 '<span class="gen-lora-name">' + lora.name + '</span>' +
-                '<input type="range" class="gen-range gen-lora-strength" min="-2" max="2" step="0.05" value="' + lora.strength + '">' +
-                '<span class="gen-lora-val">' + lora.strength.toFixed(2) + '</span>' +
+                '<input type="range" class="gen-range gen-lora-strength" min="-1" max="2" step="0.05" value="' + lora.strength + '"' + (lora.enabled ? '' : ' disabled') + '>' +
+                '<input type="number" class="gen-number-input gen-lora-val-input" min="-10" max="10" step="0.05" value="' + lora.strength.toFixed(2) + '"' + (lora.enabled ? '' : ' disabled') + '>' +
                 '<button class="gen-lora-remove" data-idx="' + idx + '">&times;</button>';
             list.appendChild(row);
         });
@@ -1282,7 +1678,24 @@ var GenerateTab = (function() {
         list.querySelectorAll('.gen-lora-strength').forEach(function(slider, idx) {
             slider.addEventListener('input', function() {
                 state.loras[idx].strength = parseFloat(this.value);
-                this.nextElementSibling.textContent = state.loras[idx].strength.toFixed(2);
+                var valInput = this.parentElement.querySelector('.gen-lora-val-input');
+                if (valInput) valInput.value = state.loras[idx].strength.toFixed(2);
+            });
+        });
+        list.querySelectorAll('.gen-lora-val-input').forEach(function(input, idx) {
+            input.addEventListener('change', function() {
+                var v = Math.max(-10, Math.min(10, parseFloat(this.value) || 0));
+                this.value = v.toFixed(2);
+                state.loras[idx].strength = v;
+                var slider = this.parentElement.querySelector('.gen-lora-strength');
+                if (slider) slider.value = Math.max(-1, Math.min(2, v)); // clamp slider visual
+            });
+        });
+        list.querySelectorAll('.gen-lora-toggle').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                var i = parseInt(this.dataset.idx);
+                state.loras[i].enabled = !state.loras[i].enabled;
+                renderLoraList();
             });
         });
         list.querySelectorAll('.gen-lora-remove').forEach(function(btn) {
@@ -1294,9 +1707,21 @@ var GenerateTab = (function() {
 
     // ── Workflow Builder ──
     function buildWorkflow() {
+        // Append style suffix to prompt
+        var finalPrompt = state.prompt;
+        if (state.stylePreset && state.stylePreset !== 'none') {
+            for (var i = 0; i < stylePresets.length; i++) {
+                if (stylePresets[i].id === state.stylePreset) {
+                    finalPrompt += stylePresets[i].suffix;
+                    break;
+                }
+            }
+        }
+        // Filter disabled LoRAs
+        var enabledLoras = state.loras.filter(function(l) { return l.enabled !== false; });
         return WorkflowBuilder.build({
             model: state.model,
-            prompt: state.prompt,
+            prompt: finalPrompt,
             negPrompt: state.negPrompt,
             width: state.width,
             height: state.height,
@@ -1307,7 +1732,27 @@ var GenerateTab = (function() {
             seed: state.seed,
             frames: state.frames,
             fps: state.fps,
-            loras: state.loras
+            loras: enabledLoras,
+            // Phase 3: Advanced
+            vae: state.vae,
+            clipSkip: state.clipSkip,
+            cfgRescale: state.cfgRescale,
+            seamlessX: state.seamlessX,
+            seamlessY: state.seamlessY,
+            // Phase 3: Refiner
+            refinerModel: state.refinerModel,
+            refinerScheduler: state.refinerScheduler,
+            refinerSteps: state.refinerSteps,
+            refinerCfg: state.refinerCfg,
+            refinerStart: state.refinerStart,
+            aestheticScore: state.aestheticScore,
+            negAestheticScore: state.negAestheticScore,
+            // Phase 3: Compositing
+            coherenceMode: state.coherenceMode,
+            edgeSize: state.edgeSize,
+            minDenoise: state.minDenoise,
+            maskBlur: state.maskBlur,
+            infillMethod: state.infillMethod
         });
     }
 
@@ -1322,6 +1767,9 @@ var GenerateTab = (function() {
             showError('Enter a prompt');
             return;
         }
+
+        // Save to prompt history
+        pushPromptHistory(state.prompt);
 
         var batchN = state.batchCount || 1;
         state.pendingBatch = batchN;
@@ -1426,54 +1874,85 @@ var GenerateTab = (function() {
         els.actionBar.style.display = 'none';
         els.empty.style.display = 'flex';
         // Deselect gallery thumbs
-        els.galleryGrid.querySelectorAll('.gen-thumb-wrap').forEach(function(t) {
-            t.classList.remove('active');
-        });
+        state.selectedImages = [];
+        state.lastSelectedIndex = -1;
+        updateSelectionUI();
+        updateMetadataPanel();
     }
 
-    function addToGallery(src, isVideo) {
-        state.gallery.unshift({ src: src, isVideo: !!isVideo, prompt: state.prompt });
+    function addToGallery(src, isVideo, metadata) {
+        var item = {
+            src: src,
+            isVideo: !!isVideo,
+            prompt: (metadata && metadata.prompt) || state.prompt || '',
+            model: (metadata && metadata.model) || state.model || '',
+            seed: (metadata && metadata.seed != null) ? metadata.seed : state.lastSeed,
+            steps: (metadata && metadata.steps) || state.steps,
+            cfg: (metadata && metadata.cfg) || state.cfg,
+            guidance: (metadata && metadata.guidance) || state.guidance,
+            scheduler: (metadata && metadata.scheduler) || state.scheduler,
+            width: (metadata && metadata.width) || state.width,
+            height: (metadata && metadata.height) || state.height,
+            arch: (metadata && metadata.arch) || state.arch,
+            timestamp: Date.now(),
+            starred: false
+        };
+        state.gallery.unshift(item);
         if (state.gallery.length > 200) state.gallery.pop();
+        state.galleryPage = 0;
 
-        var wrap = createThumb(src, !!isVideo, true);
-        if (els.galleryGrid.firstChild) {
-            els.galleryGrid.insertBefore(wrap, els.galleryGrid.firstChild);
-        } else {
-            els.galleryGrid.appendChild(wrap);
-        }
+        renderGallery();
 
-        // Trim DOM to 200
-        while (els.galleryGrid.children.length > 200) {
-            els.galleryGrid.removeChild(els.galleryGrid.lastChild);
+        // Auto-switch to new image
+        if (state.autoSwitchNew) {
+            state.selectedImages = [0];
+            state.lastSelectedIndex = 0;
+            updateSelectionUI();
+            updateMetadataPanel();
         }
 
         saveGallery();
     }
 
-    function createThumb(src, isVideo, isActive) {
+    function createThumb(item, galleryIndex) {
+        var src = item.src;
+        var isVideo = item.isVideo;
+        var starred = item.starred;
+        var isSelected = state.selectedImages.indexOf(galleryIndex) >= 0;
         var wrap = document.createElement('div');
-        wrap.className = 'gen-thumb-wrap' + (isActive ? ' active' : '') + (isVideo ? ' gen-thumb-video' : '');
+        wrap.className = 'gen-thumb-wrap' + (isSelected ? ' gen-selected' : '') + (isVideo ? ' gen-thumb-video' : '');
+        wrap.dataset.galleryIndex = galleryIndex;
+        var starClass = starred ? ' starred' : '';
+        var starChar = starred ? '\u2605' : '\u2606';
         if (isVideo) {
             wrap.innerHTML =
+                '<button class="gen-thumb-star' + starClass + '" data-idx="' + galleryIndex + '">' + starChar + '</button>' +
                 '<video src="' + src + '#t=0.1" muted preload="metadata" style="width:100%;height:100%;object-fit:cover;display:block;"></video>' +
                 '<div class="gen-thumb-play">\u25b6</div>';
         } else {
             wrap.innerHTML =
+                '<button class="gen-thumb-star' + starClass + '" data-idx="' + galleryIndex + '">' + starChar + '</button>' +
                 '<img src="' + src + '" alt="thumbnail" loading="lazy">' +
                 '<div class="gen-thumb-overlay">' +
                     '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>' +
                 '</div>';
         }
-        wrap.addEventListener('click', function() {
-            if (isVideo) {
-                displayVideo(src);
-            } else {
-                displayImage(src);
-            }
-            els.galleryGrid.querySelectorAll('.gen-thumb-wrap').forEach(function(t) {
-                t.classList.remove('active');
-            });
-            wrap.classList.add('active');
+        // Star click
+        wrap.querySelector('.gen-thumb-star').addEventListener('click', function(e) {
+            e.stopPropagation();
+            var idx = parseInt(this.dataset.idx);
+            state.gallery[idx].starred = !state.gallery[idx].starred;
+            saveGallery();
+            renderGallery();
+        });
+        // Click with multi-select support
+        wrap.addEventListener('click', function(e) {
+            handleThumbClick(galleryIndex, e);
+        });
+        // Right-click context menu
+        wrap.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            showContextMenu(e, galleryIndex);
         });
         return wrap;
     }
@@ -1488,16 +1967,267 @@ var GenerateTab = (function() {
         try {
             var saved = JSON.parse(localStorage.getItem('sf-gallery'));
             if (saved && Array.isArray(saved)) {
-                // Handle both old (string[]) and new ({src, isVideo}[]) formats
                 state.gallery = saved.slice(0, 200).map(function(item) {
-                    if (typeof item === 'string') return { src: item, isVideo: false };
+                    if (typeof item === 'string') return { src: item, isVideo: false, prompt: '', starred: false, timestamp: 0 };
+                    // Ensure backward compat: add missing fields
+                    if (item.starred === undefined) item.starred = false;
+                    if (item.timestamp === undefined) item.timestamp = 0;
                     return item;
                 });
-                state.gallery.forEach(function(item) {
-                    els.galleryGrid.appendChild(createThumb(item.src, item.isVideo, false));
-                });
+                renderGallery();
             }
         } catch(e) { /* ignore */ }
+        // Restore thumb size
+        try {
+            var ts = parseInt(localStorage.getItem('sf-thumb-size'));
+            if (ts >= 45 && ts <= 200) {
+                state.thumbSize = ts;
+                applyThumbSize();
+            }
+        } catch(e) { /* ignore */ }
+    }
+
+    // ── Prompt History ──
+    function loadPromptHistory() {
+        try {
+            var saved = JSON.parse(localStorage.getItem('sf-prompt-history'));
+            if (saved && Array.isArray(saved)) {
+                state.promptHistory = saved.slice(0, 20);
+            }
+        } catch(e) { /* ignore */ }
+    }
+
+    function savePromptHistory() {
+        try {
+            localStorage.setItem('sf-prompt-history', JSON.stringify(state.promptHistory));
+        } catch(e) { /* quota exceeded */ }
+    }
+
+    function pushPromptHistory(prompt) {
+        if (!prompt || !prompt.trim()) return;
+        var trimmed = prompt.trim();
+        // Don't duplicate the last entry
+        if (state.promptHistory.length > 0 && state.promptHistory[state.promptHistory.length - 1] === trimmed) return;
+        state.promptHistory.push(trimmed);
+        if (state.promptHistory.length > 20) state.promptHistory.shift();
+        state.promptHistoryIndex = -1;
+        savePromptHistory();
+    }
+
+    function navigatePromptHistory(direction) {
+        if (state.promptHistory.length === 0) return;
+        if (direction < 0) {
+            // Up = older
+            if (state.promptHistoryIndex === -1) {
+                // Save current prompt as temp
+                state._tempPrompt = state.prompt;
+                state.promptHistoryIndex = state.promptHistory.length - 1;
+            } else if (state.promptHistoryIndex > 0) {
+                state.promptHistoryIndex--;
+            }
+        } else {
+            // Down = newer
+            if (state.promptHistoryIndex === -1) return;
+            if (state.promptHistoryIndex < state.promptHistory.length - 1) {
+                state.promptHistoryIndex++;
+            } else {
+                // Back to current
+                state.promptHistoryIndex = -1;
+                state.prompt = state._tempPrompt || '';
+                if (els.prompt) {
+                    els.prompt.value = state.prompt;
+                    els.prompt.style.height = 'auto';
+                    els.prompt.style.height = els.prompt.scrollHeight + 'px';
+                }
+                updateTokenCount();
+                return;
+            }
+        }
+        if (state.promptHistoryIndex >= 0 && state.promptHistoryIndex < state.promptHistory.length) {
+            state.prompt = state.promptHistory[state.promptHistoryIndex];
+            if (els.prompt) {
+                els.prompt.value = state.prompt;
+                els.prompt.style.height = 'auto';
+                els.prompt.style.height = els.prompt.scrollHeight + 'px';
+            }
+            updateTokenCount();
+        }
+    }
+
+    // ── Style Preview ──
+    function updateStylePreview() {
+        var el = document.getElementById('gen-style-preview');
+        if (!el) return;
+        if (state.stylePreset === 'none' || !state.stylePreset) {
+            el.style.display = 'none';
+            return;
+        }
+        var suffix = '';
+        for (var i = 0; i < stylePresets.length; i++) {
+            if (stylePresets[i].id === state.stylePreset) {
+                suffix = stylePresets[i].suffix;
+                break;
+            }
+        }
+        if (suffix) {
+            var preview = state.prompt ? state.prompt + suffix : '(your prompt)' + suffix;
+            el.textContent = 'Full prompt: ' + preview;
+            el.style.display = 'block';
+        } else {
+            el.style.display = 'none';
+        }
+    }
+
+    // ── Searchable Model Picker ──
+    function bindModelPicker() {
+        if (!els.modelSearch) return;
+
+        els.modelSearch.addEventListener('focus', function() {
+            this.select();
+            openModelDropdown();
+        });
+
+        els.modelSearch.addEventListener('input', function() {
+            state.modelSearchQuery = this.value.toLowerCase();
+            renderModelDropdown();
+            if (els.modelDropdown) els.modelDropdown.style.display = '';
+        });
+
+        els.modelSearch.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeModelDropdown();
+                this.blur();
+            }
+        });
+
+        // Close on outside click
+        document.addEventListener('click', function(e) {
+            if (els.modelPickerWrap && !els.modelPickerWrap.contains(e.target)) {
+                closeModelDropdown();
+            }
+        });
+    }
+
+    function openModelDropdown() {
+        if (!els.modelDropdown) return;
+        state.modelSearchQuery = '';
+        renderModelDropdown();
+        els.modelDropdown.style.display = '';
+    }
+
+    function closeModelDropdown() {
+        if (els.modelDropdown) els.modelDropdown.style.display = 'none';
+        // Restore display name
+        if (els.modelSearch && state.model) {
+            els.modelSearch.value = state.model;
+        }
+    }
+
+    function selectModel(name) {
+        state.model = name;
+        els.model.value = name;
+        if (els.modelSearch) els.modelSearch.value = name;
+        closeModelDropdown();
+        updateUIForArch(ModelUtils.detectArchFromFilename(name));
+    }
+
+    function renderModelDropdown() {
+        if (!els.modelDropdownList) return;
+        var models = state.allModels || [];
+        var query = state.modelSearchQuery || '';
+        var filtered = models.filter(function(m) {
+            return !query || m.name.toLowerCase().indexOf(query) >= 0;
+        });
+
+        // Group by architecture
+        var groups = {};
+        var groupOrder = ['flux', 'sdxl', 'sd3', 'sd15', 'ltxv', 'wan', 'klein', 'other'];
+        var groupLabels = { flux: 'FLUX', sdxl: 'SDXL', sd3: 'SD3', sd15: 'SD 1.5', ltxv: 'Video (LTX)', wan: 'Video (WAN)', klein: 'KLEIN', other: 'Other' };
+
+        filtered.forEach(function(m) {
+            var arch = ModelUtils.detectArchFromFilename(m.name) || 'other';
+            if (!groups[arch]) groups[arch] = [];
+            groups[arch].push(m);
+        });
+
+        var html = '';
+        if (filtered.length === 0) {
+            html = '<div class="gen-model-dropdown-empty">No models match</div>';
+        } else {
+            groupOrder.forEach(function(arch) {
+                if (!groups[arch] || groups[arch].length === 0) return;
+                html += '<div class="gen-model-dropdown-group">' + (groupLabels[arch] || arch.toUpperCase()) + '</div>';
+                groups[arch].forEach(function(m) {
+                    var archVal = ModelUtils.detectArchFromFilename(m.name) || 'other';
+                    html += '<div class="gen-model-dropdown-item" data-model="' + m.name + '">' +
+                        '<span class="gen-model-dropdown-name">' + m.name + '</span>' +
+                        '<span class="gen-arch-badge" data-arch="' + archVal + '">' + (groupLabels[archVal] || archVal.toUpperCase()) + '</span>' +
+                    '</div>';
+                });
+            });
+        }
+        els.modelDropdownList.innerHTML = html;
+
+        // Bind click
+        els.modelDropdownList.querySelectorAll('.gen-model-dropdown-item').forEach(function(item) {
+            item.addEventListener('click', function() {
+                selectModel(this.dataset.model);
+            });
+        });
+    }
+
+    // ── Prompt Attention Weight (Ctrl+Up/Down) ──
+    function handlePromptWeight(textarea, increase) {
+        var start = textarea.selectionStart;
+        var end = textarea.selectionEnd;
+        if (start === end) return; // No selection
+        var text = textarea.value;
+        var selected = text.substring(start, end);
+
+        var newText;
+        var newStart, newEnd;
+
+        if (increase) {
+            // Check if already weighted with explicit value: (word:N.N)
+            var weightMatch = selected.match(/^\((.+):(\d+\.?\d*)\)$/);
+            if (weightMatch) {
+                var newWeight = (parseFloat(weightMatch[2]) + 0.1).toFixed(1);
+                newText = '(' + weightMatch[1] + ':' + newWeight + ')';
+            } else if (/^\(+[^)]+\)+$/.test(selected)) {
+                // Already in parens, add another layer
+                newText = '(' + selected + ')';
+            } else {
+                // Wrap in parens
+                newText = '(' + selected + ')';
+            }
+        } else {
+            // Decrease
+            var weightMatch2 = selected.match(/^\((.+):(\d+\.?\d*)\)$/);
+            if (weightMatch2) {
+                var decreased = (parseFloat(weightMatch2[2]) - 0.1).toFixed(1);
+                if (parseFloat(decreased) <= 1.0) {
+                    newText = '(' + weightMatch2[1] + ')';
+                } else {
+                    newText = '(' + weightMatch2[1] + ':' + decreased + ')';
+                }
+            } else if (/^\(\((.+)\)\)$/.test(selected)) {
+                // Remove one layer of parens
+                newText = selected.substring(1, selected.length - 1);
+            } else if (/^\((.+)\)$/.test(selected)) {
+                // Remove parens entirely
+                newText = selected.substring(1, selected.length - 1);
+            } else {
+                return; // Nothing to decrease
+            }
+        }
+
+        textarea.value = text.substring(0, start) + newText + text.substring(end);
+        state.prompt = textarea.value;
+        // Restore selection
+        newStart = start;
+        newEnd = start + newText.length;
+        textarea.setSelectionRange(newStart, newEnd);
+        updateTokenCount();
     }
 
     // ── Error Display ──
@@ -1525,7 +2255,7 @@ var GenerateTab = (function() {
 
         SerenityWS.on('progress', function(data) {
             if (!data) return;
-            var pct = (data.value / data.max * 100).toFixed(0);
+            var pct = data.max > 0 ? (data.value / data.max * 100).toFixed(0) : '0';
             els.progressBar.style.width = pct + '%';
             els.progressLabel.textContent = 'Step ' + data.value + ' / ' + data.max;
             els.progressLabel.classList.add('visible');
@@ -1583,7 +2313,18 @@ var GenerateTab = (function() {
             } else {
                 displayImage(src);
             }
-            addToGallery(src, isVideo);
+            addToGallery(src, isVideo, {
+                prompt: state.prompt,
+                model: state.model,
+                seed: state.lastSeed,
+                steps: state.steps,
+                cfg: state.cfg,
+                guidance: state.guidance,
+                scheduler: state.scheduler,
+                width: state.width,
+                height: state.height,
+                arch: state.arch
+            });
             state.pendingBatch = Math.max(0, state.pendingBatch - 1);
             if (state.pendingBatch <= 0) {
                 setGenerating(false);
@@ -1598,6 +2339,543 @@ var GenerateTab = (function() {
         });
     }
 
+
+    // ── Phase 2: Gallery Rendering ──
+    function getFilteredGallery() {
+        var items = state.gallery;
+        // Search filter
+        if (state.gallerySearch) {
+            var q = state.gallerySearch.toLowerCase();
+            items = items.filter(function(item) {
+                return (item.prompt && item.prompt.toLowerCase().indexOf(q) >= 0);
+            });
+        }
+        // Sort
+        if (!state.sortNewestFirst) {
+            items = items.slice().reverse();
+        }
+        // Starred first
+        if (state.starredFirst) {
+            var starred = items.filter(function(i) { return i.starred; });
+            var unstarred = items.filter(function(i) { return !i.starred; });
+            items = starred.concat(unstarred);
+        }
+        return items;
+    }
+
+    function getGalleryIndexMap() {
+        // Maps filtered display position to actual gallery index
+        var map = [];
+        var filtered = getFilteredGallery();
+        filtered.forEach(function(item) {
+            map.push(state.gallery.indexOf(item));
+        });
+        return map;
+    }
+
+    function renderGallery() {
+        if (!els.galleryGrid) return;
+        var filtered = getFilteredGallery();
+        var indexMap = getGalleryIndexMap();
+        var pageSize = state.galleryPageSize;
+        var totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+        if (state.galleryPage >= totalPages) state.galleryPage = totalPages - 1;
+        if (state.galleryPage < 0) state.galleryPage = 0;
+        var startIdx = state.galleryPage * pageSize;
+        var pageItems = filtered.slice(startIdx, startIdx + pageSize);
+        var pageIndices = indexMap.slice(startIdx, startIdx + pageSize);
+
+        els.galleryGrid.innerHTML = '';
+        pageItems.forEach(function(item, i) {
+            var realIdx = pageIndices[i];
+            var thumb = createThumb(item, realIdx);
+            els.galleryGrid.appendChild(thumb);
+        });
+
+        // Update grid template based on thumb size
+        applyThumbSize();
+
+        // Pagination
+        var pageInfo = document.getElementById('gen-page-info');
+        var prevBtn = document.getElementById('gen-page-prev');
+        var nextBtn = document.getElementById('gen-page-next');
+        if (pageInfo) pageInfo.textContent = 'Page ' + (state.galleryPage + 1) + ' of ' + totalPages;
+        if (prevBtn) prevBtn.disabled = state.galleryPage <= 0;
+        if (nextBtn) nextBtn.disabled = state.galleryPage >= totalPages - 1;
+
+        if (typeof lucide !== 'undefined') lucide.createIcons({nameAttr: 'data-lucide'});
+    }
+
+    function applyThumbSize() {
+        if (!els.galleryGrid) return;
+        els.galleryGrid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(' + state.thumbSize + 'px, 1fr))';
+    }
+
+    // ── Phase 2: Multi-select ──
+    function handleThumbClick(galleryIndex, e) {
+        var item = state.gallery[galleryIndex];
+        if (!item) return;
+
+        if (e.ctrlKey || e.metaKey) {
+            // Toggle this item in selection
+            var pos = state.selectedImages.indexOf(galleryIndex);
+            if (pos >= 0) {
+                state.selectedImages.splice(pos, 1);
+            } else {
+                state.selectedImages.push(galleryIndex);
+            }
+            state.lastSelectedIndex = galleryIndex;
+        } else if (e.shiftKey && state.lastSelectedIndex >= 0) {
+            // Range select
+            var start = Math.min(state.lastSelectedIndex, galleryIndex);
+            var end = Math.max(state.lastSelectedIndex, galleryIndex);
+            state.selectedImages = [];
+            for (var i = start; i <= end; i++) {
+                if (state.selectedImages.indexOf(i) < 0) {
+                    state.selectedImages.push(i);
+                }
+            }
+        } else {
+            // Normal click: select only this
+            state.selectedImages = [galleryIndex];
+            state.lastSelectedIndex = galleryIndex;
+        }
+
+        // Display the clicked item in preview
+        if (item.isVideo) {
+            displayVideo(item.src);
+        } else {
+            displayImage(item.src);
+        }
+
+        updateSelectionUI();
+        updateMetadataPanel();
+    }
+
+    function updateSelectionUI() {
+        // Update thumb selection classes
+        els.galleryGrid.querySelectorAll('.gen-thumb-wrap').forEach(function(wrap) {
+            var idx = parseInt(wrap.dataset.galleryIndex);
+            wrap.classList.toggle('gen-selected', state.selectedImages.indexOf(idx) >= 0);
+            wrap.classList.remove('active'); // remove old style
+        });
+
+        // Selection badge
+        var badge = document.getElementById('gen-selection-badge');
+        if (badge) {
+            if (state.selectedImages.length > 1) {
+                badge.textContent = state.selectedImages.length + ' selected';
+                badge.classList.add('visible');
+            } else {
+                badge.classList.remove('visible');
+            }
+        }
+
+        // Bulk action bar
+        var bulkBar = document.getElementById('gen-bulk-bar');
+        if (bulkBar) {
+            bulkBar.classList.toggle('visible', state.selectedImages.length > 1);
+        }
+    }
+
+    // ── Phase 2: Metadata Panel ──
+    function updateMetadataPanel() {
+        var panel = document.getElementById('gen-metadata-panel');
+        var summary = document.getElementById('gen-metadata-summary');
+        var full = document.getElementById('gen-metadata-full');
+        if (!panel || !summary || !full) return;
+
+        // Only show for single selection
+        if (state.selectedImages.length !== 1) {
+            panel.classList.remove('visible');
+            return;
+        }
+        var item = state.gallery[state.selectedImages[0]];
+        if (!item || (!item.prompt && !item.model && !item.seed)) {
+            panel.classList.remove('visible');
+            return;
+        }
+
+        var truncPrompt = item.prompt ? (item.prompt.length > 100 ? item.prompt.substring(0, 97) + '...' : item.prompt) : '';
+        var pairs = [];
+        if (truncPrompt) pairs.push('<span class="gen-metadata-key">Prompt:</span> <span class="gen-metadata-val">' + escapeHtml(truncPrompt) + '</span>');
+        if (item.model) pairs.push('<span class="gen-metadata-key">Model:</span> <span class="gen-metadata-val">' + escapeHtml(item.model) + '</span>');
+        if (item.seed != null) pairs.push('<span class="gen-metadata-key">Seed:</span> <span class="gen-metadata-val">' + item.seed + '</span>');
+        if (item.width && item.height) pairs.push('<span class="gen-metadata-key">Size:</span> <span class="gen-metadata-val">' + item.width + '\u00d7' + item.height + '</span>');
+        if (item.steps) pairs.push('<span class="gen-metadata-key">Steps:</span> <span class="gen-metadata-val">' + item.steps + '</span>');
+        if (item.cfg) pairs.push('<span class="gen-metadata-key">CFG:</span> <span class="gen-metadata-val">' + item.cfg + '</span>');
+
+        summary.innerHTML = pairs.join(' ');
+        panel.classList.add('visible');
+
+        // Full metadata
+        var fullPairs = [];
+        if (item.prompt) fullPairs.push('<span class="gen-metadata-key">Full Prompt:</span> <span class="gen-metadata-val">' + escapeHtml(item.prompt) + '</span>');
+        if (item.scheduler) fullPairs.push('<span class="gen-metadata-key">Scheduler:</span> <span class="gen-metadata-val">' + item.scheduler + '</span>');
+        if (item.guidance) fullPairs.push('<span class="gen-metadata-key">Guidance:</span> <span class="gen-metadata-val">' + item.guidance + '</span>');
+        if (item.arch) fullPairs.push('<span class="gen-metadata-key">Arch:</span> <span class="gen-metadata-val">' + item.arch + '</span>');
+        if (item.timestamp) fullPairs.push('<span class="gen-metadata-key">Time:</span> <span class="gen-metadata-val">' + new Date(item.timestamp).toLocaleString() + '</span>');
+        full.innerHTML = fullPairs.join('<br>');
+
+        // Toggle expand on click
+        summary.onclick = function() {
+            state.metadataExpanded = !state.metadataExpanded;
+            full.classList.toggle('open', state.metadataExpanded);
+        };
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        var div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    // ── Phase 2: Context Menu ──
+    function showContextMenu(e, galleryIndex) {
+        state.contextMenuIndex = galleryIndex;
+        var menu = document.getElementById('gen-context-menu');
+        if (!menu) {
+            menu = document.createElement('div');
+            menu.id = 'gen-context-menu';
+            menu.className = 'gen-context-menu';
+            document.body.appendChild(menu);
+        }
+        var item = state.gallery[galleryIndex] || {};
+        var starLabel = item.starred ? 'Unstar' : 'Star';
+        menu.innerHTML =
+            '<button class="gen-context-item" data-action="download">Download</button>' +
+            '<button class="gen-context-item" data-action="star">' + starLabel + '</button>' +
+            '<div class="gen-context-sep"></div>' +
+            '<button class="gen-context-item" data-action="use-prompt">Use Prompt</button>' +
+            '<button class="gen-context-item" data-action="use-seed">Use Seed</button>' +
+            '<button class="gen-context-item" data-action="use-all">Use All Parameters</button>' +
+            '<div class="gen-context-sep"></div>' +
+            '<button class="gen-context-item destructive" data-action="delete">Delete</button>';
+
+        // Position
+        menu.style.left = e.clientX + 'px';
+        menu.style.top = e.clientY + 'px';
+        menu.classList.add('visible');
+
+        // Ensure menu stays in viewport
+        requestAnimationFrame(function() {
+            var rect = menu.getBoundingClientRect();
+            if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
+            if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 4) + 'px';
+        });
+
+        // Bind actions
+        menu.querySelectorAll('.gen-context-item').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                handleContextAction(this.dataset.action, galleryIndex);
+                hideContextMenu();
+            });
+        });
+    }
+
+    function hideContextMenu() {
+        var menu = document.getElementById('gen-context-menu');
+        if (menu) menu.classList.remove('visible');
+    }
+
+    function handleContextAction(action, idx) {
+        var item = state.gallery[idx];
+        if (!item) return;
+
+        switch (action) {
+            case 'download':
+                var a = document.createElement('a');
+                a.href = item.src;
+                var ext = item.isVideo ? '.mp4' : '.png';
+                a.download = 'serenityflow_' + Date.now() + ext;
+                a.click();
+                break;
+            case 'star':
+                item.starred = !item.starred;
+                saveGallery();
+                renderGallery();
+                break;
+            case 'use-prompt':
+                if (item.prompt && els.prompt) {
+                    els.prompt.value = item.prompt;
+                    state.prompt = item.prompt;
+                    els.prompt.style.height = 'auto';
+                    els.prompt.style.height = els.prompt.scrollHeight + 'px';
+                    updateTokenCount();
+                }
+                break;
+            case 'use-seed':
+                if (item.seed != null && els.seed) {
+                    els.seed.value = item.seed;
+                    state.seed = item.seed;
+                    var toggle = document.getElementById('gen-seed-random-toggle');
+                    if (toggle) toggle.classList.toggle('on', state.seed === -1);
+                }
+                break;
+            case 'use-all':
+                if (item.prompt && els.prompt) {
+                    els.prompt.value = item.prompt;
+                    state.prompt = item.prompt;
+                    els.prompt.style.height = 'auto';
+                    els.prompt.style.height = els.prompt.scrollHeight + 'px';
+                    updateTokenCount();
+                }
+                if (item.seed != null && els.seed) {
+                    els.seed.value = item.seed;
+                    state.seed = item.seed;
+                }
+                if (item.steps && els.steps) {
+                    els.steps.value = item.steps;
+                    els.stepsRange.value = item.steps;
+                    state.steps = item.steps;
+                }
+                if (item.cfg && els.cfg) {
+                    els.cfg.value = item.cfg;
+                    els.cfgRange.value = item.cfg;
+                    state.cfg = item.cfg;
+                }
+                if (item.guidance && els.guidance) {
+                    els.guidance.value = item.guidance;
+                    els.guidanceRange.value = item.guidance;
+                    state.guidance = item.guidance;
+                }
+                if (item.scheduler && els.scheduler) {
+                    els.scheduler.value = item.scheduler;
+                    state.scheduler = item.scheduler;
+                }
+                if (item.width && item.height) {
+                    state.width = item.width;
+                    state.height = item.height;
+                    syncDimensionInputs();
+                    syncAspectDropdown();
+                    updateAspectPreview();
+                }
+                break;
+            case 'delete':
+                state.gallery.splice(idx, 1);
+                state.selectedImages = state.selectedImages.filter(function(si) { return si !== idx; }).map(function(si) { return si > idx ? si - 1 : si; });
+                saveGallery();
+                renderGallery();
+                updateSelectionUI();
+                updateMetadataPanel();
+                break;
+        }
+    }
+
+    // ── Phase 2: Bulk Operations ──
+    function bindBulkActions() {
+        var bulkStar = document.getElementById('gen-bulk-star');
+        var bulkUnstar = document.getElementById('gen-bulk-unstar');
+        var bulkDownload = document.getElementById('gen-bulk-download');
+        var bulkDelete = document.getElementById('gen-bulk-delete');
+
+        if (bulkStar) bulkStar.addEventListener('click', function() {
+            state.selectedImages.forEach(function(idx) {
+                if (state.gallery[idx]) state.gallery[idx].starred = true;
+            });
+            saveGallery();
+            renderGallery();
+        });
+        if (bulkUnstar) bulkUnstar.addEventListener('click', function() {
+            state.selectedImages.forEach(function(idx) {
+                if (state.gallery[idx]) state.gallery[idx].starred = false;
+            });
+            saveGallery();
+            renderGallery();
+        });
+        if (bulkDownload) bulkDownload.addEventListener('click', function() {
+            state.selectedImages.forEach(function(idx) {
+                var item = state.gallery[idx];
+                if (!item) return;
+                var a = document.createElement('a');
+                a.href = item.src;
+                a.download = 'serenityflow_' + (item.timestamp || Date.now()) + (item.isVideo ? '.mp4' : '.png');
+                a.click();
+            });
+        });
+        if (bulkDelete) bulkDelete.addEventListener('click', function() {
+            if (!confirm('Delete ' + state.selectedImages.length + ' images?')) return;
+            // Sort descending to splice safely
+            var sorted = state.selectedImages.slice().sort(function(a, b) { return b - a; });
+            sorted.forEach(function(idx) { state.gallery.splice(idx, 1); });
+            state.selectedImages = [];
+            saveGallery();
+            renderGallery();
+            updateSelectionUI();
+            updateMetadataPanel();
+            clearPreview();
+        });
+    }
+
+    // ── Phase 7: Gallery Upload & Drag-Drop ──
+    function bindGalleryUpload() {
+        var uploadBtn = document.getElementById('gen-gallery-upload-btn');
+        var uploadInput = document.getElementById('gen-gallery-upload-input');
+        if (uploadBtn && uploadInput) {
+            uploadBtn.addEventListener('click', function() { uploadInput.click(); });
+            uploadInput.addEventListener('change', function() {
+                if (this.files && this.files.length > 0) {
+                    handleUploadFiles(this.files);
+                    this.value = '';
+                }
+            });
+        }
+
+        // Drag-and-drop on gallery grid
+        var galleryGrid = els.galleryGrid;
+        if (galleryGrid) {
+            galleryGrid.addEventListener('dragover', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                galleryGrid.classList.add('gen-drag-over');
+            });
+            galleryGrid.addEventListener('dragleave', function(e) {
+                e.preventDefault();
+                galleryGrid.classList.remove('gen-drag-over');
+            });
+            galleryGrid.addEventListener('drop', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                galleryGrid.classList.remove('gen-drag-over');
+                if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    handleUploadFiles(e.dataTransfer.files);
+                }
+            });
+        }
+    }
+
+    function handleUploadFiles(files) {
+        Array.prototype.forEach.call(files, function(file) {
+            if (!file.type.startsWith('image/')) return;
+            // Upload to server
+            var formData = new FormData();
+            formData.append('image', file);
+            fetch('/upload/image', { method: 'POST', body: formData })
+                .then(function(r) { return r.ok ? r.json() : null; })
+                .then(function(data) {
+                    if (data && data.name) {
+                        var src = SerenityAPI.viewUrl(data.name, data.subfolder || '', data.type || 'input');
+                        addToGallery(src, false, { prompt: '(uploaded)' });
+                        renderGallery();
+                    }
+                })
+                .catch(function(err) {
+                    // Fallback: add as local blob URL
+                    var reader = new FileReader();
+                    reader.onload = function(ev) {
+                        addToGallery(ev.target.result, false, { prompt: '(uploaded)' });
+                        renderGallery();
+                    };
+                    reader.readAsDataURL(file);
+                });
+        });
+    }
+
+    // ── Phase 2: Gallery Settings Popover ──
+    function bindGallerySettings() {
+        var settingsBtn = document.getElementById('gen-gallery-settings-btn');
+        var popover = document.getElementById('gen-gallery-popover');
+        if (!settingsBtn || !popover) return;
+
+        settingsBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            state.gallerySettingsOpen = !state.gallerySettingsOpen;
+            popover.classList.toggle('visible', state.gallerySettingsOpen);
+        });
+
+        // Close on outside click
+        document.addEventListener('click', function(e) {
+            if (popover && !popover.contains(e.target) && e.target !== settingsBtn) {
+                state.gallerySettingsOpen = false;
+                popover.classList.remove('visible');
+            }
+        });
+
+        // Thumb size slider
+        var thumbSlider = document.getElementById('gen-thumb-size-slider');
+        var thumbVal = document.getElementById('gen-thumb-size-val');
+        if (thumbSlider) {
+            thumbSlider.value = state.thumbSize;
+            if (thumbVal) thumbVal.textContent = state.thumbSize;
+            thumbSlider.addEventListener('input', function() {
+                state.thumbSize = parseInt(this.value);
+                if (thumbVal) thumbVal.textContent = state.thumbSize;
+                applyThumbSize();
+                try { localStorage.setItem('sf-thumb-size', state.thumbSize); } catch(e) {}
+            });
+        }
+
+        // Sort direction toggle
+        var sortToggle = document.getElementById('gen-sort-direction-toggle');
+        var sortLabel = document.getElementById('gen-sort-direction-label');
+        if (sortToggle) {
+            sortToggle.addEventListener('click', function() {
+                state.sortNewestFirst = !state.sortNewestFirst;
+                this.classList.toggle('on', state.sortNewestFirst);
+                if (sortLabel) sortLabel.textContent = state.sortNewestFirst ? 'Newest' : 'Oldest';
+                state.galleryPage = 0;
+                renderGallery();
+            });
+        }
+
+        // Starred first toggle
+        var starredToggle = document.getElementById('gen-starred-first-toggle');
+        if (starredToggle) {
+            starredToggle.addEventListener('click', function() {
+                state.starredFirst = !state.starredFirst;
+                this.classList.toggle('on', state.starredFirst);
+                state.galleryPage = 0;
+                renderGallery();
+            });
+        }
+
+        // Auto-switch toggle
+        var autoToggle = document.getElementById('gen-auto-switch-toggle');
+        if (autoToggle) {
+            autoToggle.addEventListener('click', function() {
+                state.autoSwitchNew = !state.autoSwitchNew;
+                this.classList.toggle('on', state.autoSwitchNew);
+            });
+        }
+    }
+
+    // ── Phase 2: Pagination ──
+    function bindPagination() {
+        var prevBtn = document.getElementById('gen-page-prev');
+        var nextBtn = document.getElementById('gen-page-next');
+        if (prevBtn) {
+            prevBtn.addEventListener('click', function() {
+                if (state.galleryPage > 0) {
+                    state.galleryPage--;
+                    renderGallery();
+                }
+            });
+        }
+        if (nextBtn) {
+            nextBtn.addEventListener('click', function() {
+                var totalPages = Math.ceil(getFilteredGallery().length / state.galleryPageSize);
+                if (state.galleryPage < totalPages - 1) {
+                    state.galleryPage++;
+                    renderGallery();
+                }
+            });
+        }
+    }
+
+    // ── Phase 2: Global Event Listeners ──
+    function bindGlobalPhase2() {
+        // Close context menu on click outside or ESC
+        document.addEventListener('click', function() {
+            hideContextMenu();
+        });
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                hideContextMenu();
+            }
+        });
+    }
+
     // ── Public API ──
     function init() {
         if (initialized) return;
@@ -1607,9 +2885,16 @@ var GenerateTab = (function() {
         bindEvents();
         loadModels();
         loadLoras();
+        loadAdvancedOptions();
         restoreGallery();
+        loadPromptHistory();
         connectWS();
         updateAspectPreview();
+        bindBulkActions();
+        bindGalleryUpload();
+        bindGallerySettings();
+        bindPagination();
+        bindGlobalPhase2();
 
         // Render lucide icons
         if (typeof lucide !== 'undefined') {

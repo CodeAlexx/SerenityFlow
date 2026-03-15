@@ -101,7 +101,7 @@ class SFSelection {
     _setupKeyboard() {
         document.addEventListener('keydown', (e) => {
             // Don't handle when typing in input
-            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) {
                 return;
             }
 
@@ -162,6 +162,28 @@ class SFSelection {
             if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
                 e.preventDefault();
                 if (window.sfHistory) sfHistory.redo();
+            }
+
+            // H - fit view
+            if (e.key === 'h' || e.key === 'H') {
+                if (!e.ctrlKey && !e.metaKey) {
+                    e.preventDefault();
+                    this.canvas.fitView(true);
+                }
+            }
+
+            // Ctrl+L - auto-layout
+            if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
+                e.preventDefault();
+                this.canvas.autoLayout();
+            }
+
+            // Shift+G - toggle snap to grid
+            if (e.shiftKey && (e.key === 'G' || e.key === 'g')) {
+                e.preventDefault();
+                this.canvas.snapToGrid = !this.canvas.snapToGrid;
+                var snapBtn = document.getElementById('vc-snap');
+                if (snapBtn) snapBtn.classList.toggle('active', this.canvas.snapToGrid);
             }
         });
     }

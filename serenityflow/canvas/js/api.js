@@ -28,7 +28,18 @@ var SerenityAPI = (function() {
                     prompt: meta.prompt || '',
                     model: meta.model || '',
                     queuedAt: Date.now(),
-                    batchLabel: meta.batchLabel || ''
+                    batchLabel: meta.batchLabel || '',
+                    promptData: {
+                        workflow: workflow,
+                        prompt: meta.prompt || '',
+                        model: meta.model || '',
+                        width: meta.width || null,
+                        height: meta.height || null,
+                        seed: meta.seed != null ? meta.seed : null,
+                        scheduler: meta.scheduler || null,
+                        steps: meta.steps || null,
+                        cfg: meta.cfg || null
+                    }
                 });
             }
             return data;

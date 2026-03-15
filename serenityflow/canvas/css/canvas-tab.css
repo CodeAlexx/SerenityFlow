@@ -343,8 +343,8 @@
     font-style: italic;
 }
 
-/* Invoke button */
-.cv-invoke-btn {
+/* Generate button */
+.cv-generate-btn {
     width: 100%;
     height: 44px;
     background: var(--shell-accent);
@@ -357,13 +357,13 @@
     cursor: pointer;
     transition: background 150ms ease, transform 150ms ease;
 }
-.cv-invoke-btn:hover {
+.cv-generate-btn:hover {
     background: var(--shell-accent-hover);
 }
-.cv-invoke-btn:active {
+.cv-generate-btn:active {
     transform: scale(0.98);
 }
-.cv-invoke-btn:disabled {
+.cv-generate-btn:disabled {
     cursor: not-allowed;
     opacity: 0.85;
 }
@@ -371,7 +371,7 @@
     0%, 100% { opacity: 1; }
     50% { opacity: 0.7; }
 }
-.cv-invoke-btn.invoking {
+.cv-generate-btn.generating {
     animation: cv-pulse 1s infinite;
 }
 

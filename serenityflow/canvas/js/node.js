@@ -39,6 +39,7 @@ class SFNode {
         this._selected = false;
         this._executionState = null; // 'executing' | 'executed' | 'error' | null
         this._isDragging = false;
+        this._collapsed = false;
 
         // Build visual
         this._build();
@@ -112,6 +113,9 @@ class SFNode {
                 this._isDragging = false;
                 window.removeEventListener('mousemove', onMouseMove);
                 window.removeEventListener('mouseup', onMouseUp);
+                // Snap to grid on drop
+                this.canvas.snapNodeToGrid(this);
+                this.canvas._updateMinimap();
             };
 
             window.addEventListener('mousemove', onMouseMove);
@@ -214,150 +218,6 @@ class SFNode {
         return Math.max(NODE_MIN_WIDTH, Math.min(maxLen, 360));
     }
 
-    _build() {
-        this.group.destroyChildren();
-        this._portGroups = { inputs: [], outputs: [] };
-
-        const w = this.width;
-        const category = this.info.category || '';
-        const headerColor = getCategoryColor(category);
-
-        let yPos = 0;
-
-        // --- Header ---
-        const header = new Konva.Rect({
-            width: w,
-            height: NODE_HEADER_HEIGHT,
-            fill: headerColor,
-            cornerRadius: [4, 4, 0, 0],
-            listening: false,
-        });
-        this.group.add(header);
-
-        const title = new Konva.Text({
-            x: 8,
-            y: 6,
-            text: this.info.display_name || this.nodeType,
-            fontSize: 11,
-            fontStyle: 'bold',
-            fill: '#e0e0e0',
-            width: w - 16,
-            ellipsis: true,
-            wrap: 'none',
-            listening: false,
-        });
-        this.group.add(title);
-
-        yPos = NODE_HEADER_HEIGHT;
-
-        // --- Outputs (rendered first, at top) ---
-        for (let i = 0; i < this.outputs.length; i++) {
-            const out = this.outputs[i];
-            const portY = yPos + NODE_CONTENT_PAD + i * NODE_PORT_SPACING;
-            const portGroup = createOutputPort(this, i, w, portY + 6, out.type, out.name);
-            this.group.add(portGroup);
-            this._portGroups.outputs.push({ y: portY + 6, group: portGroup });
-        }
-
-        if (this.outputs.length > 0) {
-            yPos += NODE_CONTENT_PAD + this.outputs.length * NODE_PORT_SPACING;
-        }
-
-        // --- Inputs + Widgets ---
-        const widgetWidth = w - NODE_WIDGET_X_PAD * 2;
-
-        for (let i = 0; i < this.inputs.length; i++) {
-            const inp = this.inputs[i];
-            const isWidget = this._isWidgetType(inp.type);
-
-            if (isWidget) {
-                // Render widget
-                const widgetY = yPos + NODE_CONTENT_PAD;
-                const widget = sfWidgets.createWidget(
-                    this, inp.name, inp.config,
-                    NODE_WIDGET_X_PAD, widgetY, widgetWidth
-                );
-
-                if (widget) {
-                    this.group.add(widget.group);
-                    this.widgets[inp.name] = widget;
-                    widget._yPos = widgetY;
-
-                    // Also add an input port on the left
-                    const portGroup = createInputPort(this, i, 0, widgetY + widget.height / 2, inp.type, '');
-                    this.group.add(portGroup);
-                    this._portGroups.inputs.push({ y: widgetY + widget.height / 2, group: portGroup, widgetName: inp.name });
-
-                    yPos = widgetY + widget.height + 2;
-                } else {
-                    // Fallback: just port
-                    const portY = yPos + NODE_CONTENT_PAD + 6;
-                    const portGroup = createInputPort(this, i, 0, portY, inp.type, inp.name);
-                    this.group.add(portGroup);
-                    this._portGroups.inputs.push({ y: portY, group: portGroup });
-                    yPos = portY + NODE_PORT_SPACING - 6;
-                }
-            } else {
-                // Non-widget input: just port + label
-                const portY = yPos + NODE_CONTENT_PAD + 6;
-                const portGroup = createInputPort(this, i, 0, portY, inp.type, inp.name);
-                this.group.add(portGroup);
-                this._portGroups.inputs.push({ y: portY, group: portGroup });
-                yPos = portY + NODE_PORT_SPACING - 6;
-            }
-        }
-
-        // If no inputs and no outputs, minimum height
-        if (this.inputs.length === 0 && this.outputs.length === 0) {
-            yPos += 20;
-        }
-
-        yPos += NODE_CONTENT_PAD;
-        this.height = yPos;
-
-        // --- Body background ---
-        const body = new Konva.Rect({
-            y: NODE_HEADER_HEIGHT,
-            width: w,
-            height: this.height - NODE_HEADER_HEIGHT,
-            fill: '#252545',
-            cornerRadius: [0, 0, 4, 4],
-            listening: true,
-        });
-        // Insert body behind everything except header
-        this.group.add(body);
-        body.moveToBottom();
-        header.moveToBottom();
-
-        // --- Selection border (hidden by default) ---
-        this._selectionBorder = new Konva.Rect({
-            x: -2,
-            y: -2,
-            width: w + 4,
-            height: this.height + 4,
-            stroke: '#4a9eff',
-            strokeWidth: 2,
-            cornerRadius: 5,
-            visible: this._selected,
-            listening: false,
-        });
-        this.group.add(this._selectionBorder);
-
-        // --- Execution highlight border ---
-        this._execBorder = new Konva.Rect({
-            x: -2,
-            y: -2,
-            width: w + 4,
-            height: this.height + 4,
-            stroke: 'transparent',
-            strokeWidth: 2,
-            cornerRadius: 5,
-            visible: false,
-            listening: false,
-        });
-        this.group.add(this._execBorder);
-    }
-
     getInputPortPos(slotIndex) {
         const entry = this._portGroups.inputs[slotIndex];
         if (!entry) return { x: this.x, y: this.y };
@@ -446,6 +306,176 @@ class SFNode {
         this.group.destroy();
     }
 
+    // ── Phase 2: Collapse/Expand ──
+    toggleCollapse() {
+        this._collapsed = !this._collapsed;
+        this._build();
+        this.canvas.connectionLayer.batchDraw();
+    }
+
+    get collapsed() { return this._collapsed; }
+
+    _build() {
+        this.group.destroyChildren();
+        this._portGroups = { inputs: [], outputs: [] };
+
+        const w = this.width;
+        const category = this.info.category || '';
+        const headerColor = getCategoryColor(category);
+
+        // --- Header ---
+        const header = new Konva.Rect({
+            width: w,
+            height: NODE_HEADER_HEIGHT,
+            fill: headerColor,
+            cornerRadius: this._collapsed ? 4 : [4, 4, 0, 0],
+            listening: false,
+        });
+        this.group.add(header);
+
+        // Collapse chevron
+        const chevron = new Konva.Text({
+            x: w - 18,
+            y: 6,
+            text: this._collapsed ? '▸' : '▾',
+            fontSize: 11,
+            fill: '#b0b0c0',
+            listening: true,
+        });
+        chevron.on('click', (e) => {
+            e.cancelBubble = true;
+            this.toggleCollapse();
+        });
+        this.group.add(chevron);
+
+        const title = new Konva.Text({
+            x: 8,
+            y: 6,
+            text: this.info.display_name || this.nodeType,
+            fontSize: 11,
+            fontStyle: 'bold',
+            fill: '#e0e0e0',
+            width: w - 28,
+            ellipsis: true,
+            wrap: 'none',
+            listening: false,
+        });
+        this.group.add(title);
+
+        if (this._collapsed) {
+            // Collapsed: only header, ports as dots on edges
+            this.height = NODE_HEADER_HEIGHT;
+
+            // Input ports spread along left edge
+            const inCount = this.inputs.length;
+            for (let i = 0; i < inCount; i++) {
+                const py = inCount === 1 ? NODE_HEADER_HEIGHT / 2 : 4 + (NODE_HEADER_HEIGHT - 8) * i / (inCount - 1);
+                const portGroup = createInputPort(this, i, 0, py, this.inputs[i].type, '');
+                this.group.add(portGroup);
+                this._portGroups.inputs.push({ y: py, group: portGroup });
+            }
+            // Output ports spread along right edge
+            const outCount = this.outputs.length;
+            for (let i = 0; i < outCount; i++) {
+                const py = outCount === 1 ? NODE_HEADER_HEIGHT / 2 : 4 + (NODE_HEADER_HEIGHT - 8) * i / (outCount - 1);
+                const portGroup = createOutputPort(this, i, w, py, this.outputs[i].type, '');
+                this.group.add(portGroup);
+                this._portGroups.outputs.push({ y: py, group: portGroup });
+            }
+        } else {
+            // Expanded: full build
+            this._buildExpanded(w, headerColor);
+        }
+
+        // --- Selection border ---
+        this._selectionBorder = new Konva.Rect({
+            x: -2, y: -2,
+            width: w + 4, height: this.height + 4,
+            stroke: '#4a9eff', strokeWidth: 2, cornerRadius: 5,
+            visible: this._selected, listening: false,
+        });
+        this.group.add(this._selectionBorder);
+
+        // --- Execution highlight border ---
+        this._execBorder = new Konva.Rect({
+            x: -2, y: -2,
+            width: w + 4, height: this.height + 4,
+            stroke: 'transparent', strokeWidth: 2, cornerRadius: 5,
+            visible: false, listening: false,
+        });
+        this.group.add(this._execBorder);
+
+        // Re-apply execution state if active
+        if (this._executionState) this.setExecutionState(this._executionState);
+
+        this.canvas.nodeLayer.batchDraw();
+    }
+
+    _buildExpanded(w) {
+        let yPos = NODE_HEADER_HEIGHT;
+        const widgetWidth = w - NODE_WIDGET_X_PAD * 2;
+
+        // --- Outputs ---
+        for (let i = 0; i < this.outputs.length; i++) {
+            const out = this.outputs[i];
+            const portY = yPos + NODE_CONTENT_PAD + i * NODE_PORT_SPACING;
+            const portGroup = createOutputPort(this, i, w, portY + 6, out.type, out.name);
+            this.group.add(portGroup);
+            this._portGroups.outputs.push({ y: portY + 6, group: portGroup });
+        }
+        if (this.outputs.length > 0) {
+            yPos += NODE_CONTENT_PAD + this.outputs.length * NODE_PORT_SPACING;
+        }
+
+        // --- Inputs + Widgets ---
+        for (let i = 0; i < this.inputs.length; i++) {
+            const inp = this.inputs[i];
+            const isWidget = this._isWidgetType(inp.type);
+
+            if (isWidget) {
+                const widgetY = yPos + NODE_CONTENT_PAD;
+                const widget = sfWidgets.createWidget(
+                    this, inp.name, inp.config,
+                    NODE_WIDGET_X_PAD, widgetY, widgetWidth
+                );
+                if (widget) {
+                    this.group.add(widget.group);
+                    this.widgets[inp.name] = widget;
+                    widget._yPos = widgetY;
+                    const portGroup = createInputPort(this, i, 0, widgetY + widget.height / 2, inp.type, '');
+                    this.group.add(portGroup);
+                    this._portGroups.inputs.push({ y: widgetY + widget.height / 2, group: portGroup, widgetName: inp.name });
+                    yPos = widgetY + widget.height + 2;
+                } else {
+                    const portY = yPos + NODE_CONTENT_PAD + 6;
+                    const portGroup = createInputPort(this, i, 0, portY, inp.type, inp.name);
+                    this.group.add(portGroup);
+                    this._portGroups.inputs.push({ y: portY, group: portGroup });
+                    yPos = portY + NODE_PORT_SPACING - 6;
+                }
+            } else {
+                const portY = yPos + NODE_CONTENT_PAD + 6;
+                const portGroup = createInputPort(this, i, 0, portY, inp.type, inp.name);
+                this.group.add(portGroup);
+                this._portGroups.inputs.push({ y: portY, group: portGroup });
+                yPos = portY + NODE_PORT_SPACING - 6;
+            }
+        }
+
+        if (this.inputs.length === 0 && this.outputs.length === 0) yPos += 20;
+        yPos += NODE_CONTENT_PAD;
+        this.height = yPos;
+
+        // Body background
+        const body = new Konva.Rect({
+            y: NODE_HEADER_HEIGHT, width: w,
+            height: this.height - NODE_HEADER_HEIGHT,
+            fill: '#252545', cornerRadius: [0, 0, 4, 4], listening: true,
+        });
+        this.group.add(body);
+        body.moveToBottom();
+    }
+
     // Serialization helpers
     serialize() {
         return {
@@ -454,6 +484,7 @@ class SFNode {
             pos: [this.x, this.y],
             size: [this.width, this.height],
             widgets_values: { ...this.widgetValues },
+            collapsed: this._collapsed,
         };
     }
 }

@@ -62,6 +62,32 @@ class SFConnection {
         if (layer) layer.batchDraw();
     }
 
+    /**
+     * Toggle animated dash pattern on this connection (used during execution).
+     */
+    setAnimated(animated) {
+        if (animated) {
+            this.line.dash([8, 4]);
+            this.line.strokeWidth(2.5);
+            if (!this._dashAnim) {
+                this._dashAnim = new Konva.Animation((frame) => {
+                    var offset = (frame.time / 40) % 12;
+                    this.line.dashOffset(-offset);
+                }, this.line.getLayer());
+            }
+            this._dashAnim.start();
+        } else {
+            if (this._dashAnim) {
+                this._dashAnim.stop();
+                this._dashAnim = null;
+            }
+            this.line.dash([]);
+            this.line.dashOffset(0);
+            this.line.strokeWidth(2);
+            this.update();
+        }
+    }
+
     _watchDrag() {
         const srcNode = this.canvas.nodes.get(this.sourceNode);
         const tgtNode = this.canvas.nodes.get(this.targetNode);
@@ -77,6 +103,10 @@ class SFConnection {
         if (srcNode) srcNode.group.off('dragmove' + ns);
         if (tgtNode) tgtNode.group.off('dragmove' + ns);
 
+        if (this._dashAnim) {
+            this._dashAnim.stop();
+            this._dashAnim = null;
+        }
         this.line.destroy();
     }
 }
