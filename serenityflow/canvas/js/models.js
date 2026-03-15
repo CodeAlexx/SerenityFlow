@@ -102,8 +102,12 @@ var ModelsTab = (function() {
     function load() {
         allModels = [];
         return fetch('/object_info', { cache: 'no-store' })
-            .then(function(resp) { return resp.ok ? resp.json() : {}; })
+            .then(function(resp) {
+                console.log('ModelsTab /object_info response:', resp.status);
+                return resp.ok ? resp.json() : {};
+            })
             .then(function(info) {
+                console.log('ModelsTab parsed info keys:', Object.keys(info || {}).length);
                 var seen = {};
                 function addModels(nodeType, inputKey, type, defaultArch) {
                     var items = info && info[nodeType] && info[nodeType].input && info[nodeType].input.required && info[nodeType].input.required[inputKey];
@@ -129,7 +133,8 @@ var ModelsTab = (function() {
                 buildArchFilters();
                 applyFilters();
             })
-            .catch(function() {
+            .catch(function(err) {
+                console.error('ModelsTab load failed:', err);
                 renderGrid([]);
             });
     }
