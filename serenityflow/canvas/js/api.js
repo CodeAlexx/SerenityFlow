@@ -70,12 +70,22 @@ var SerenityAPI = (function() {
 })();
 
 /**
- * SFApi — Compatibility shim for the graph editor (app.js).
- * The old SFApi class was replaced by SerenityAPI in Phase 6,
- * but app.js still does `new SFApi()` and `sfApi.connect()`.
+ * SFApi — Compatibility shim for the graph editor (app.js, toolbar.js,
+ * preview.js, sidebar.js). Delegates to SerenityWS and SerenityAPI.
  */
 function SFApi() {
-    this.connect = function() {
-        // SerenityWS auto-connects on load — nothing needed here
+    this.connect = function() {};
+    this.on = function(type, fn) { SerenityWS.on(type, fn); };
+    this.off = function(type, fn) { SerenityWS.off(type, fn); };
+    this.interrupt = function() { return SerenityAPI.interrupt(); };
+    this.viewUrl = function(filename, subfolder, type) {
+        return SerenityAPI.viewUrl(filename, subfolder, type);
     };
+    this.getObjectInfo = function() {
+        return fetch('/object_info').then(function(r) { return r.json(); });
+    };
+    this.queuePrompt = function(workflow) {
+        return SerenityAPI.postPrompt(workflow);
+    };
+    this.getClientId = function() { return SerenityWS.getClientId(); };
 }
