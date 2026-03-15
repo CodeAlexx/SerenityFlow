@@ -28,6 +28,9 @@ _DIR_ALIASES: dict[str, str] = {
     "stable-diffusion": "checkpoints",
     "lora": "loras",
     "embedding": "embeddings",
+    "Lora": "loras",
+    "Embeddings": "embeddings",
+    "ltx2": "diffusion_models",
 }
 
 
@@ -147,17 +150,42 @@ class ModelPaths:
 _instance: ModelPaths | None = None
 
 
+_WELL_KNOWN_MODEL_DIRS = [
+    os.path.expanduser("~/EriDiffusion/Models"),
+    os.path.expanduser("~/eriui/comfyui/ComfyUI/models"),
+    os.path.expanduser("~/SwarmUI/Models"),
+]
+
+
+def _detect_base_dir() -> str:
+    """Auto-detect model base directory, matching folder_paths logic."""
+    for d in _WELL_KNOWN_MODEL_DIRS:
+        if os.path.isdir(d):
+            return d
+    return os.getcwd()
+
+
 def get_model_paths(base_dir: str | None = None) -> ModelPaths:
     """Get or create the global ModelPaths instance.
 
-    On first call, base_dir defaults to the current working directory.
+    On first call, base_dir is auto-detected if not provided.
+    Also merges paths from all well-known model directories.
     Subsequent calls return the cached instance (ignoring base_dir).
     """
     global _instance
     if _instance is None:
         if base_dir is None:
-            base_dir = os.getcwd()
+            base_dir = _detect_base_dir()
         _instance = ModelPaths(base_dir)
+        # Merge paths from other well-known model directories
+        for extra_dir in _WELL_KNOWN_MODEL_DIRS:
+            if os.path.isdir(extra_dir) and extra_dir != base_dir:
+                extra = ModelPaths(extra_dir)
+                for folder, paths in extra.dirs.items():
+                    existing = _instance.dirs.setdefault(folder, [])
+                    for p in paths:
+                        if p not in existing:
+                            existing.append(p)
     return _instance
 
 

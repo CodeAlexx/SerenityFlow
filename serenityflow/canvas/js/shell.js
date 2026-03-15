@@ -18,9 +18,10 @@ function setMode(mode) {
     localStorage.setItem('sf-mode', mode);
 
     var isAdvanced = mode === 'advanced';
-    document.getElementById('icon-rail').style.display = isAdvanced ? 'flex' : 'none';
+    // Icon rail is always visible (provides navigation in both modes)
+    document.getElementById('icon-rail').style.display = 'flex';
     document.getElementById('simple-mode-container').style.display = isAdvanced ? 'none' : 'flex';
-    document.getElementById('content-area').style.display = isAdvanced ? '' : 'none';
+    document.getElementById('content-area').style.display = isAdvanced ? 'flex' : 'none';
 
     // Update toggle button states
     document.getElementById('mode-simple-btn').classList.toggle('active', !isAdvanced);
@@ -314,6 +315,10 @@ document.addEventListener('DOMContentLoaded', function() {
     // Attach click handlers to rail buttons
     document.querySelectorAll('.nav-btn').forEach(function(btn) {
         btn.addEventListener('click', function() {
+            // If in simple mode, switch to advanced first
+            if (currentMode !== 'advanced') {
+                setMode('advanced');
+            }
             switchTab(btn.dataset.tab);
         });
     });
@@ -333,9 +338,9 @@ document.addEventListener('DOMContentLoaded', function() {
         advancedModeBtn.addEventListener('click', function() { setMode('advanced'); });
     }
 
-    // Restore mode (default: simple for new users).
+    // Restore mode (default: advanced).
     // setMode('advanced') internally calls switchTab to restore the saved tab.
-    var savedMode = localStorage.getItem('sf-mode') || (typeof Settings !== 'undefined' ? Settings.get('defaultMode') : 'simple');
+    var savedMode = localStorage.getItem('sf-mode') || (typeof Settings !== 'undefined' ? Settings.get('defaultMode') : 'advanced');
     setMode(savedMode);
 
     // Restore saved extra model directories, then warm object_info cache

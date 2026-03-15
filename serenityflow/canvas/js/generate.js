@@ -23,8 +23,9 @@ var GenerateTab = (function() {
         currentIsVideo: false,
         gallery: [],
         arch: 'sd15',
-        frames: 97,
+        frames: 241,
         fps: 24,
+        seconds: 10,
         lastSeed: null,
         batchCount: 1,
         loras: [],  // [{name, strength, enabled}]
@@ -86,6 +87,12 @@ var GenerateTab = (function() {
 
     // DOM refs (set in init)
     var els = {};
+
+    // Convert seconds + fps to frame count (round to nearest valid frame count)
+    function secondsToFrames(seconds, fps) {
+        // frames = seconds * fps + 1 (first frame is the start frame)
+        return Math.max(9, Math.round(seconds * fps) + 1);
+    }
 
     // ── Aspect ratio definitions ──
     var imageAspects = [
@@ -413,9 +420,8 @@ var GenerateTab = (function() {
         '<div class="gen-section" id="gen-video-section" style="display:none">' +
             '<label class="gen-label">Video</label>' +
             '<div class="gen-setting-row">' +
-                '<span class="gen-label" style="min-width:52px;margin-bottom:0">Frames</span>' +
-                '<input type="range" id="gen-frames-range" class="gen-range" min="9" max="257" step="8" value="97">' +
-                '<input type="number" id="gen-frames" class="gen-number-input" min="9" max="257" step="8" value="97">' +
+                '<span class="gen-label" style="min-width:52px;margin-bottom:0">Seconds</span>' +
+                '<input type="number" id="gen-seconds" class="gen-number-input" min="1" max="30" step="1" value="10" style="width:64px">' +
             '</div>' +
             '<div class="gen-setting-row">' +
                 '<span class="gen-label" style="min-width:52px;margin-bottom:0">FPS</span>' +
@@ -722,8 +728,7 @@ var GenerateTab = (function() {
         els.customWidth = document.getElementById('gen-custom-width');
         els.customHeight = document.getElementById('gen-custom-height');
         els.videoSection = document.getElementById('gen-video-section');
-        els.framesInput = document.getElementById('gen-frames');
-        els.framesRange = document.getElementById('gen-frames-range');
+        els.secondsInput = document.getElementById('gen-seconds');
         els.fpsInput = document.getElementById('gen-fps');
         els.fpsRange = document.getElementById('gen-fps-range');
         els.durationHint = document.getElementById('gen-duration-hint');
@@ -1174,27 +1179,24 @@ var GenerateTab = (function() {
             });
         }
 
-        // Frames sync
-        els.framesInput.addEventListener('input', function() {
-            state.frames = parseInt(this.value) || 97;
-            els.framesRange.value = this.value;
-            updateDurationHint();
-        });
-        els.framesRange.addEventListener('input', function() {
-            state.frames = parseInt(this.value);
-            els.framesInput.value = this.value;
+        // Seconds → compute frames
+        els.secondsInput.addEventListener('input', function() {
+            state.seconds = Math.max(1, Math.min(30, parseInt(this.value) || 10));
+            state.frames = secondsToFrames(state.seconds, state.fps);
             updateDurationHint();
         });
 
-        // FPS sync
+        // FPS sync — recompute frames from seconds
         els.fpsInput.addEventListener('input', function() {
             state.fps = parseInt(this.value) || 24;
             els.fpsRange.value = this.value;
+            state.frames = secondsToFrames(state.seconds, state.fps);
             updateDurationHint();
         });
         els.fpsRange.addEventListener('input', function() {
             state.fps = parseInt(this.value);
             els.fpsInput.value = this.value;
+            state.frames = secondsToFrames(state.seconds, state.fps);
             updateDurationHint();
         });
 
@@ -1615,8 +1617,7 @@ var GenerateTab = (function() {
 
     function updateDurationHint() {
         if (!els.durationHint) return;
-        var secs = (state.frames / state.fps).toFixed(1);
-        els.durationHint.textContent = '\u2248 ' + secs + 's at ' + state.fps + 'fps';
+        els.durationHint.textContent = state.frames + ' frames \u00b7 ' + state.seconds + 's at ' + state.fps + 'fps';
     }
 
     // ── Token Counter ──

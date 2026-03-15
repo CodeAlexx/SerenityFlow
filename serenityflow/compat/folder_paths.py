@@ -50,10 +50,31 @@ _DIR_ALIASES = {
     "stable-diffusion": "checkpoints",
     "lora": "loras",
     "embedding": "embeddings",
+    "Lora": "loras",
+    "Embeddings": "embeddings",
+    "ltx2": "diffusion_models",
 }
+
+# Cross-register: checkpoints and diffusion_models share search paths
+# Many setups (ComfyUI, EriDiffusion) put full models in diffusion_models/
+_CROSS_CATEGORIES = [
+    ("checkpoints", "diffusion_models"),
+]
 
 for cat, (paths, exts) in _DEFAULT_CATEGORIES.items():
     folder_names_and_paths[cat] = (list(paths), set(exts))
+
+# Cross-register shared search paths between related categories
+for cat_a, cat_b in _CROSS_CATEGORIES:
+    if cat_a in folder_names_and_paths and cat_b in folder_names_and_paths:
+        paths_a = folder_names_and_paths[cat_a][0]
+        paths_b = folder_names_and_paths[cat_b][0]
+        for p in paths_b:
+            if p not in paths_a:
+                paths_a.append(p)
+        for p in paths_a:
+            if p not in paths_b:
+                paths_b.append(p)
 
 
 def set_base_path(new_base: str):
@@ -214,7 +235,11 @@ def get_filename_list(folder_name: str) -> list[str]:
         for root, dirs, files in os.walk(path):
             for f in files:
                 if not extensions or os.path.splitext(f)[1].lower() in extensions:
-                    rel = os.path.relpath(os.path.join(root, f), path)
+                    full = os.path.join(root, f)
+                    # Skip broken symlinks
+                    if os.path.islink(full) and not os.path.exists(full):
+                        continue
+                    rel = os.path.relpath(full, path)
                     output.append(rel)
     return sorted(set(output))
 

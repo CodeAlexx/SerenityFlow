@@ -2,6 +2,8 @@
 
 A new inference engine for diffusion models. Graph-based workflow execution with integrated memory orchestration, block-level VRAM management, and ComfyUI custom node compatibility.
 
+![SerenityFlow Generate Tab](docs/serenityflow-generate.png)
+
 ## What is this
 
 SerenityFlow is a standalone inference engine that executes ComfyUI-format workflow JSONs through its own runtime. It is not a fork of ComfyUI, not a wrapper around diffusers, and not a monolithic pipeline. It is a new engine built from scratch with memory-aware graph execution at its core.

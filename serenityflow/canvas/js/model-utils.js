@@ -102,6 +102,21 @@ var ModelUtils = (function() {
     // Fetch all available models from /object_info, merging checkpoints and UNETs.
     // Returns a promise that resolves to an array of { name, loader } objects.
     // loader is 'checkpoint' or 'unet'.
+    // Filter out sub-model components (text encoders, clips, sharded parts, upscalers, loras)
+    function isMainModel(name) {
+        var lower = name.toLowerCase();
+        // Skip files inside subdirectories that are clearly sub-components
+        if (/\/(text_encoder|clip|tokenizer|vae|scheduler|feature_extractor)\//.test(name)) return false;
+        // Skip sharded model parts (model-00001-of-00004.safetensors)
+        if (/model-\d+-of-\d+/.test(lower)) return false;
+        // Skip upscalers and loras mixed in
+        if (/upscaler|upscale/.test(lower)) return false;
+        if (/[\-_]lora[\-_\.]/.test(lower)) return false;
+        // Skip individual training checkpoints (transformer-0001, etc.)
+        if (/transformer-\d{4}/.test(lower)) return false;
+        return true;
+    }
+
     function fetchAllModels() {
         return loadObjectInfo()
             .then(function(data) {
@@ -115,7 +130,7 @@ var ModelUtils = (function() {
                     data.CheckpointLoaderSimple.input.required.ckpt_name;
                 if (ckptInfo && Array.isArray(ckptInfo[0])) {
                     ckptInfo[0].forEach(function(m) {
-                        if (!seen[m]) {
+                        if (!seen[m] && isMainModel(m)) {
                             seen[m] = true;
                             models.push({ name: m, loader: 'checkpoint' });
                         }
@@ -129,7 +144,7 @@ var ModelUtils = (function() {
                     data.UNETLoader.input.required.unet_name;
                 if (unetInfo && Array.isArray(unetInfo[0])) {
                     unetInfo[0].forEach(function(m) {
-                        if (!seen[m]) {
+                        if (!seen[m] && isMainModel(m)) {
                             seen[m] = true;
                             models.push({ name: m, loader: 'unet' });
                         }

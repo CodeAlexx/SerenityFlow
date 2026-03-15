@@ -79,87 +79,7 @@ var Settings = (function() {
         if (key === 'theme') applyTheme(value);
     }
 
-    // ── Theme ──
-    function applyTheme(themeId) {
-        var root = document.documentElement;
-
-        // Handle 'system' by mapping to dark or light
-        if (themeId === 'system') {
-            themeId = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-        }
-
-        var t = THEMES[themeId] || THEMES.dark;
-        root.style.setProperty('--shell-bg-base', t.bg_base);
-        root.style.setProperty('--shell-bg-surface', t.bg_surface);
-        root.style.setProperty('--shell-bg-panel', t.bg_panel);
-        root.style.setProperty('--shell-bg-hover', t.bg_hover);
-        root.style.setProperty('--shell-text', t.text);
-        root.style.setProperty('--shell-text-muted', t.text_muted);
-        root.style.setProperty('--shell-border', t.border);
-        root.style.setProperty('--shell-success', t.success);
-        root.style.setProperty('--shell-error', t.error);
-        root.style.setProperty('--shell-warn', t.warn);
-        // Apply theme accent unless user has a custom accent override
-        if (!current._customAccent) {
-            root.style.setProperty('--shell-accent', t.accent);
-            root.style.setProperty('--shell-accent-hover', t.accent_hover);
-        }
-    }
-
-    function applyAccentColor(hex) {
-        if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
-        current._customAccent = true;
-        document.documentElement.style.setProperty('--shell-accent', hex);
-        // Derive hover: lighten by 15%
-        var num = parseInt(hex.slice(1), 16);
-        var r = Math.min(255, (num >> 16) + 38);
-        var g = Math.min(255, ((num >> 8) & 0xff) + 38);
-        var b = Math.min(255, (num & 0xff) + 38);
-        var hover = '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
-        document.documentElement.style.setProperty('--shell-accent-hover', hover);
-    }
-
-    // System theme listener
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function() {
-        if (current.theme === 'system') applyTheme('system');
-    });
-
-    return {
-        load: load, save: save, get: get, set: set,
-        getAll: getAll, reset: reset, DEFAULTS: DEFAULTS,
-        applyTheme: applyTheme, applyAccentColor: applyAccentColor
-    };
-})();
-
-// Load immediately
-Settings.load();
-Settings.applyTheme(Settings.get('theme'));
-Settings.applyAccentColor(Settings.get('accentColor'));
-
-
-// ── Settings Tab UI ──
-var SettingsTab = (function() {
-    'use strict';
-
-    var initialized = false;
-    var activeSection = 'general';
-
-    var ACCENT_PRESETS = [
-        { hex: '#6c6af5', label: 'Violet' },
-        { hex: '#3b82f6', label: 'Blue' },
-        { hex: '#14b8a6', label: 'Teal' },
-        { hex: '#22c55e', label: 'Green' },
-        { hex: '#f43f5e', label: 'Rose' },
-        { hex: '#f59e0b', label: 'Amber' },
-        { hex: '#a855f7', label: 'Purple' },
-        { hex: '#ec4899', label: 'Pink' },
-        { hex: '#06b6d4', label: 'Cyan' },
-        { hex: '#ef4444', label: 'Red' },
-        { hex: '#84cc16', label: 'Lime' },
-        { hex: '#f97316', label: 'Orange' }
-    ];
-
-    // Full color themes — each defines the entire UI palette
+    // ── Themes (must be in Settings scope so applyTheme can access them) ──
     var THEMES = {
         dark: {
             label: 'Midnight',
@@ -239,6 +159,89 @@ var SettingsTab = (function() {
             success: '#16a34a', error: '#dc2626', warn: '#d97706'
         }
     };
+
+    // ── Theme ──
+    function applyTheme(themeId) {
+        var root = document.documentElement;
+
+        // Handle 'system' by mapping to dark or light
+        if (themeId === 'system') {
+            themeId = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+
+        var t = THEMES[themeId] || THEMES.dark;
+        root.style.setProperty('--shell-bg-base', t.bg_base);
+        root.style.setProperty('--shell-bg-surface', t.bg_surface);
+        root.style.setProperty('--shell-bg-panel', t.bg_panel);
+        root.style.setProperty('--shell-bg-hover', t.bg_hover);
+        root.style.setProperty('--shell-text', t.text);
+        root.style.setProperty('--shell-text-muted', t.text_muted);
+        root.style.setProperty('--shell-border', t.border);
+        root.style.setProperty('--shell-success', t.success);
+        root.style.setProperty('--shell-error', t.error);
+        root.style.setProperty('--shell-warn', t.warn);
+        // Apply theme accent unless user has a custom accent override
+        if (!current._customAccent) {
+            root.style.setProperty('--shell-accent', t.accent);
+            root.style.setProperty('--shell-accent-hover', t.accent_hover);
+        }
+    }
+
+    function applyAccentColor(hex) {
+        if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
+        current._customAccent = true;
+        document.documentElement.style.setProperty('--shell-accent', hex);
+        // Derive hover: lighten by 15%
+        var num = parseInt(hex.slice(1), 16);
+        var r = Math.min(255, (num >> 16) + 38);
+        var g = Math.min(255, ((num >> 8) & 0xff) + 38);
+        var b = Math.min(255, (num & 0xff) + 38);
+        var hover = '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+        document.documentElement.style.setProperty('--shell-accent-hover', hover);
+    }
+
+    // System theme listener
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function() {
+        if (current.theme === 'system') applyTheme('system');
+    });
+
+    return {
+        load: load, save: save, get: get, set: set,
+        getAll: getAll, reset: reset, DEFAULTS: DEFAULTS, THEMES: THEMES,
+        applyTheme: applyTheme, applyAccentColor: applyAccentColor
+    };
+})();
+
+// Load immediately
+Settings.load();
+Settings.applyTheme(Settings.get('theme'));
+Settings.applyAccentColor(Settings.get('accentColor'));
+
+
+// ── Settings Tab UI ──
+var SettingsTab = (function() {
+    'use strict';
+
+    var initialized = false;
+    var activeSection = 'general';
+
+    var ACCENT_PRESETS = [
+        { hex: '#6c6af5', label: 'Violet' },
+        { hex: '#3b82f6', label: 'Blue' },
+        { hex: '#14b8a6', label: 'Teal' },
+        { hex: '#22c55e', label: 'Green' },
+        { hex: '#f43f5e', label: 'Rose' },
+        { hex: '#f59e0b', label: 'Amber' },
+        { hex: '#a855f7', label: 'Purple' },
+        { hex: '#ec4899', label: 'Pink' },
+        { hex: '#06b6d4', label: 'Cyan' },
+        { hex: '#ef4444', label: 'Red' },
+        { hex: '#84cc16', label: 'Lime' },
+        { hex: '#f97316', label: 'Orange' }
+    ];
+
+    // Reference themes from Settings scope
+    var THEMES = Settings.THEMES;
 
     function buildUI() {
         var panel = document.getElementById('panel-settings');
