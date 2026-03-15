@@ -942,10 +942,11 @@ var SimpleMode = (function() {
 
         SerenityWS.on('executed', function(data) {
             if (!data || !data.output || !state.generating) return;
-            var items = data.output.images;
+            var out = data.output.ui || data.output;
+            var items = out.images;
             var isVideo = false;
-            if (!items && data.output.videos) {
-                items = data.output.videos;
+            if (!items && out.videos) {
+                items = out.videos;
                 isVideo = true;
             }
             if (!items || !items.length) return;

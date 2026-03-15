@@ -100,7 +100,8 @@ var QueueTab = (function() {
 
         SerenityWS.on('executed', function(data) {
             if (!state.current || !data || !data.output) return;
-            var items = data.output.images || data.output.videos;
+            var out = data.output.ui || data.output;
+            var items = out.images || out.videos;
             if (items && items.length > 0) {
                 var file = items[0];
                 state.current.src = SerenityAPI.viewUrl(file.filename, file.subfolder, file.type);

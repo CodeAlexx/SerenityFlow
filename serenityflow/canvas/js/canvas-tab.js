@@ -2184,10 +2184,11 @@ var CanvasTab = (function() {
         SerenityWS.on('executed', function(data) {
             if (!canvasGenerating) return;
             if (!data || !data.output) return;
-            var items = data.output.images;
+            var out = data.output.ui || data.output;
+            var items = out.images;
             var isVideoFile = false;
-            if (!items && data.output.videos) {
-                items = data.output.videos;
+            if (!items && out.videos) {
+                items = out.videos;
                 isVideoFile = true;
             }
             if (!items || !items.length) return;
