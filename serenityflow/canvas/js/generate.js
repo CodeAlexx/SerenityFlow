@@ -935,8 +935,30 @@ var GenerateTab = (function() {
             }
         });
 
+        SerenityWS.on('preview', function(data) {
+            if (!data || !data.blob || !state.generating) return;
+            var url = URL.createObjectURL(data.blob);
+            if (els.previewImg) {
+                // Revoke old preview URL to prevent memory leaks
+                if (els.previewImg._previewUrl) URL.revokeObjectURL(els.previewImg._previewUrl);
+                els.previewImg._previewUrl = url;
+                els.previewImg.src = url;
+                els.previewImg.style.display = 'block';
+                if (els.empty) els.empty.style.display = 'none';
+                els.previewImg.classList.add('gen-preview-live');
+            }
+        });
+
         SerenityWS.on('executed', function(data) {
             if (!data || !data.output) return;
+            // Clean up live preview state
+            if (els.previewImg) {
+                els.previewImg.classList.remove('gen-preview-live');
+                if (els.previewImg._previewUrl) {
+                    URL.revokeObjectURL(els.previewImg._previewUrl);
+                    els.previewImg._previewUrl = null;
+                }
+            }
             // Image outputs
             var out = data.output.ui || data.output;
             var items = out.images;

@@ -30,6 +30,15 @@ def _send_from_thread(loop, server_state, event_type: str, data: dict):
     )
 
 
+def _send_binary_from_thread(loop, server_state, data: bytes):
+    """Send binary WS data from a worker thread using the main event loop."""
+    from serenityflow.server.websocket import send_binary
+    asyncio.run_coroutine_threadsafe(
+        send_binary(server_state, data),
+        loop,
+    )
+
+
 async def execute_prompt(server_state, prompt_id: str, prompt: dict, extra_data: dict):
     """Execute a workflow prompt with full WebSocket event streaming."""
     from serenityflow.server.websocket import send_event
@@ -128,6 +137,19 @@ async def execute_prompt(server_state, prompt_id: str, prompt: dict, extra_data:
 
     try:
         def run_in_thread():
+            # Set up live preview sender for this worker thread
+            from serenityflow.bridge.serenity_api import set_preview_sender, clear_preview_sender
+
+            def _send_progress(step, total):
+                _send_from_thread(loop, server_state, "progress", {
+                    "value": step, "max": total,
+                })
+
+            def _send_preview_binary(data: bytes):
+                _send_binary_from_thread(loop, server_state, data)
+
+            set_preview_sender(_send_progress, _send_preview_binary)
+
             print(f"[EXEC-THREAD] Starting runner.execute()", flush=True)
             try:
                 r = runner.execute(graph, progress_callback=progress_callback)
@@ -138,6 +160,8 @@ async def execute_prompt(server_state, prompt_id: str, prompt: dict, extra_data:
                 import traceback
                 traceback.print_exc()
                 raise
+            finally:
+                clear_preview_sender()
 
         results = await loop.run_in_executor(_executor, run_in_thread)
 

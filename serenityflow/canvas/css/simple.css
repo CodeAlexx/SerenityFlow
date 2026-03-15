@@ -559,6 +559,9 @@
     border-radius: 8px;
     animation: simple-fadeIn 300ms ease;
 }
+.simple-preview-img.simple-preview-live {
+    opacity: 0.85;
+}
 .simple-preview-video {
     max-width: calc(100% - 48px);
     max-height: calc(100vh - var(--shell-topbar-height) - 120px);

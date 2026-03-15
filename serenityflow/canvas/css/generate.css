@@ -405,6 +405,9 @@
     border-radius: 8px;
     animation: gen-fadeIn 300ms ease;
 }
+.gen-preview-img.gen-preview-live {
+    opacity: 0.85;
+}
 
 /* Video display */
 .gen-preview-video {

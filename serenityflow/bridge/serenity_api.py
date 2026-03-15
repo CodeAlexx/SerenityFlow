@@ -7,14 +7,122 @@ SerenityFlow nodes never import from serenity directly -- only from here.
 from __future__ import annotations
 
 import copy
+import io
 import logging
 import os
+import threading
 from typing import Any
 
 import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Live preview infrastructure — thread-local WS sender for step callbacks
+# ---------------------------------------------------------------------------
+
+_preview_local = threading.local()
+
+
+def set_preview_sender(send_progress_fn, send_binary_fn):
+    """Set the WS sender functions for the current thread.
+
+    Called from execution.py before sampling starts.
+    send_progress_fn(step, total): sends JSON progress event
+    send_binary_fn(data: bytes): sends binary preview image
+    """
+    _preview_local.send_progress = send_progress_fn
+    _preview_local.send_binary = send_binary_fn
+
+
+def clear_preview_sender():
+    """Clear the WS sender for the current thread."""
+    _preview_local.send_progress = None
+    _preview_local.send_binary = None
+
+
+def _latent_to_preview_jpeg(latent, max_size=256):
+    """Convert a latent tensor to a small JPEG preview.
+
+    Uses a cheap approximation: scale latent channels to RGB directly
+    (no full VAE decode -- too slow per step).
+
+    Handles both spatial (B,C,H,W) and packed/sequence (B,seq,C) formats,
+    as well as video latents (B,C,T,H,W) where we take the middle frame.
+    """
+    from PIL import Image
+
+    with torch.no_grad():
+        lat = latent[0].float().cpu()
+
+        # Handle video latents (C, T, H, W) -- take middle frame
+        if lat.ndim == 4:
+            mid = lat.shape[1] // 2
+            lat = lat[:, mid, :, :]  # -> (C, H, W)
+
+        # Handle packed/sequence format (seq, C) -- reshape to approximate spatial
+        if lat.ndim == 2:
+            seq, channels = lat.shape
+            # Guess spatial dims from sequence length
+            side = int(seq ** 0.5)
+            if side * side < seq:
+                side += 1
+            # Pad if needed
+            if side * side > seq:
+                pad = torch.zeros(side * side - seq, channels, dtype=lat.dtype)
+                lat = torch.cat([lat, pad], dim=0)
+            lat = lat[:side * side].view(side, side, channels).permute(2, 0, 1)
+
+        # lat is now (C, H, W)
+        if lat.shape[0] >= 3:
+            rgb = lat[:3]
+        else:
+            rgb = lat.repeat(3, 1, 1)[:3]
+
+        # Normalize to 0-255
+        rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min() + 1e-8)
+        rgb = (rgb * 255).clamp(0, 255).byte()
+
+        # Convert to PIL, resize to max_size
+        img = Image.fromarray(rgb.permute(1, 2, 0).numpy(), 'RGB')
+        # Latent is typically 1/8 resolution -- upscale for preview
+        w, h = img.size
+        scale = min(max_size / max(w, 1), max_size / max(h, 1))
+        if scale > 1:
+            img = img.resize((int(w * scale), int(h * scale)), Image.BILINEAR)
+
+        # Encode as JPEG
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=50)
+        return buf.getvalue()
+
+
+def _make_step_callback(preview_interval=3):
+    """Create a sampling step callback that sends WS progress + preview.
+
+    Returns None if no preview sender is registered for this thread.
+    """
+    send_progress = getattr(_preview_local, 'send_progress', None)
+    send_binary = getattr(_preview_local, 'send_binary', None)
+    if send_progress is None:
+        return None
+
+    def callback(step, total, sigma, denoised):
+        # Always send progress
+        send_progress(step + 1, total)
+
+        # Send preview every Nth step + final step
+        if send_binary is not None and denoised is not None:
+            if step % preview_interval == 0 or step == total - 1:
+                try:
+                    preview_bytes = _latent_to_preview_jpeg(denoised)
+                    send_binary(preview_bytes)
+                except Exception:
+                    pass  # Don't break sampling for preview failures
+
+    return callback
 
 
 # ---------------------------------------------------------------------------
@@ -1002,12 +1110,14 @@ def sample(
         noisy_latent = noisy_latent.permute(0, 2, 4, 1, 3, 5)
         noisy_latent = noisy_latent.reshape(B, (H // 2) * (W // 2), C * 4)
 
-    # Sample
+    # Sample (with optional live preview callback)
+    step_callback = _make_step_callback(preview_interval=3)
     result = s["sample"](
         model_fn=denoise_fn,
         noise=noisy_latent,
         sigmas=sigmas,
         sampler_type=sampler_name,
+        callback=step_callback,
     )
 
     # Unpack Flux result (B, seq, C*4) → (B, C, H, W)
@@ -1593,6 +1703,8 @@ def sample_ltxv(
 
     _call = [0]
     n_steps = len(sigmas) - 1
+    _ltxv_send_progress = getattr(_preview_local, 'send_progress', None)
+    _ltxv_send_binary = getattr(_preview_local, 'send_binary', None)
 
     def wrapped_fn(video_state, audio_state, sigmas_arg, step_index):
         xfm_runtime.begin_step(_call[0])
@@ -1601,6 +1713,16 @@ def sample_ltxv(
         xfm_runtime.end_step()
         _call[0] += 1
         logger.info("Step %d/%d complete", _call[0], n_steps)
+        # Send progress + preview via WS
+        if _ltxv_send_progress is not None:
+            _ltxv_send_progress(_call[0], n_steps)
+        if _ltxv_send_binary is not None and video_state.latent is not None:
+            if _call[0] % 3 == 0 or _call[0] == n_steps:
+                try:
+                    preview_bytes = _latent_to_preview_jpeg(video_state.latent)
+                    _ltxv_send_binary(preview_bytes)
+                except Exception:
+                    pass
         return result
 
     def denoising_loop(sigmas_arg, video_state, audio_state, stepper_arg):
@@ -1708,6 +1830,16 @@ def sample_ltxv(
             xfm_runtime2.end_step()
             _call2[0] += 1
             logger.info("Stage 2 step %d/%d complete", _call2[0], s2_n_steps)
+            # Send progress + preview via WS (stage 2)
+            if _ltxv_send_progress is not None:
+                _ltxv_send_progress(n_steps + _call2[0], n_steps + s2_n_steps)
+            if _ltxv_send_binary is not None and video_state.latent is not None:
+                if _call2[0] % 3 == 0 or _call2[0] == s2_n_steps:
+                    try:
+                        preview_bytes = _latent_to_preview_jpeg(video_state.latent)
+                        _ltxv_send_binary(preview_bytes)
+                    except Exception:
+                        pass
             return result
 
         def s2_loop(sigmas_arg, video_state, audio_state, stepper_arg):

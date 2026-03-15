@@ -2181,8 +2181,28 @@ var CanvasTab = (function() {
 
     // ── WebSocket ──
     function connectWS() {
+        SerenityWS.on('preview', function(data) {
+            if (!canvasGenerating || !data || !data.blob) return;
+            var url = URL.createObjectURL(data.blob);
+            var body = document.getElementById('canvas-preview-body');
+            var panel = document.getElementById('canvas-preview-panel');
+            if (body && panel) {
+                // Revoke old preview URL
+                if (body._previewUrl) URL.revokeObjectURL(body._previewUrl);
+                body._previewUrl = url;
+                body.innerHTML = '<img src="' + url + '" style="opacity:0.85">';
+                panel.style.display = 'block';
+            }
+        });
+
         SerenityWS.on('executed', function(data) {
             if (!canvasGenerating) return;
+            // Clean up live preview URL
+            var body = document.getElementById('canvas-preview-body');
+            if (body && body._previewUrl) {
+                URL.revokeObjectURL(body._previewUrl);
+                body._previewUrl = null;
+            }
             if (!data || !data.output) return;
             var out = data.output.ui || data.output;
             var items = out.images;

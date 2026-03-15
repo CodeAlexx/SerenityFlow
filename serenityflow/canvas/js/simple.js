@@ -940,8 +940,29 @@ var SimpleMode = (function() {
             els.progressBar.style.width = pct + '%';
         });
 
+        SerenityWS.on('preview', function(data) {
+            if (!data || !data.blob || !state.generating) return;
+            var url = URL.createObjectURL(data.blob);
+            if (els.previewImg) {
+                if (els.previewImg._previewUrl) URL.revokeObjectURL(els.previewImg._previewUrl);
+                els.previewImg._previewUrl = url;
+                els.previewImg.src = url;
+                els.previewImg.style.display = 'block';
+                if (els.empty) els.empty.style.display = 'none';
+                els.previewImg.classList.add('simple-preview-live');
+            }
+        });
+
         SerenityWS.on('executed', function(data) {
             if (!data || !data.output || !state.generating) return;
+            // Clean up live preview state
+            if (els.previewImg) {
+                els.previewImg.classList.remove('simple-preview-live');
+                if (els.previewImg._previewUrl) {
+                    URL.revokeObjectURL(els.previewImg._previewUrl);
+                    els.previewImg._previewUrl = null;
+                }
+            }
             var out = data.output.ui || data.output;
             var items = out.images;
             var isVideo = false;
