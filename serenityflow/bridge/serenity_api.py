@@ -431,18 +431,22 @@ def load_vae(path: str) -> VAEWrapper:
             # Flux VAE: LDM-format keys with 4D conv attention weights,
             # custom block_out_channels. Use from_single_file which handles
             # all conversion internally.
-            flux_vae_config = os.path.join(
-                os.path.expanduser("~"),
-                ".cache/huggingface/hub/models--black-forest-labs--FLUX.1-dev/"
-                "snapshots/3de623fc3c33e44ffbe2bad470d0f45bccf2eb21/vae",
+            # Flux VAE config from known architecture — NO HF download
+            from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL as _AEConfig
+            vae = AutoencoderKL(
+                in_channels=3, out_channels=3, latent_channels=16,
+                block_out_channels=[128, 256, 512, 512],
+                layers_per_block=2, act_fn="silu", norm_num_groups=32,
+                scaling_factor=0.3611,
             )
-            if os.path.isdir(flux_vae_config):
-                vae = AutoencoderKL.from_single_file(path, config=flux_vae_config)
-            else:
-                # Fallback: use HF repo config (requires network)
-                vae = AutoencoderKL.from_single_file(
-                    path, config="black-forest-labs/FLUX.1-dev", subfolder="vae",
-                )
+            vae_sd = load_file(path)
+            # Convert LDM keys if needed
+            from serenity.inference.models.convert import convert_vae_keys
+            try:
+                vae_sd = convert_vae_keys(vae_sd)
+            except Exception:
+                pass  # Already in diffusers format
+            vae.load_state_dict(vae_sd, strict=False, assign=True)
             # VAE goes on available device (transformer offloaded after sampling)
             vae = vae.to(device=device, dtype=torch.float32).eval()
             scaling = 0.3611  # Flux VAE scaling factor
@@ -552,34 +556,41 @@ def _load_clip_from_sd(text_mgr, enc_type, sd: dict, dtype, device: str) -> None
     from transformers import CLIPTextModel, CLIPTokenizer
     from serenity.inference.text.encoders import TextEncoderType
 
-    # Determine HF repo for config + tokenizer
-    if enc_type == TextEncoderType.CLIP_L:
-        config_repo = "openai/clip-vit-large-patch14"
-    else:
-        config_repo = "stabilityai/stable-diffusion-xl-base-1.0"
-
     encoder = text_mgr.get_encoder(enc_type)
     if encoder.is_loaded:
         return
 
     logger.info("Loading %s from local safetensors (%d keys)", enc_type.value, len(sd))
 
-    # Tokenizer from HF cache
-    tok_kwargs = {}
-    if enc_type == TextEncoderType.CLIP_G:
-        tok_kwargs["subfolder"] = "tokenizer_2"
-    encoder._tokenizer = CLIPTokenizer.from_pretrained(config_repo, **tok_kwargs)
+    # Tokenizer from LOCAL file — NEVER download from HF
+    clip_dir = os.path.join(os.path.expanduser("~"), "EriDiffusion/Models/clip")
+    if enc_type == TextEncoderType.CLIP_L:
+        tok_path = os.path.join(clip_dir, "clip_l.tokenizer.json")
+    else:
+        tok_path = os.path.join(clip_dir, "clip_g.tokenizer.json")
+    if os.path.isfile(tok_path):
+        encoder._tokenizer = CLIPTokenizer(tokenizer_file=tok_path)
+    else:
+        raise RuntimeError(f"Local tokenizer not found: {tok_path} — will NOT download from HF")
 
-    # Model from config + local weights.
-    # Create on CPU (not meta) — CLIP is small (~350MB) and meta device
-    # breaks non-persistent buffers like position_ids.
+    # Model config inferred from state dict shapes — NO from_pretrained
     if enc_type == TextEncoderType.CLIP_G:
         from transformers import CLIPTextModelWithProjection, CLIPTextConfig
-        config = CLIPTextConfig.from_pretrained(config_repo, subfolder="text_encoder_2")
+        # CLIP-G: 1280 hidden, 32 heads, 20 layers, 77 max_position
+        config = CLIPTextConfig(
+            hidden_size=1280, intermediate_size=5120, num_hidden_layers=32,
+            num_attention_heads=20, projection_dim=1280,
+            max_position_embeddings=77, vocab_size=49408,
+        )
         model = CLIPTextModelWithProjection(config)
     else:
         from transformers import CLIPTextConfig
-        config = CLIPTextConfig.from_pretrained(config_repo)
+        # CLIP-L: 768 hidden, 12 heads, 12 layers, 77 max_position
+        config = CLIPTextConfig(
+            hidden_size=768, intermediate_size=3072, num_hidden_layers=12,
+            num_attention_heads=12, projection_dim=768,
+            max_position_embeddings=77, vocab_size=49408,
+        )
         model = CLIPTextModel(config)
 
     model.load_state_dict(sd, strict=False, assign=True)
@@ -598,15 +609,26 @@ def _load_t5_from_sd(text_mgr, sd: dict, dtype, device: str) -> None:
     if encoder.is_loaded:
         return
 
-    config_repo = "google/t5-v1_1-xxl"
     logger.info("Loading T5-XXL from local safetensors (%d keys)", len(sd))
 
-    # Tokenizer from HF cache
-    encoder._tokenizer = AutoTokenizer.from_pretrained(config_repo)
+    # Tokenizer from LOCAL file — NEVER download from HF
+    clip_dir = os.path.join(os.path.expanduser("~"), "EriDiffusion/Models/clip")
+    tok_path = os.path.join(clip_dir, "t5xxl_fp16.tokenizer.json")
+    if os.path.isfile(tok_path):
+        from transformers import T5Tokenizer
+        encoder._tokenizer = T5Tokenizer(tok_path)
+    else:
+        raise RuntimeError(f"Local T5 tokenizer not found: {tok_path} — will NOT download from HF")
 
-    # Model from config + local weights.
-    # T5-XXL is ~10GB in fp16 — create on CPU, load weights, convert dtype.
-    config = AutoConfig.from_pretrained(config_repo)
+    # Model config from known T5-XXL architecture — NO from_pretrained
+    from transformers import T5Config
+    config = T5Config(
+        d_model=4096, d_ff=10240, d_kv=64,
+        num_heads=64, num_layers=24,
+        vocab_size=32128, dense_act_fn="gelu_new",
+        feed_forward_proj="gated-gelu",
+        is_encoder_decoder=False,
+    )
     model = T5EncoderModel(config)
     model.load_state_dict(sd, strict=False, assign=True)
     model = model.to(device=device, dtype=dtype).eval()
