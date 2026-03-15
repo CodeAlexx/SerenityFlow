@@ -13,8 +13,8 @@
 
 /* ── Left Panel — Controls ── */
 .gen-left {
-    width: 280px;
-    min-width: 280px;
+    width: 360px;
+    min-width: 360px;
     background: var(--shell-bg-surface);
     border-right: 1px solid var(--shell-border);
     padding: 12px;
@@ -749,3 +749,79 @@
     font-size: 11px;
     color: var(--shell-text-muted);
 }
+
+/* Dimension slider rows */
+.gen-dim-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+.gen-dim-label {
+    min-width: 42px;
+    font-size: 12px;
+    color: var(--shell-text-muted);
+}
+
+/* Seed styling */
+.gen-seed-btn {
+    width: 32px;
+    height: 32px;
+    background: var(--shell-bg-panel);
+    border: 1px solid var(--shell-border);
+    border-radius: 6px;
+    color: var(--shell-text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+}
+.gen-seed-btn:hover {
+    border-color: var(--shell-text-muted);
+    color: var(--shell-text);
+}
+.gen-seed-random-label {
+    font-size: 11px;
+    color: var(--shell-text-muted);
+    margin-left: auto;
+}
+
+/* Toggle switch */
+.gen-toggle {
+    padding: 3px 10px;
+    border: 1px solid var(--shell-border);
+    background: var(--shell-bg-panel);
+    border-radius: 12px;
+    color: var(--shell-text-muted);
+    font-size: 11px;
+    font-family: var(--shell-font);
+    cursor: pointer;
+    transition: all 150ms ease;
+    flex-shrink: 0;
+}
+.gen-toggle.on {
+    background: var(--shell-accent);
+    border-color: var(--shell-accent);
+    color: #fff;
+}
+
+/* Arch badge */
+.gen-arch-badge {
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    color: #fff;
+    background: #6b7280;
+    margin-left: auto;
+    margin-right: 8px;
+}
+.gen-arch-badge[data-arch="flux"] { background: #6c6af5; }
+.gen-arch-badge[data-arch="sdxl"] { background: #3b82f6; }
+.gen-arch-badge[data-arch="sd3"] { background: #8b5cf6; }
+.gen-arch-badge[data-arch="sd15"] { background: #6b7280; }
+.gen-arch-badge[data-arch="ltxv"] { background: #10b981; }
+.gen-arch-badge[data-arch="wan"] { background: #f59e0b; }
+.gen-arch-badge[data-arch="klein"] { background: #ec4899; }

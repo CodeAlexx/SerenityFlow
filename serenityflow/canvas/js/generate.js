@@ -99,7 +99,7 @@ var GenerateTab = (function() {
 
         // Prompt
         '<div class="gen-section">' +
-            '<label class="gen-label">Prompt</label>' +
+            '<label class="gen-label">Positive Prompt</label>' +
             '<textarea id="gen-prompt" class="gen-textarea" rows="4" placeholder="Describe your image..."></textarea>' +
             '<div id="gen-token-count" class="gen-token-count">~0 tokens</div>' +
         '</div>' +
@@ -133,25 +133,27 @@ var GenerateTab = (function() {
                         '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>' +
                     '</button>' +
                 '</div>' +
-                '<div class="gen-custom-res">' +
-                    '<div class="gen-res-row">' +
-                        '<label class="gen-res-label">W</label>' +
-                        '<input type="number" id="gen-custom-width" class="gen-number-input" min="256" max="4096" step="64" value="1024">' +
-                    '</div>' +
-                    '<div class="gen-res-row">' +
-                        '<label class="gen-res-label">H</label>' +
-                        '<input type="number" id="gen-custom-height" class="gen-number-input" min="256" max="4096" step="64" value="1024">' +
-                    '</div>' +
+                '<div class="gen-dim-row">' +
+                    '<span class="gen-dim-label">Width</span>' +
+                    '<input type="range" id="gen-width-slider" class="gen-range" min="256" max="2048" step="64" value="1024">' +
+                    '<input type="number" id="gen-custom-width" class="gen-number-input" min="256" max="4096" step="64" value="1024">' +
+                '</div>' +
+                '<div class="gen-dim-row">' +
+                    '<span class="gen-dim-label">Height</span>' +
+                    '<input type="range" id="gen-height-slider" class="gen-range" min="256" max="2048" step="64" value="1024">' +
+                    '<input type="number" id="gen-custom-height" class="gen-number-input" min="256" max="4096" step="64" value="1024">' +
                 '</div>' +
                 // Seed inside Image section
                 '<div style="margin-top:8px">' +
                     '<label class="gen-label">Seed</label>' +
                     '<div class="gen-seed-row">' +
                         '<input id="gen-seed" type="number" class="gen-number-input" value="-1">' +
-                        '<button id="gen-seed-shuffle" class="gen-seed-shuffle" title="Random seed">' +
-                            '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/></svg>' +
+                        '<button id="gen-seed-shuffle" class="gen-seed-btn" title="Shuffle seed">\u21BB</button>' +
+                        '<button id="gen-seed-prev" class="gen-seed-btn" title="Use previous seed">\u21BA</button>' +
+                        '<span class="gen-seed-random-label">Random</span>' +
+                        '<button id="gen-seed-random-toggle" class="gen-toggle' + (state.seed === -1 ? ' on' : '') + '">' +
+                            (state.seed === -1 ? 'ON' : 'OFF') +
                         '</button>' +
-                        '<button id="gen-seed-prev" class="gen-seed-shuffle" title="Use previous seed" style="font-size:12px">&#8634;</button>' +
                     '</div>' +
                 '</div>' +
             '</div>' +
@@ -161,6 +163,7 @@ var GenerateTab = (function() {
         '<div class="gen-section">' +
             '<div id="gen-settings-header" class="gen-accordion-header">' +
                 '<span>Generation</span>' +
+                '<span id="gen-arch-badge" class="gen-arch-badge">SD1.5</span>' +
                 '<span class="gen-accordion-arrow">&#9660;</span>' +
             '</div>' +
             '<div id="gen-settings-body" class="gen-accordion-body" style="margin-top:8px">' +
@@ -323,6 +326,10 @@ var GenerateTab = (function() {
                 state.height = a.h;
                 els.customWidth.value = a.w;
                 els.customHeight.value = a.h;
+                var ws = document.getElementById('gen-width-slider');
+                var hs = document.getElementById('gen-height-slider');
+                if (ws) ws.value = a.w;
+                if (hs) hs.value = a.h;
                 els.aspectGrid.querySelectorAll('.gen-aspect-btn').forEach(function(b) {
                     b.classList.remove('active');
                 });
@@ -418,12 +425,16 @@ var GenerateTab = (function() {
                 : ModelUtils.clampDimension(parseInt(this.value) || 1024);
             this.value = v;
             state.width = v;
+            var wsl = document.getElementById('gen-width-slider');
+            if (wsl) wsl.value = v;
             if (state.aspectLocked && state.lockedRatio) {
                 var newH = isVideo
                     ? ModelUtils.clampVideoDimension(Math.round(v / state.lockedRatio))
                     : ModelUtils.clampDimension(Math.round(v / state.lockedRatio));
                 state.height = newH;
                 els.customHeight.value = newH;
+                var hsl = document.getElementById('gen-height-slider');
+                if (hsl) hsl.value = newH;
             }
             deselectAspectButtons();
         });
@@ -434,15 +445,53 @@ var GenerateTab = (function() {
                 : ModelUtils.clampDimension(parseInt(this.value) || 1024);
             this.value = v;
             state.height = v;
+            var hsl = document.getElementById('gen-height-slider');
+            if (hsl) hsl.value = v;
             if (state.aspectLocked && state.lockedRatio) {
                 var newW = isVideo
                     ? ModelUtils.clampVideoDimension(Math.round(v * state.lockedRatio))
                     : ModelUtils.clampDimension(Math.round(v * state.lockedRatio));
                 state.width = newW;
                 els.customWidth.value = newW;
+                var wsl = document.getElementById('gen-width-slider');
+                if (wsl) wsl.value = newW;
             }
             deselectAspectButtons();
         });
+
+        // Width slider sync
+        var widthSlider = document.getElementById('gen-width-slider');
+        if (widthSlider) {
+            widthSlider.addEventListener('input', function() {
+                var v = parseInt(this.value);
+                state.width = v;
+                els.customWidth.value = v;
+                deselectAspectButtons();
+                if (state.aspectLocked && state.lockedRatio) {
+                    var newH = ModelUtils.clampDimension(Math.round(v / state.lockedRatio));
+                    state.height = newH;
+                    els.customHeight.value = newH;
+                    var hs = document.getElementById('gen-height-slider');
+                    if (hs) hs.value = newH;
+                }
+            });
+        }
+        var heightSlider = document.getElementById('gen-height-slider');
+        if (heightSlider) {
+            heightSlider.addEventListener('input', function() {
+                var v = parseInt(this.value);
+                state.height = v;
+                els.customHeight.value = v;
+                deselectAspectButtons();
+                if (state.aspectLocked && state.lockedRatio) {
+                    var newW = ModelUtils.clampDimension(Math.round(v * state.lockedRatio));
+                    state.width = newW;
+                    els.customWidth.value = newW;
+                    var ws = document.getElementById('gen-width-slider');
+                    if (ws) ws.value = newW;
+                }
+            });
+        }
 
         // Seed
         els.seed.addEventListener('input', function() {
@@ -462,6 +511,23 @@ var GenerateTab = (function() {
                     state.seed = state.lastSeed;
                     els.seed.value = state.lastSeed;
                 }
+            });
+        }
+
+        // Seed random toggle
+        var randomToggle = document.getElementById('gen-seed-random-toggle');
+        if (randomToggle) {
+            randomToggle.addEventListener('click', function() {
+                var isRandom = state.seed !== -1;
+                if (isRandom) {
+                    state.seed = -1;
+                    els.seed.value = -1;
+                } else {
+                    state.seed = Math.floor(Math.random() * 4294967296);
+                    els.seed.value = state.seed;
+                }
+                this.classList.toggle('on', state.seed === -1);
+                this.textContent = state.seed === -1 ? 'ON' : 'OFF';
             });
         }
 
@@ -588,7 +654,17 @@ var GenerateTab = (function() {
         // Rebuild aspect ratio buttons for the right set
         buildAspectButtons();
 
+        // Update arch badge
+        var archBadge = document.getElementById('gen-arch-badge');
+        if (archBadge) {
+            var archNames = { flux: 'FLUX', sdxl: 'SDXL', sd3: 'SD3', sd15: 'SD1.5', ltxv: 'LTX-V', wan: 'WAN', klein: 'KLEIN' };
+            archBadge.textContent = archNames[arch] || arch.toUpperCase();
+            archBadge.dataset.arch = arch;
+        }
+
         // Update custom res input constraints
+        var ws = document.getElementById('gen-width-slider');
+        var hs = document.getElementById('gen-height-slider');
         if (isVideo) {
             els.customWidth.min = 64;
             els.customWidth.max = 1280;
@@ -596,6 +672,8 @@ var GenerateTab = (function() {
             els.customHeight.min = 64;
             els.customHeight.max = 1280;
             els.customHeight.step = 32;
+            if (ws) { ws.min = 64; ws.max = 1280; ws.step = 32; }
+            if (hs) { hs.min = 64; hs.max = 1280; hs.step = 32; }
         } else {
             els.customWidth.min = 256;
             els.customWidth.max = 4096;
@@ -603,6 +681,8 @@ var GenerateTab = (function() {
             els.customHeight.min = 256;
             els.customHeight.max = 4096;
             els.customHeight.step = 64;
+            if (ws) { ws.min = 256; ws.max = 2048; ws.step = 64; }
+            if (hs) { hs.min = 256; hs.max = 2048; hs.step = 64; }
         }
 
         // Select first aspect ratio for the new mode
@@ -612,6 +692,8 @@ var GenerateTab = (function() {
             state.height = aspects[0].h;
             els.customWidth.value = aspects[0].w;
             els.customHeight.value = aspects[0].h;
+            if (ws) ws.value = aspects[0].w;
+            if (hs) hs.value = aspects[0].h;
         }
 
         if (isVideo) updateDurationHint();
