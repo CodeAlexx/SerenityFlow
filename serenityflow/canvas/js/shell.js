@@ -338,10 +338,21 @@ document.addEventListener('DOMContentLoaded', function() {
     var savedMode = localStorage.getItem('sf-mode') || (typeof Settings !== 'undefined' ? Settings.get('defaultMode') : 'simple');
     setMode(savedMode);
 
-    // Warm object_info cache in background
-    if (typeof ModelUtils !== 'undefined' && ModelUtils.loadObjectInfo) {
-        ModelUtils.loadObjectInfo().catch(function() {});
-    }
+    // Restore saved extra model directories, then warm object_info cache
+    var savedDirs = [];
+    try { savedDirs = JSON.parse(localStorage.getItem('sf-extra-model-dirs') || '[]'); } catch(e) {}
+    var dirPromises = savedDirs.map(function(dir) {
+        return fetch('/folder_paths/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: dir })
+        }).catch(function() {});
+    });
+    Promise.all(dirPromises).then(function() {
+        if (typeof ModelUtils !== 'undefined' && ModelUtils.loadObjectInfo) {
+            ModelUtils.loadObjectInfo().catch(function() {});
+        }
+    });
 
     // ── Keyboard Shortcuts ──
     var tabKeys = { '1': 'generate', '2': 'queue', '3': 'canvas', '4': 'models', '5': 'workflows', '6': 'settings' };

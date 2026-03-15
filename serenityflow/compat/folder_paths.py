@@ -14,6 +14,10 @@ output_directory = os.path.join(base_path, "output")
 temp_directory = os.path.join(base_path, "temp")
 input_directory = os.path.join(base_path, "input")
 
+# Auto-detect model directory: prefer ~/EriDiffusion/Models if it exists
+_eri_models = os.path.expanduser("~/EriDiffusion/Models")
+_auto_detect_models = not os.path.isdir(models_dir) and os.path.isdir(_eri_models)
+
 # Category → directory paths
 folder_names_and_paths: dict[str, tuple[list[str], set[str]]] = {}
 
@@ -95,6 +99,51 @@ def set_base_path(new_base: str):
                             paths.append(entry.path)
         except OSError:
             pass
+
+
+# Apply auto-detected model path (after set_base_path is defined)
+if _auto_detect_models:
+    set_base_path(_eri_models)
+
+# Also scan well-known model directories and add them
+_WELL_KNOWN_MODEL_DIRS = [
+    os.path.expanduser("~/EriDiffusion/Models"),
+    os.path.expanduser("~/eriui/comfyui/ComfyUI/models"),
+    os.path.expanduser("~/SwarmUI/Models"),
+]
+
+def add_extra_model_dirs(extra_dirs: list[str] | None = None):
+    """Add additional model search directories.
+
+    Scans each directory for category subdirectories (checkpoints, loras, etc.)
+    and adds them to the search paths.
+    """
+    dirs_to_scan = list(extra_dirs or []) + _WELL_KNOWN_MODEL_DIRS
+    cat_lookup = {}
+    for cat in _DEFAULT_CATEGORIES:
+        cat_lookup[cat.lower()] = cat
+    for alias, cat in _DIR_ALIASES.items():
+        cat_lookup[alias.lower()] = cat
+
+    for base in dirs_to_scan:
+        base = os.path.expanduser(base)
+        if not os.path.isdir(base):
+            continue
+        try:
+            for entry in os.scandir(base):
+                if not (entry.is_dir() or entry.is_symlink()):
+                    continue
+                cat = cat_lookup.get(entry.name.lower())
+                if cat and cat in folder_names_and_paths:
+                    real_path = os.path.realpath(entry.path)
+                    paths = folder_names_and_paths[cat][0]
+                    if entry.path not in paths and real_path not in paths:
+                        paths.append(entry.path)
+        except OSError:
+            pass
+
+# Auto-add well-known dirs on import
+add_extra_model_dirs()
 
 
 def set_output_directory(directory: str):

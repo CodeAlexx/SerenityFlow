@@ -80,32 +80,35 @@ var Settings = (function() {
     }
 
     // ── Theme ──
-    function applyTheme(theme) {
+    function applyTheme(themeId) {
         var root = document.documentElement;
-        var isDark = theme === 'dark' ||
-            (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
 
-        if (isDark) {
-            root.style.setProperty('--shell-bg-base', '#0f0f13');
-            root.style.setProperty('--shell-bg-surface', '#1a1a24');
-            root.style.setProperty('--shell-bg-panel', '#1f1f2e');
-            root.style.setProperty('--shell-bg-hover', '#252538');
-            root.style.setProperty('--shell-text', '#e8e8f0');
-            root.style.setProperty('--shell-text-muted', '#6b6b80');
-            root.style.setProperty('--shell-border', '#2a2a3a');
-        } else {
-            root.style.setProperty('--shell-bg-base', '#f4f4f8');
-            root.style.setProperty('--shell-bg-surface', '#ffffff');
-            root.style.setProperty('--shell-bg-panel', '#f0f0f5');
-            root.style.setProperty('--shell-bg-hover', '#e8e8ef');
-            root.style.setProperty('--shell-text', '#1a1a2e');
-            root.style.setProperty('--shell-text-muted', '#6b6b80');
-            root.style.setProperty('--shell-border', '#d0d0de');
+        // Handle 'system' by mapping to dark or light
+        if (themeId === 'system') {
+            themeId = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+
+        var t = THEMES[themeId] || THEMES.dark;
+        root.style.setProperty('--shell-bg-base', t.bg_base);
+        root.style.setProperty('--shell-bg-surface', t.bg_surface);
+        root.style.setProperty('--shell-bg-panel', t.bg_panel);
+        root.style.setProperty('--shell-bg-hover', t.bg_hover);
+        root.style.setProperty('--shell-text', t.text);
+        root.style.setProperty('--shell-text-muted', t.text_muted);
+        root.style.setProperty('--shell-border', t.border);
+        root.style.setProperty('--shell-success', t.success);
+        root.style.setProperty('--shell-error', t.error);
+        root.style.setProperty('--shell-warn', t.warn);
+        // Apply theme accent unless user has a custom accent override
+        if (!current._customAccent) {
+            root.style.setProperty('--shell-accent', t.accent);
+            root.style.setProperty('--shell-accent-hover', t.accent_hover);
         }
     }
 
     function applyAccentColor(hex) {
         if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
+        current._customAccent = true;
         document.documentElement.style.setProperty('--shell-accent', hex);
         // Derive hover: lighten by 15%
         var num = parseInt(hex.slice(1), 16);
@@ -147,8 +150,95 @@ var SettingsTab = (function() {
         { hex: '#14b8a6', label: 'Teal' },
         { hex: '#22c55e', label: 'Green' },
         { hex: '#f43f5e', label: 'Rose' },
-        { hex: '#f59e0b', label: 'Amber' }
+        { hex: '#f59e0b', label: 'Amber' },
+        { hex: '#a855f7', label: 'Purple' },
+        { hex: '#ec4899', label: 'Pink' },
+        { hex: '#06b6d4', label: 'Cyan' },
+        { hex: '#ef4444', label: 'Red' },
+        { hex: '#84cc16', label: 'Lime' },
+        { hex: '#f97316', label: 'Orange' }
     ];
+
+    // Full color themes — each defines the entire UI palette
+    var THEMES = {
+        dark: {
+            label: 'Midnight',
+            bg_base: '#0f0f13', bg_surface: '#1a1a24', bg_panel: '#1f1f2e', bg_hover: '#252538',
+            text: '#e8e8f0', text_muted: '#6b6b80', border: '#2a2a3a',
+            accent: '#6c6af5', accent_hover: '#8583ff',
+            success: '#48bb78', error: '#fc8181', warn: '#f6ad55'
+        },
+        deep_purple: {
+            label: 'Deep Purple',
+            bg_base: '#1a0a2e', bg_surface: '#241440', bg_panel: '#2d1a50', bg_hover: '#3a2260',
+            text: '#e8e0f8', text_muted: '#8b7aaa', border: '#3d2868',
+            accent: '#a855f7', accent_hover: '#c084fc',
+            success: '#48bb78', error: '#f87171', warn: '#fbbf24'
+        },
+        sunset: {
+            label: 'Sunset',
+            bg_base: '#1c1018', bg_surface: '#2a1520', bg_panel: '#351a28', bg_hover: '#452233',
+            text: '#f5e6eb', text_muted: '#9a7888', border: '#4a2838',
+            accent: '#f472b6', accent_hover: '#f9a8d4',
+            success: '#4ade80', error: '#fb7185', warn: '#fbbf24'
+        },
+        charcoal: {
+            label: 'Charcoal',
+            bg_base: '#141414', bg_surface: '#1e1e1e', bg_panel: '#262626', bg_hover: '#333333',
+            text: '#e4e4e4', text_muted: '#737373', border: '#383838',
+            accent: '#3b82f6', accent_hover: '#60a5fa',
+            success: '#4ade80', error: '#f87171', warn: '#fbbf24'
+        },
+        discord: {
+            label: 'Discord',
+            bg_base: '#1e1f22', bg_surface: '#2b2d31', bg_panel: '#313338', bg_hover: '#383a40',
+            text: '#dbdee1', text_muted: '#80848e', border: '#3f4147',
+            accent: '#5865f2', accent_hover: '#7289da',
+            success: '#57f287', error: '#ed4245', warn: '#fee75c'
+        },
+        warm_dark: {
+            label: 'Warm Dark',
+            bg_base: '#1a1510', bg_surface: '#252015', bg_panel: '#2e2818', bg_hover: '#3a3220',
+            text: '#e8dcc8', text_muted: '#8a7e68', border: '#3e3628',
+            accent: '#d97706', accent_hover: '#f59e0b',
+            success: '#65a30d', error: '#dc2626', warn: '#f59e0b'
+        },
+        ocean: {
+            label: 'Ocean',
+            bg_base: '#0a1628', bg_surface: '#0f1e35', bg_panel: '#142642', bg_hover: '#1a3050',
+            text: '#d6e4f0', text_muted: '#6888aa', border: '#1e3a5f',
+            accent: '#06b6d4', accent_hover: '#22d3ee',
+            success: '#34d399', error: '#f87171', warn: '#fbbf24'
+        },
+        forest: {
+            label: 'Forest',
+            bg_base: '#0a1a10', bg_surface: '#0f241a', bg_panel: '#142e20', bg_hover: '#1a3a28',
+            text: '#d6f0e0', text_muted: '#6aaa80', border: '#1e4a30',
+            accent: '#22c55e', accent_hover: '#4ade80',
+            success: '#4ade80', error: '#f87171', warn: '#fbbf24'
+        },
+        rose_noir: {
+            label: 'Rose Noir',
+            bg_base: '#18080e', bg_surface: '#220c16', bg_panel: '#2c101e', bg_hover: '#3a1528',
+            text: '#f0dce4', text_muted: '#aa6880', border: '#441a30',
+            accent: '#ec4899', accent_hover: '#f472b6',
+            success: '#4ade80', error: '#fb7185', warn: '#fbbf24'
+        },
+        light: {
+            label: 'Light',
+            bg_base: '#f4f4f8', bg_surface: '#ffffff', bg_panel: '#f0f0f5', bg_hover: '#e8e8ef',
+            text: '#1a1a2e', text_muted: '#6b6b80', border: '#d0d0de',
+            accent: '#6c6af5', accent_hover: '#8583ff',
+            success: '#16a34a', error: '#dc2626', warn: '#d97706'
+        },
+        light_warm: {
+            label: 'Light Warm',
+            bg_base: '#faf8f5', bg_surface: '#ffffff', bg_panel: '#f5f0ea', bg_hover: '#ebe4da',
+            text: '#2a1a0a', text_muted: '#8a7a68', border: '#d8cfc0',
+            accent: '#d97706', accent_hover: '#f59e0b',
+            success: '#16a34a', error: '#dc2626', warn: '#d97706'
+        }
+    };
 
     function buildUI() {
         var panel = document.getElementById('panel-settings');
@@ -161,6 +251,7 @@ var SettingsTab = (function() {
             '<div class="settings-nav">' +
                 '<div class="settings-nav-item active" data-section="general">General</div>' +
                 '<div class="settings-nav-item" data-section="memory">Memory</div>' +
+                '<div class="settings-nav-item" data-section="models">Model Paths</div>' +
                 '<div class="settings-nav-item" data-section="output">Output</div>' +
                 '<div class="settings-nav-item" data-section="interface">Interface</div>' +
                 '<div class="settings-nav-item" data-section="about">About</div>' +
@@ -191,6 +282,7 @@ var SettingsTab = (function() {
         switch (section) {
             case 'general': content.innerHTML = buildGeneralSection(); bindGeneralEvents(); break;
             case 'memory': content.innerHTML = buildMemorySection(); bindMemoryEvents(); loadSystemInfo(); break;
+            case 'models': content.innerHTML = buildModelsSection(); bindModelsEvents(); loadModelPaths(); break;
             case 'output': content.innerHTML = buildOutputSection(); bindOutputEvents(); loadOutputFiles(); break;
             case 'interface': content.innerHTML = buildInterfaceSection(); bindInterfaceEvents(); break;
             case 'about': content.innerHTML = buildAboutSection(); loadAboutInfo(); break;
@@ -373,6 +465,89 @@ var SettingsTab = (function() {
         }
     }
 
+    // ── Model Paths Section ──
+    function buildModelsSection() {
+        return '<div class="settings-section">' +
+            '<h2 class="settings-section-title">Model Search Directories</h2>' +
+            '<p class="settings-hint">SerenityFlow searches these directories for models, LoRAs, VAEs, and text encoders. Add directories containing your model files.</p>' +
+            '<div id="settings-model-paths-list" class="settings-model-paths-list"></div>' +
+            '<div class="settings-row" style="margin-top:12px">' +
+                '<input type="text" id="settings-add-model-path" class="settings-input" placeholder="/path/to/models/directory" style="flex:1">' +
+                '<button id="settings-add-model-path-btn" class="settings-btn">Add Directory</button>' +
+            '</div>' +
+            '<div id="settings-model-paths-status" class="settings-hint" style="margin-top:8px"></div>' +
+        '</div>';
+    }
+
+    function bindModelsEvents() {
+        var addBtn = document.getElementById('settings-add-model-path-btn');
+        var addInput = document.getElementById('settings-add-model-path');
+        if (addBtn && addInput) {
+            addBtn.addEventListener('click', function() {
+                var path = addInput.value.trim();
+                if (!path) return;
+                var status = document.getElementById('settings-model-paths-status');
+                fetch('/folder_paths/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: path })
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.error) {
+                        if (status) { status.textContent = 'Error: ' + data.error; status.style.color = 'var(--shell-error)'; }
+                    } else {
+                        if (status) { status.textContent = 'Added: ' + path; status.style.color = 'var(--shell-success)'; }
+                        addInput.value = '';
+                        // Save to localStorage for persistence across restarts
+                        var saved = JSON.parse(localStorage.getItem('sf-extra-model-dirs') || '[]');
+                        if (saved.indexOf(path) < 0) { saved.push(path); localStorage.setItem('sf-extra-model-dirs', JSON.stringify(saved)); }
+                        loadModelPaths();
+                    }
+                })
+                .catch(function(err) {
+                    if (status) { status.textContent = 'Failed: ' + err.message; status.style.color = 'var(--shell-error)'; }
+                });
+            });
+        }
+    }
+
+    function loadModelPaths() {
+        fetch('/folder_paths')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                var list = document.getElementById('settings-model-paths-list');
+                if (!list) return;
+                // Collect unique directories
+                var allPaths = new Set();
+                Object.keys(data).forEach(function(cat) {
+                    if (data[cat].paths) {
+                        data[cat].paths.forEach(function(p) { allPaths.add(p); });
+                    }
+                });
+                // Group by parent dir
+                var parents = {};
+                allPaths.forEach(function(p) {
+                    var parent = p.replace(/\/[^/]+\/?$/, '');
+                    if (!parents[parent]) parents[parent] = [];
+                    parents[parent].push(p.replace(parent + '/', ''));
+                });
+                var html = '';
+                Object.keys(parents).sort().forEach(function(parent) {
+                    var exists = true; // can't check from browser, assume ok
+                    html += '<div class="settings-model-path-entry">' +
+                        '<span class="settings-model-path-dir">' + parent + '/</span>' +
+                        '<span class="settings-model-path-cats">' + parents[parent].join(', ') + '</span>' +
+                    '</div>';
+                });
+                list.innerHTML = html || '<div class="settings-hint">No model directories configured</div>';
+            })
+            .catch(function() {
+                var list = document.getElementById('settings-model-paths-list');
+                if (list) list.innerHTML = '<div class="settings-hint">Could not load paths (server offline?)</div>';
+            });
+    }
+
     // ── Output Section ──
     function buildOutputSection() {
         return '<div class="settings-section">' +
@@ -495,13 +670,28 @@ var SettingsTab = (function() {
             return '<button class="settings-swatch' + active + '" data-color="' + p.hex + '" style="background:' + p.hex + '" title="' + p.label + '"></button>';
         }).join('');
 
+        // Build theme grid
+        var themeCards = '';
+        Object.keys(THEMES).forEach(function(id) {
+            var t = THEMES[id];
+            var active = s.theme === id ? ' active' : '';
+            themeCards += '<button class="settings-theme-card' + active + '" data-theme="' + id + '" title="' + t.label + '">' +
+                '<div class="settings-theme-preview" style="background:' + t.bg_base + ';border-color:' + t.border + '">' +
+                    '<div class="settings-theme-bar" style="background:' + t.bg_surface + '"></div>' +
+                    '<div class="settings-theme-content">' +
+                        '<div class="settings-theme-dot" style="background:' + t.accent + '"></div>' +
+                        '<div class="settings-theme-line" style="background:' + t.text_muted + '"></div>' +
+                    '</div>' +
+                '</div>' +
+                '<span class="settings-theme-label">' + t.label + '</span>' +
+            '</button>';
+        });
+
         return '<div class="settings-section">' +
             '<h2 class="settings-section-title">Interface</h2>' +
-            '<div class="settings-row">' +
+            '<div class="settings-row" style="flex-direction:column;align-items:flex-start">' +
                 '<span class="settings-label">Theme</span>' +
-                '<div class="settings-pill-row">' +
-                    themePill('dark') + themePill('light') + themePill('system') +
-                '</div>' +
+                '<div class="settings-theme-grid">' + themeCards + '</div>' +
             '</div>' +
             '<div class="settings-row">' +
                 '<span class="settings-label">Accent Color</span>' +
@@ -562,12 +752,12 @@ var SettingsTab = (function() {
     }
 
     function bindInterfaceEvents() {
-        // Theme pills
-        document.querySelectorAll('[data-theme]').forEach(function(pill) {
-            pill.addEventListener('click', function() {
+        // Theme cards
+        document.querySelectorAll('.settings-theme-card').forEach(function(card) {
+            card.addEventListener('click', function() {
                 Settings.set('theme', this.dataset.theme);
-                document.querySelectorAll('[data-theme]').forEach(function(p) {
-                    p.classList.toggle('active', p.dataset.theme === Settings.get('theme'));
+                document.querySelectorAll('.settings-theme-card').forEach(function(c) {
+                    c.classList.toggle('active', c.dataset.theme === Settings.get('theme'));
                 });
             });
         });

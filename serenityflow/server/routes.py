@@ -547,7 +547,22 @@ def register_routes(app: FastAPI):
 
     @app.get("/folder_paths")
     async def get_folder_paths():
-        return JSONResponse({})
+        import folder_paths as fp
+        result = {}
+        for cat, (paths, exts) in fp.folder_names_and_paths.items():
+            result[cat] = {"paths": paths, "extensions": list(exts)}
+        return JSONResponse(result)
+
+    @app.post("/folder_paths/add")
+    async def add_folder_path(request: Request):
+        """Add an extra model search directory at runtime."""
+        data = await request.json()
+        path = data.get("path", "")
+        if not path or not os.path.isdir(os.path.expanduser(path)):
+            return JSONResponse({"error": f"Directory not found: {path}"}, status_code=400)
+        import folder_paths as fp
+        fp.add_extra_model_dirs([os.path.expanduser(path)])
+        return JSONResponse({"status": "ok", "path": path})
 
     @app.get("/nodes")
     async def get_nodes():
