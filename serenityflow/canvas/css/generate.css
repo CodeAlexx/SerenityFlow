@@ -401,12 +401,15 @@
 .gen-preview-img {
     max-width: calc(100% - 32px);
     max-height: calc(100vh - var(--shell-topbar-height) - 96px);
+    min-width: 40%;
     object-fit: contain;
     border-radius: 8px;
     animation: gen-fadeIn 300ms ease;
 }
 .gen-preview-img.gen-preview-live {
-    opacity: 0.85;
+    opacity: 0.9;
+    min-width: 60%;
+    image-rendering: auto;
 }
 
 /* Video display */

@@ -43,7 +43,7 @@ def clear_preview_sender():
     _preview_local.send_binary = None
 
 
-def _latent_to_preview_jpeg(latent, max_size=256):
+def _latent_to_preview_jpeg(latent, max_size=512):
     """Convert a latent tensor to a small JPEG preview.
 
     Uses a cheap approximation: scale latent channels to RGB directly
