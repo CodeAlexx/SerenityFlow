@@ -90,11 +90,11 @@ var GenerateTab = (function() {
 
     function buildLeftHTML() {
         return '' +
-        // Model
-        '<div class="gen-section">' +
-            '<label class="gen-label">Model</label>' +
-            '<select id="gen-model" class="gen-select"><option disabled selected>Loading models...</option></select>' +
-            '<div id="gen-model-warn" class="gen-model-warning"></div>' +
+        // Generate button + progress bar at top
+        '<div class="gen-section gen-top-actions">' +
+            '<button id="gen-btn" class="gen-btn">Generate</button>' +
+            '<div id="gen-left-progress" class="gen-progress gen-left-progress"><div id="gen-left-progress-bar" class="gen-progress-bar"></div></div>' +
+            '<div id="gen-left-progress-label" class="gen-left-progress-label"></div>' +
         '</div>' +
 
         // Prompt
@@ -120,52 +120,56 @@ var GenerateTab = (function() {
             '</select>' +
         '</div>' +
 
-        // Aspect ratio
+        // Image Settings accordion
         '<div class="gen-section">' +
-            '<label class="gen-label">Aspect Ratio</label>' +
-            '<div id="gen-aspects" class="gen-aspect-grid"></div>' +
-            '<div class="gen-lock-row">' +
-                '<button id="gen-aspect-lock" class="gen-aspect-lock" title="Lock aspect ratio">' +
-                    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>' +
-                '</button>' +
+            '<div id="gen-image-header" class="gen-accordion-header">' +
+                '<span>Image</span>' +
+                '<span class="gen-accordion-arrow">&#9660;</span>' +
             '</div>' +
-            '<div class="gen-custom-res">' +
-                '<div class="gen-res-row">' +
-                    '<label class="gen-res-label">W</label>' +
-                    '<input type="number" id="gen-custom-width" class="gen-number-input" min="256" max="4096" step="64" value="1024">' +
+            '<div id="gen-image-body" class="gen-accordion-body" style="margin-top:8px">' +
+                '<div id="gen-aspects" class="gen-aspect-grid"></div>' +
+                '<div class="gen-lock-row">' +
+                    '<button id="gen-aspect-lock" class="gen-aspect-lock" title="Lock aspect ratio">' +
+                        '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>' +
+                    '</button>' +
                 '</div>' +
-                '<div class="gen-res-row">' +
-                    '<label class="gen-res-label">H</label>' +
-                    '<input type="number" id="gen-custom-height" class="gen-number-input" min="256" max="4096" step="64" value="1024">' +
+                '<div class="gen-custom-res">' +
+                    '<div class="gen-res-row">' +
+                        '<label class="gen-res-label">W</label>' +
+                        '<input type="number" id="gen-custom-width" class="gen-number-input" min="256" max="4096" step="64" value="1024">' +
+                    '</div>' +
+                    '<div class="gen-res-row">' +
+                        '<label class="gen-res-label">H</label>' +
+                        '<input type="number" id="gen-custom-height" class="gen-number-input" min="256" max="4096" step="64" value="1024">' +
+                    '</div>' +
+                '</div>' +
+                // Seed inside Image section
+                '<div style="margin-top:8px">' +
+                    '<label class="gen-label">Seed</label>' +
+                    '<div class="gen-seed-row">' +
+                        '<input id="gen-seed" type="number" class="gen-number-input" value="-1">' +
+                        '<button id="gen-seed-shuffle" class="gen-seed-shuffle" title="Random seed">' +
+                            '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/></svg>' +
+                        '</button>' +
+                        '<button id="gen-seed-prev" class="gen-seed-shuffle" title="Use previous seed" style="font-size:12px">&#8634;</button>' +
+                    '</div>' +
                 '</div>' +
             '</div>' +
         '</div>' +
 
-        // Video controls (hidden by default, shown for video models)
-        '<div class="gen-section" id="gen-video-section" style="display:none">' +
-            '<label class="gen-label">Video</label>' +
-            '<div class="gen-setting-row">' +
-                '<span class="gen-label" style="min-width:52px;margin-bottom:0">Frames</span>' +
-                '<input type="number" id="gen-frames" class="gen-number-input" min="9" max="257" step="8" value="97">' +
-                '<input type="range" id="gen-frames-range" class="gen-range" min="9" max="257" step="8" value="97">' +
-            '</div>' +
-            '<div class="gen-setting-row">' +
-                '<span class="gen-label" style="min-width:52px;margin-bottom:0">FPS</span>' +
-                '<input type="number" id="gen-fps" class="gen-number-input" min="8" max="60" step="1" value="24">' +
-                '<input type="range" id="gen-fps-range" class="gen-range" min="8" max="60" step="1" value="24">' +
-            '</div>' +
-            '<div id="gen-duration-hint" class="gen-duration-hint"></div>' +
-        '</div>' +
-
-        // Settings accordion
+        // Generation Settings accordion
         '<div class="gen-section">' +
             '<div id="gen-settings-header" class="gen-accordion-header">' +
-                '<span>Settings</span>' +
+                '<span>Generation</span>' +
                 '<span class="gen-accordion-arrow">&#9660;</span>' +
             '</div>' +
             '<div id="gen-settings-body" class="gen-accordion-body" style="margin-top:8px">' +
+                // Model
+                '<label class="gen-label">Model</label>' +
+                '<select id="gen-model" class="gen-select"><option disabled selected>Loading models...</option></select>' +
+                '<div id="gen-model-warn" class="gen-model-warning"></div>' +
                 // Steps
-                '<div class="gen-setting-row">' +
+                '<div class="gen-setting-row" style="margin-top:10px">' +
                     '<span class="gen-label">Steps</span>' +
                     '<input id="gen-steps" type="number" class="gen-number-input" min="1" max="150" value="20">' +
                     '<input id="gen-steps-range" type="range" class="gen-range" min="1" max="150" value="20">' +
@@ -196,33 +200,29 @@ var GenerateTab = (function() {
                         '<option value="lcm" title="Latent consistency model, very fast (4-8 steps)">lcm</option>' +
                     '</select>' +
                 '</div>' +
+                // Batch
+                '<div class="gen-setting-row" id="gen-batch-section">' +
+                    '<span class="gen-label">Batch</span>' +
+                    '<input id="gen-batch" type="number" class="gen-number-input" min="1" max="8" value="1">' +
+                    '<span class="gen-batch-hint">images per run</span>' +
+                '</div>' +
             '</div>' +
         '</div>' +
 
-        // Seed
-        '<div class="gen-section">' +
-            '<label class="gen-label">Seed</label>' +
-            '<div class="gen-seed-row">' +
-                '<input id="gen-seed" type="number" class="gen-number-input" value="-1">' +
-                '<button id="gen-seed-shuffle" class="gen-seed-shuffle" title="Random seed">' +
-                    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/></svg>' +
-                '</button>' +
-                '<button id="gen-seed-prev" class="gen-seed-shuffle" title="Use previous seed" style="font-size:12px">&#8634;</button>' +
+        // Video controls (hidden by default, shown for video models)
+        '<div class="gen-section" id="gen-video-section" style="display:none">' +
+            '<label class="gen-label">Video</label>' +
+            '<div class="gen-setting-row">' +
+                '<span class="gen-label" style="min-width:52px;margin-bottom:0">Frames</span>' +
+                '<input type="number" id="gen-frames" class="gen-number-input" min="9" max="257" step="8" value="97">' +
+                '<input type="range" id="gen-frames-range" class="gen-range" min="9" max="257" step="8" value="97">' +
             '</div>' +
-        '</div>' +
-
-        // Batch
-        '<div class="gen-section">' +
-            '<label class="gen-label">Batch</label>' +
-            '<div class="gen-batch-row">' +
-                '<input id="gen-batch" type="number" class="gen-number-input" min="1" max="8" value="1">' +
-                '<span class="gen-batch-hint">images per run</span>' +
+            '<div class="gen-setting-row">' +
+                '<span class="gen-label" style="min-width:52px;margin-bottom:0">FPS</span>' +
+                '<input type="number" id="gen-fps" class="gen-number-input" min="8" max="60" step="1" value="24">' +
+                '<input type="range" id="gen-fps-range" class="gen-range" min="8" max="60" step="1" value="24">' +
             '</div>' +
-        '</div>' +
-
-        // Generate button
-        '<div class="gen-section">' +
-            '<button id="gen-btn" class="gen-btn">Generate</button>' +
+            '<div id="gen-duration-hint" class="gen-duration-hint"></div>' +
         '</div>';
     }
 
@@ -269,6 +269,8 @@ var GenerateTab = (function() {
         els.fpsInput = document.getElementById('gen-fps');
         els.fpsRange = document.getElementById('gen-fps-range');
         els.durationHint = document.getElementById('gen-duration-hint');
+        els.imageHeader = document.getElementById('gen-image-header');
+        els.imageBody = document.getElementById('gen-image-body');
         els.settingsHeader = document.getElementById('gen-settings-header');
         els.settingsBody = document.getElementById('gen-settings-body');
         els.steps = document.getElementById('gen-steps');
@@ -292,6 +294,9 @@ var GenerateTab = (function() {
         els.progress = document.getElementById('gen-progress');
         els.progressBar = document.getElementById('gen-progress-bar');
         els.progressLabel = document.getElementById('gen-progress-label');
+        els.leftProgress = document.getElementById('gen-left-progress');
+        els.leftProgressBar = document.getElementById('gen-left-progress-bar');
+        els.leftProgressLabel = document.getElementById('gen-left-progress-label');
         els.errorBanner = document.getElementById('gen-error-banner');
         els.wsIndicator = document.getElementById('gen-ws-indicator');
         els.galleryGrid = document.getElementById('gen-gallery-grid');
@@ -340,7 +345,13 @@ var GenerateTab = (function() {
             state.negPrompt = this.value;
         });
 
-        // Settings accordion
+        // Image accordion
+        els.imageHeader.addEventListener('click', function() {
+            this.classList.toggle('closed');
+            els.imageBody.classList.toggle('closed');
+        });
+
+        // Generation Settings accordion
         els.settingsHeader.addEventListener('click', function() {
             this.classList.toggle('closed');
             els.settingsBody.classList.toggle('closed');
@@ -568,8 +579,8 @@ var GenerateTab = (function() {
         els.videoSection.style.display = isVideo ? 'block' : 'none';
 
         // Batch: hide for video models
-        var batchInput = document.getElementById('gen-batch');
-        if (batchInput) batchInput.parentElement.parentElement.style.display = isVideo ? 'none' : 'block';
+        var batchSection = document.getElementById('gen-batch-section');
+        if (batchSection) batchSection.style.display = isVideo ? 'none' : 'flex';
 
         // Button label
         els.btn.textContent = isVideo ? 'Generate Video' : 'Generate';
@@ -763,10 +774,21 @@ var GenerateTab = (function() {
         if (v) {
             els.progress.classList.add('active');
             els.progressBar.style.width = '100%';
+            if (els.leftProgress) {
+                els.leftProgress.classList.add('active');
+                els.leftProgressBar.style.width = '100%';
+            }
         } else {
             els.progress.classList.remove('active');
             els.progressBar.style.width = '0%';
             els.progressLabel.classList.remove('visible');
+            if (els.leftProgress) {
+                els.leftProgress.classList.remove('active');
+                els.leftProgressBar.style.width = '0%';
+            }
+            if (els.leftProgressLabel) {
+                els.leftProgressLabel.textContent = '';
+            }
         }
     }
 
@@ -905,6 +927,12 @@ var GenerateTab = (function() {
             els.progressBar.style.width = pct + '%';
             els.progressLabel.textContent = 'Step ' + data.value + ' / ' + data.max;
             els.progressLabel.classList.add('visible');
+            if (els.leftProgressBar) {
+                els.leftProgressBar.style.width = pct + '%';
+            }
+            if (els.leftProgressLabel) {
+                els.leftProgressLabel.textContent = 'Step ' + data.value + ' / ' + data.max;
+            }
         });
 
         SerenityWS.on('executed', function(data) {
