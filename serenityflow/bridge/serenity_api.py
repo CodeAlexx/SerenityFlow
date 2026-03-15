@@ -549,12 +549,13 @@ def load_vae(path: str) -> VAEWrapper:
             )
             from safetensors.torch import load_file
             vae_sd = load_file(path)
-            # Convert LDM keys if needed
-            from serenity.inference.models.convert import convert_vae_keys
+            # Try LDM→diffusers key conversion if needed
             try:
-                vae_sd = convert_vae_keys(vae_sd)
+                from serenity.inference.models.convert import convert_ldm_vae_to_diffusers
+                converted = convert_ldm_vae_to_diffusers(vae_sd)
+                vae_sd = converted
             except Exception:
-                pass  # Already in diffusers format
+                pass  # Already in diffusers format or conversion not applicable
             vae.load_state_dict(vae_sd, strict=False, assign=True)
             # VAE goes on available device (transformer offloaded after sampling)
             vae = vae.to(device=device, dtype=torch.float32).eval()
