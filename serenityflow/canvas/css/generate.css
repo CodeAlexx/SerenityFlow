@@ -304,25 +304,30 @@
 
 /* Top actions — generate button + progress */
 .gen-top-actions {
-    margin-bottom: 0;
+    margin-bottom: 4px;
 }
 .gen-top-actions .gen-left-progress {
     position: relative;
     left: auto;
     right: auto;
     bottom: auto;
-    height: 3px;
-    margin-top: 6px;
-    background: var(--shell-bg-panel);
-    border-radius: 2px;
+    height: 6px;
+    margin-top: 8px;
+    background: var(--shell-border);
+    border-radius: 3px;
     overflow: hidden;
 }
+.gen-top-actions .gen-left-progress .gen-progress-bar {
+    height: 100%;
+    border-radius: 3px;
+}
 .gen-left-progress-label {
-    font-size: 11px;
-    color: var(--shell-text-muted);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--shell-text);
     text-align: center;
-    margin-top: 4px;
-    min-height: 16px;
+    margin-top: 6px;
+    min-height: 18px;
 }
 
 /* Generate button */
