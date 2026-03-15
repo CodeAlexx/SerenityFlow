@@ -111,7 +111,7 @@ var ModelsTab = (function() {
                 var seen = {};
                 function addModels(nodeType, inputKey, type, defaultArch) {
                     var items = info && info[nodeType] && info[nodeType].input && info[nodeType].input.required && info[nodeType].input.required[inputKey];
-                    if (items && items[0]) {
+                    if (items && Array.isArray(items[0])) {
                         items[0].forEach(function(name) {
                             if (seen[name]) return;
                             seen[name] = true;

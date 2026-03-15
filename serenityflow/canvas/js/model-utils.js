@@ -113,7 +113,7 @@ var ModelUtils = (function() {
                     data.CheckpointLoaderSimple.input &&
                     data.CheckpointLoaderSimple.input.required &&
                     data.CheckpointLoaderSimple.input.required.ckpt_name;
-                if (ckptInfo && ckptInfo[0]) {
+                if (ckptInfo && Array.isArray(ckptInfo[0])) {
                     ckptInfo[0].forEach(function(m) {
                         if (!seen[m]) {
                             seen[m] = true;
@@ -127,7 +127,7 @@ var ModelUtils = (function() {
                     data.UNETLoader.input &&
                     data.UNETLoader.input.required &&
                     data.UNETLoader.input.required.unet_name;
-                if (unetInfo && unetInfo[0]) {
+                if (unetInfo && Array.isArray(unetInfo[0])) {
                     unetInfo[0].forEach(function(m) {
                         if (!seen[m]) {
                             seen[m] = true;
