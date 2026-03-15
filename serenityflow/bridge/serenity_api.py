@@ -562,16 +562,17 @@ def _load_clip_from_sd(text_mgr, enc_type, sd: dict, dtype, device: str) -> None
 
     logger.info("Loading %s from local safetensors (%d keys)", enc_type.value, len(sd))
 
-    # Tokenizer from LOCAL file — NEVER download from HF
-    clip_dir = os.path.join(os.path.expanduser("~"), "EriDiffusion/Models/clip")
+    # Tokenizer from LOCAL HF cache — local_files_only=True prevents any download
     if enc_type == TextEncoderType.CLIP_L:
-        tok_path = os.path.join(clip_dir, "clip_l.tokenizer.json")
+        tok_repo = "openai/clip-vit-large-patch14"
+        tok_kwargs = {}
     else:
-        tok_path = os.path.join(clip_dir, "clip_g.tokenizer.json")
-    if os.path.isfile(tok_path):
-        encoder._tokenizer = CLIPTokenizer(tokenizer_file=tok_path)
-    else:
-        raise RuntimeError(f"Local tokenizer not found: {tok_path} — will NOT download from HF")
+        tok_repo = "stabilityai/stable-diffusion-xl-base-1.0"
+        tok_kwargs = {"subfolder": "tokenizer_2"}
+    try:
+        encoder._tokenizer = CLIPTokenizer.from_pretrained(tok_repo, local_files_only=True, **tok_kwargs)
+    except Exception as e:
+        raise RuntimeError(f"CLIP tokenizer not in local cache ({tok_repo}). Run once with network to cache, or copy vocab.json+merges.txt manually. Error: {e}")
 
     # Model config inferred from state dict shapes — NO from_pretrained
     if enc_type == TextEncoderType.CLIP_G:
@@ -611,14 +612,11 @@ def _load_t5_from_sd(text_mgr, sd: dict, dtype, device: str) -> None:
 
     logger.info("Loading T5-XXL from local safetensors (%d keys)", len(sd))
 
-    # Tokenizer from LOCAL file — NEVER download from HF
-    clip_dir = os.path.join(os.path.expanduser("~"), "EriDiffusion/Models/clip")
-    tok_path = os.path.join(clip_dir, "t5xxl_fp16.tokenizer.json")
-    if os.path.isfile(tok_path):
-        from transformers import T5Tokenizer
-        encoder._tokenizer = T5Tokenizer(tok_path)
-    else:
-        raise RuntimeError(f"Local T5 tokenizer not found: {tok_path} — will NOT download from HF")
+    # Tokenizer from LOCAL HF cache — local_files_only=True prevents any download
+    try:
+        encoder._tokenizer = AutoTokenizer.from_pretrained("google/t5-v1_1-xxl", local_files_only=True)
+    except Exception as e:
+        raise RuntimeError(f"T5 tokenizer not in local cache. Run once with network to cache, or copy spiece.model manually. Error: {e}")
 
     # Model config from known T5-XXL architecture — NO from_pretrained
     from transformers import T5Config
