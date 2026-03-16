@@ -58,14 +58,13 @@ var CanvasStatusBar = (function() {
     }
 
     function updateActiveLayer(name: string, type: string): void {
-        if (_layerEl) {
-            var label = (LAYER_TYPE_LABELS[type as LayerTypeValue] || type).toUpperCase();
-            _layerEl.textContent = label + ': ' + name;
-        }
+        if (!_layerEl) return;
+        var rawLabel = LAYER_TYPE_LABELS[type as LayerTypeValue] || type || 'Layer';
+        _layerEl.textContent = rawLabel.toUpperCase() + ': ' + (name || 'Untitled');
     }
 
     function updateGenStatus(status: 'idle' | 'queued' | 'generating' | 'complete'): void {
-        _genState = status;
+        _genState = status || 'idle';
         if (!_genStatusEl) return;
         var labels: Record<string, string> = {
             idle: 'Idle',
@@ -73,8 +72,8 @@ var CanvasStatusBar = (function() {
             generating: 'Generating...',
             complete: 'Complete',
         };
-        _genStatusEl.textContent = labels[status] || status;
-        _genStatusEl.className = 'cv-sb-item cv-sb-gen cv-sb-gen-' + status;
+        _genStatusEl.textContent = labels[_genState] || String(_genState);
+        _genStatusEl.className = 'cv-sb-item cv-sb-gen cv-sb-gen-' + _genState;
     }
 
     function updateVram(usedMb: number): void {

@@ -3098,12 +3098,30 @@ var CanvasTab = (function() {
         }
     }
 
+    /** Expose compositor context for external callers (Compositor, CanvasZoom, etc.) */
+    function getCompositorContext(): CompositorContext | null {
+        if (!stage || !boundingBox || !backgroundLayer || !uiLayer) return null;
+        return {
+            stage: stage,
+            boundingBox: boundingBox,
+            backgroundLayer: backgroundLayer,
+            uiLayer: uiLayer,
+            canvasLayers: canvasLayers,
+            genState: genState as any,
+            uploadImage: function(base64: string) { return uploadInitImage(base64); },
+        };
+    }
+
     return {
         init: init,
         resize: resizeStage,
         saveState: saveState,
         loadImageFromURL: loadImageFromURL,
         setPrompt: setPrompt,
-        setModel: setModel
+        setModel: setModel,
+        getCompositorContext: getCompositorContext,
+        getToolContext: function() { return stage ? getToolContext() : null; },
+        getCanvasLayers: function() { return canvasLayers; },
+        getStage: function() { return stage; },
     };
 })();

@@ -246,6 +246,36 @@ section('=== Validation detects errors ===');
     assert(errors2.length >= 2, 'invalid layer detected: ' + errors2.join(', '));
 }
 
+section('=== NaN safety in sanitise (P1-A fix) ===');
+{
+    // Null/undefined inputs should get sensible defaults, not NaN
+    var nullDraw = { type: 'draw', id: 1, name: 'test', visible: true, locked: false, opacity: null, position: null, blendMode: null };
+    LayerValidation.sanitise(nullDraw);
+    assert(!isNaN(nullDraw.opacity), 'draw opacity is not NaN after null input, got: ' + nullDraw.opacity);
+    assert(nullDraw.opacity === 1, 'draw opacity defaults to 1');
+    assert(nullDraw.blendMode === 'Normal', 'draw blendMode defaults to Normal (P1-B fix)');
+
+    var nullMask = { type: 'mask', id: 2, name: 'test', visible: true, locked: false, opacity: null, position: null, fillColor: '', denoiseStrength: null, noiseLevel: undefined };
+    LayerValidation.sanitise(nullMask);
+    assert(!isNaN(nullMask.denoiseStrength), 'mask denoiseStrength not NaN');
+    assert(nullMask.denoiseStrength === 0.75, 'mask denoiseStrength defaults to 0.75');
+    assert(!isNaN(nullMask.noiseLevel), 'mask noiseLevel not NaN');
+    assert(nullMask.noiseLevel === 0, 'mask noiseLevel defaults to 0');
+
+    var nullText = { type: 'text', id: 3, name: 'test', visible: true, locked: false, opacity: null, position: null, text: '', fontFamily: '', fontSize: null, fontWeight: '', color: '', alignment: '', lineHeight: undefined };
+    LayerValidation.sanitise(nullText);
+    assert(!isNaN(nullText.fontSize), 'text fontSize not NaN');
+    assert(nullText.fontSize === 32, 'text fontSize defaults to 32');
+    assert(!isNaN(nullText.lineHeight), 'text lineHeight not NaN');
+    assert(nullText.lineHeight === 1.2, 'text lineHeight defaults to 1.2');
+
+    var nullCtrl = { type: 'control', id: 4, name: 'test', visible: true, locked: false, opacity: null, position: null, controlModel: '', weight: null, beginStep: undefined, endStep: null, controlMode: '', refImageSrc: '', refImageName: '' };
+    LayerValidation.sanitise(nullCtrl);
+    assert(!isNaN(nullCtrl.weight), 'control weight not NaN');
+    assert(nullCtrl.weight === 1, 'control weight defaults to 1');
+    assert(nullCtrl.endStep === 1, 'control endStep defaults to 1');
+}
+
 section('=== Blend Mode helpers ===');
 {
     assert(BlendModeUtil.toCompositeOp('Normal') === 'source-over', 'Normal → source-over');
@@ -259,7 +289,7 @@ section('=== Blend Mode helpers ===');
 section('=== Serializer: toJSON/fromJSON roundtrip ===');
 {
     var session = {
-        version: 1,
+        version: 2,
         layers: [
             { data: LayerDefaults.draw('Test Draw'), imageData: 'data:image/png;base64,abc' },
             { data: LayerDefaults.mask('Test Mask'), imageData: 'data:,' },
@@ -293,7 +323,7 @@ section('=== Serializer: rejects bad data ===');
 section('=== Serializer: localStorage roundtrip ===');
 {
     var sess = {
-        version: 1,
+        version: 2,
         layers: [{ data: LayerDefaults.draw(), imageData: '' }],
         bbox: { x: 0, y: 0, width: 512, height: 512 },
         activeLayerId: null,

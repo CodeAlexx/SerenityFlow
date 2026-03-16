@@ -184,36 +184,49 @@ var LayerValidation = (function () {
             errors.push('locked must be boolean');
         return errors;
     }
+    /** Safe clamp: coerce null/undefined/NaN to default before clamping */
+    function safeNum(val, fallback) {
+        var n = typeof val === 'number' && !isNaN(val) ? val : fallback;
+        return n;
+    }
     function sanitiseBase(data) {
-        data.opacity = clamp(data.opacity, 0, 1);
+        data.opacity = clamp(safeNum(data.opacity, 1), 0, 1);
         if (!data.name)
             data.name = 'Untitled';
         if (!data.position)
             data.position = { x: 0, y: 0 };
+        if (typeof data.visible !== 'boolean')
+            data.visible = true;
+        if (typeof data.locked !== 'boolean')
+            data.locked = false;
     }
     function sanitise(data) {
         sanitiseBase(data);
         switch (data.type) {
+            case 'draw':
+                if (!data.blendMode)
+                    data.blendMode = 'Normal';
+                break;
             case 'mask':
-                data.denoiseStrength = clamp(data.denoiseStrength, 0, 1);
-                data.noiseLevel = clamp(data.noiseLevel, 0, 1);
+                data.denoiseStrength = clamp(safeNum(data.denoiseStrength, 0.75), 0, 1);
+                data.noiseLevel = clamp(safeNum(data.noiseLevel, 0), 0, 1);
                 break;
             case 'control':
-                data.weight = clamp(data.weight, 0, 2);
-                data.beginStep = clamp(data.beginStep, 0, 1);
-                data.endStep = clamp(data.endStep, 0, 1);
+                data.weight = clamp(safeNum(data.weight, 1), 0, 2);
+                data.beginStep = clamp(safeNum(data.beginStep, 0), 0, 1);
+                data.endStep = clamp(safeNum(data.endStep, 1), 0, 1);
                 break;
             case 'adjustment':
-                data.brightness = clamp(data.brightness, -1, 1);
-                data.contrast = clamp(data.contrast, -1, 1);
-                data.saturation = clamp(data.saturation, -1, 1);
-                data.temperature = clamp(data.temperature, -1, 1);
-                data.tint = clamp(data.tint, -1, 1);
-                data.sharpness = clamp(data.sharpness, 0, 1);
+                data.brightness = clamp(safeNum(data.brightness, 0), -1, 1);
+                data.contrast = clamp(safeNum(data.contrast, 0), -1, 1);
+                data.saturation = clamp(safeNum(data.saturation, 0), -1, 1);
+                data.temperature = clamp(safeNum(data.temperature, 0), -1, 1);
+                data.tint = clamp(safeNum(data.tint, 0), -1, 1);
+                data.sharpness = clamp(safeNum(data.sharpness, 0), 0, 1);
                 break;
             case 'text':
-                data.fontSize = clamp(data.fontSize, 1, 1000);
-                data.lineHeight = clamp(data.lineHeight, 0.5, 5);
+                data.fontSize = clamp(safeNum(data.fontSize, 32), 1, 1000);
+                data.lineHeight = clamp(safeNum(data.lineHeight, 1.2), 0.5, 5);
                 break;
         }
         return data;
@@ -228,7 +241,7 @@ var LayerValidation = (function () {
     }
     function validateSession(state) {
         var errors = [];
-        if (state.version !== 1)
+        if (state.version !== 1 && state.version !== 2)
             errors.push('unsupported session version: ' + state.version);
         if (!Array.isArray(state.layers))
             errors.push('layers must be an array');
@@ -254,7 +267,7 @@ var LayerValidation = (function () {
 // ── Serialization ──
 var LayerSerializer = (function () {
     'use strict';
-    var SESSION_VERSION = 1;
+    var SESSION_VERSION = 2;
     var STORAGE_KEY = 'sf-canvas-session';
     function buildSessionState(layers, bbox, activeLayerId, genSettings) {
         // Capture each layer's pixel content as base64 PNG

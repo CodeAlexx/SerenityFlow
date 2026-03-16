@@ -52,13 +52,13 @@ var CanvasStatusBar = (function () {
             _zoomEl.textContent = percent + '%';
     }
     function updateActiveLayer(name, type) {
-        if (_layerEl) {
-            var label = (LAYER_TYPE_LABELS[type] || type).toUpperCase();
-            _layerEl.textContent = label + ': ' + name;
-        }
+        if (!_layerEl)
+            return;
+        var rawLabel = LAYER_TYPE_LABELS[type] || type || 'Layer';
+        _layerEl.textContent = rawLabel.toUpperCase() + ': ' + (name || 'Untitled');
     }
     function updateGenStatus(status) {
-        _genState = status;
+        _genState = status || 'idle';
         if (!_genStatusEl)
             return;
         var labels = {
@@ -67,8 +67,8 @@ var CanvasStatusBar = (function () {
             generating: 'Generating...',
             complete: 'Complete',
         };
-        _genStatusEl.textContent = labels[status] || status;
-        _genStatusEl.className = 'cv-sb-item cv-sb-gen cv-sb-gen-' + status;
+        _genStatusEl.textContent = labels[_genState] || String(_genState);
+        _genStatusEl.className = 'cv-sb-item cv-sb-gen cv-sb-gen-' + _genState;
     }
     function updateVram(usedMb) {
         _vramMb = usedMb;

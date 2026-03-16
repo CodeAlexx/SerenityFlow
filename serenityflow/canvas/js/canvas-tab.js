@@ -3022,13 +3022,31 @@ var CanvasTab = (function () {
             updateCanvasUIForArch(ModelUtils.detectArchFromFilename(modelName));
         }
     }
+    /** Expose compositor context for external callers (Compositor, CanvasZoom, etc.) */
+    function getCompositorContext() {
+        if (!stage || !boundingBox || !backgroundLayer || !uiLayer)
+            return null;
+        return {
+            stage: stage,
+            boundingBox: boundingBox,
+            backgroundLayer: backgroundLayer,
+            uiLayer: uiLayer,
+            canvasLayers: canvasLayers,
+            genState: genState,
+            uploadImage: function (base64) { return uploadInitImage(base64); },
+        };
+    }
     return {
         init: init,
         resize: resizeStage,
         saveState: saveState,
         loadImageFromURL: loadImageFromURL,
         setPrompt: setPrompt,
-        setModel: setModel
+        setModel: setModel,
+        getCompositorContext: getCompositorContext,
+        getToolContext: function () { return stage ? getToolContext() : null; },
+        getCanvasLayers: function () { return canvasLayers; },
+        getStage: function () { return stage; },
     };
 })();
 //# sourceMappingURL=canvas-tab.js.map

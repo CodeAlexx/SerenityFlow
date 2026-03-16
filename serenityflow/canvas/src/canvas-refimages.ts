@@ -448,7 +448,8 @@ var CanvasZoom = (function() {
         updateDisplay(ctx);
     }
 
-    function getZoomPercent(ctx: CanvasToolContext): number {
+    function getZoomPercent(ctx?: CanvasToolContext | null): number {
+        if (!ctx || !ctx.stage) return 100;
         return Math.round(ctx.stage.scaleX() * 100);
     }
 
