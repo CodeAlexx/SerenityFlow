@@ -78,12 +78,12 @@ var WorkflowBuilder = (function () {
             '6': { class_type: 'VAEEncodeForInpaint', inputs: {
                     pixels: ['4', 0], vae: ['1', 2], mask: ['5', 0], grow_mask_by: 6
                 } },
-            '7': { class_type: 'KSampler', inputs: {
+            '7': { class_type: params.lanpaint ? 'LanPaintKSampler' : 'KSampler', inputs: Object.assign({
                     seed: seed, steps: params.steps, cfg: params.cfg || 7.0,
                     sampler_name: params.scheduler || 'euler', scheduler: 'normal',
                     denoise: params.denoise || 0.75,
                     model: ['1', 0], positive: ['2', 0], negative: ['3', 0], latent_image: ['6', 0]
-                } },
+                }, params.lanpaint ? { thinking_steps: params.lanpaintThinkingSteps || 5, mode: params.lanpaintMode || 'image_first' } : {}) },
             '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['1', 2] } },
             '9': { class_type: 'SaveImage', inputs: { images: ['8', 0], filename_prefix: 'sf_inpaint' } }
         };

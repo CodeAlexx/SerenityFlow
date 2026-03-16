@@ -61,7 +61,10 @@ var CanvasTab = (function () {
         seed: -1,
         arch: 'sd15',
         frames: 97,
-        fps: 24
+        fps: 24,
+        lanpaint: false,
+        lanpaintThinkingSteps: 5,
+        lanpaintMode: 'image_first'
     };
     // DOM refs
     var els = {};
@@ -670,6 +673,26 @@ var CanvasTab = (function () {
             '<input type="number" id="cv-guidance" class="cv-number-input" min="1" max="10" step="0.5" value="3.5">' +
             '<input type="range" id="cv-guidance-range" class="cv-range" min="1" max="10" step="0.5" value="3.5">' +
             '</div>' +
+            '<div id="cv-lanpaint-section" class="cv-setting-row" style="margin-top:4px">' +
+            '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
+            '<input type="checkbox" id="cv-lanpaint" style="accent-color:#6366f1">' +
+            '<span class="cv-setting-label" style="margin:0">LanPaint</span>' +
+            '</label>' +
+            '<select id="cv-lanpaint-quality" class="cv-select" style="width:auto;margin-left:auto;font-size:11px" disabled>' +
+            '<option value="2">Fast (2)</option>' +
+            '<option value="5" selected>Standard (5)</option>' +
+            '<option value="10">Quality (10)</option>' +
+            '<option value="20">Maximum (20)</option>' +
+            '</select>' +
+            '</div>' +
+            '<div id="cv-lanpaint-mode-row" class="cv-setting-row" style="display:none;margin-top:2px">' +
+            '<span class="cv-setting-label">Mode</span>' +
+            '<select id="cv-lanpaint-mode" class="cv-select" style="font-size:11px">' +
+            '<option value="image_first">Image First</option>' +
+            '<option value="prompt_first">Prompt First</option>' +
+            '</select>' +
+            '</div>' +
+            '<div id="cv-lanpaint-hint" class="cv-helper-text" style="display:none">Langevin dynamics for seamless inpainting</div>' +
             '<div id="cv-video-section" style="display:none">' +
             '<div class="cv-section-title" style="margin-top:8px">Video</div>' +
             '<div class="cv-setting-row">' +
@@ -726,6 +749,12 @@ var CanvasTab = (function () {
         els.progressBar = document.getElementById('cv-progress-bar');
         els.progressLabel = document.getElementById('cv-progress-label');
         els.errorBanner = document.getElementById('cv-error-banner');
+        els.lanpaint = document.getElementById('cv-lanpaint');
+        els.lanpaintQuality = document.getElementById('cv-lanpaint-quality');
+        els.lanpaintMode = document.getElementById('cv-lanpaint-mode');
+        els.lanpaintModeRow = document.getElementById('cv-lanpaint-mode-row');
+        els.lanpaintHint = document.getElementById('cv-lanpaint-hint');
+        els.lanpaintSection = document.getElementById('cv-lanpaint-section');
     }
     // ── Konva Stage ──
     function initKonva() {
@@ -1948,6 +1977,19 @@ var CanvasTab = (function () {
             genState.guidance = parseFloat(this.value);
             els.guidance.value = this.value;
         });
+        // LanPaint toggle
+        els.lanpaint.addEventListener('change', function () {
+            genState.lanpaint = this.checked;
+            els.lanpaintQuality.disabled = !this.checked;
+            els.lanpaintHint.style.display = this.checked ? '' : 'none';
+            els.lanpaintModeRow.style.display = this.checked ? '' : 'none';
+        });
+        els.lanpaintQuality.addEventListener('change', function () {
+            genState.lanpaintThinkingSteps = parseInt(this.value) || 5;
+        });
+        els.lanpaintMode.addEventListener('change', function () {
+            genState.lanpaintMode = this.value;
+        });
         // Frames sync
         els.framesInput.addEventListener('input', function () {
             genState.frames = parseInt(this.value) || 97;
@@ -2295,7 +2337,9 @@ var CanvasTab = (function () {
         if (!stage || !boundingBox)
             return;
         LayerSerializer.buildSessionState(canvasLayers, { x: boundingBox.x(), y: boundingBox.y(), width: boundingBox.width(), height: boundingBox.height() }, activeLayerId, { prompt: genState.prompt, denoise: genState.denoise, steps: genState.steps,
-            cfg: genState.cfg, guidance: genState.guidance, seed: genState.seed }).then(function (state) {
+            cfg: genState.cfg, guidance: genState.guidance, seed: genState.seed,
+            lanpaint: genState.lanpaint, lanpaintThinkingSteps: genState.lanpaintThinkingSteps,
+            lanpaintMode: genState.lanpaintMode }).then(function (state) {
             LayerSerializer.downloadAsFile(state);
         });
     }
@@ -2354,6 +2398,19 @@ var CanvasTab = (function () {
                 genState.cfg = state.genSettings.cfg;
                 genState.guidance = state.genSettings.guidance;
                 genState.seed = state.genSettings.seed;
+                if (state.genSettings.lanpaint !== undefined) {
+                    genState.lanpaint = state.genSettings.lanpaint;
+                    genState.lanpaintThinkingSteps = state.genSettings.lanpaintThinkingSteps || 5;
+                    genState.lanpaintMode = state.genSettings.lanpaintMode || 'image_first';
+                    if (els.lanpaint) {
+                        els.lanpaint.checked = genState.lanpaint;
+                        els.lanpaintQuality.disabled = !genState.lanpaint;
+                        els.lanpaintQuality.value = String(genState.lanpaintThinkingSteps);
+                        els.lanpaintMode.value = genState.lanpaintMode;
+                        els.lanpaintHint.style.display = genState.lanpaint ? '' : 'none';
+                        els.lanpaintModeRow.style.display = genState.lanpaint ? '' : 'none';
+                    }
+                }
                 if (els.prompt)
                     els.prompt.value = genState.prompt;
                 if (els.denoise)
@@ -2544,7 +2601,10 @@ var CanvasTab = (function () {
                                     negPrompt: '', initImageName: initName, maskImageName: maskName,
                                     width: bw, height: bh,
                                     steps: genState.steps, cfg: genState.cfg,
-                                    guidance: genState.guidance, denoise: genState.denoise, seed: seed
+                                    guidance: genState.guidance, denoise: genState.denoise, seed: seed,
+                                    lanpaint: genState.lanpaint,
+                                    lanpaintThinkingSteps: genState.lanpaintThinkingSteps,
+                                    lanpaintMode: genState.lanpaintMode
                                 }));
                             });
                         });

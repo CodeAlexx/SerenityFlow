@@ -116,9 +116,26 @@ def main():
     except ImportError:
         pass
 
+    # Log model discovery sources
+    from serenityflow.bridge.model_paths import (
+        get_model_paths as _gmp,
+        _HAS_UNIFIED,
+        _count_unified_models,
+    )
+    mp = _gmp()
+    legacy_dirs = sum(1 for d in set(
+        p for paths in mp.dirs.values() for p in paths
+    ) if os.path.isdir(d))
+    unified_count = _count_unified_models()
+
     print(f"\nSerenityFlow v2 server starting")
     print(f"  Host: {args.host}:{args.port}")
     print(f"  Models: {args.model_dir or 'default'}")
+    if _HAS_UNIFIED:
+        print(f"  Unified resolver: {unified_count} models from ~/.serenity/models/")
+    else:
+        print(f"  Unified resolver: not available (stagehand not installed)")
+    print(f"  Legacy search dirs: {legacy_dirs} active directories")
     print(f"  Output: {args.output_dir}")
     if args.custom_node_dir:
         print(f"  Custom nodes: {args.custom_node_dir}")

@@ -318,7 +318,7 @@ var QueueTab = (function () {
                 if (pd.seed != null)
                     detailParts.push('<div class="queue-detail-row"><span class="queue-detail-label">Seed</span><span class="queue-detail-value">' + pd.seed + '</span></div>');
                 if (pd.scheduler)
-                    detailParts.push('<div class="queue-detail-row"><span class="queue-detail-label">Scheduler</span><span class="queue-detail-value">' + escapeHtml(pd.scheduler) + '</span></div>');
+                    detailParts.push('<div class="queue-detail-row"><span class="queue-detail-label">Scheduler</span><span class="queue-detail-value">' + escapeHtml(String(pd.scheduler)) + '</span></div>');
                 if (pd.steps)
                     detailParts.push('<div class="queue-detail-row"><span class="queue-detail-label">Steps</span><span class="queue-detail-value">' + pd.steps + '</span></div>');
                 if (pd.cfg)

@@ -30,16 +30,36 @@ _SCHEDULER_NAMES = ["normal", "karras", "exponential", "sgm_uniform", "simple",
         },
         "optional": {
             "negative": ("CONDITIONING",),
+            "lanpaint_mode": ("BOOLEAN", {"default": False,
+                "tooltip": "When enabled with a noise mask, use LanPaint Langevin dynamics for higher quality inpainting."}),
+            "lanpaint_thinking_steps": ("INT", {"default": 5, "min": 1, "max": 50,
+                "tooltip": "LanPaint reasoning iterations per denoise step."}),
         },
     },
 )
 def ksampler(model, seed, steps, cfg, sampler_name, scheduler,
-             positive, latent_image, denoise=1.0, negative=None):
-    from serenityflow.bridge.serenity_api import sample
+             positive, latent_image, denoise=1.0, negative=None,
+             lanpaint_mode=False, lanpaint_thinking_steps=5):
     from serenityflow.bridge.types import unwrap_latent, wrap_latent
 
     latent = unwrap_latent(latent_image)
+    noise_mask = latent_image.get("noise_mask") if isinstance(latent_image, dict) else None
 
+    # Auto-route to LanPaint when enabled and a mask is present
+    if lanpaint_mode and noise_mask is not None:
+        from serenityflow.nodes.sampling_lanpaint import _sample_with_lanpaint
+        result = _sample_with_lanpaint(
+            model=model, latent=latent, positive=positive, negative=negative,
+            seed=seed, steps=steps, cfg=cfg, sampler_name=sampler_name,
+            scheduler=scheduler, denoise=denoise,
+            thinking_steps=lanpaint_thinking_steps, lambda_strength=7.0,
+            friction=15.0, step_size=0.3, beta=1.0, mode="image_first",
+            early_stop_threshold=0.0, early_stop_patience=1,
+            noise_mask=noise_mask,
+        )
+        return (wrap_latent(result),)
+
+    from serenityflow.bridge.serenity_api import sample
     result = sample(
         model=model, latent=latent,
         positive=positive, negative=negative,

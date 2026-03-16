@@ -2,13 +2,41 @@
 
 Compatible with ComfyUI's model directory structure.
 Supports extra_model_paths.yaml.
+Integrates with Stagehand's unified model resolver (~/.serenity/models/).
 """
 from __future__ import annotations
 
 import os
 import logging
+from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Unified model resolver integration (optional dependency)
+# ---------------------------------------------------------------------------
+
+try:
+    from stagehand.model_resolver import get_resolver as _get_unified_resolver
+    _HAS_UNIFIED = True
+except ImportError:
+    _HAS_UNIFIED = False
+
+# Map SerenityFlow folder names → unified ModelType subdirectory names
+_UNIFIED_TYPE_MAP: dict[str, str | None] = {
+    "checkpoints": "checkpoints",
+    "diffusion_models": "checkpoints",  # Same thing in unified layout
+    "loras": "loras",
+    "vae": "vaes",
+    "clip": "text_encoders",
+    "controlnet": "controlnets",
+    "clip_vision": "text_encoders",
+    "upscale_models": "upscalers",
+    "embeddings": None,  # No unified equivalent yet
+    "style_models": None,
+}
+
+_UNIFIED_BASE = os.path.expanduser("~/.serenity/models")
 
 DEFAULT_MODEL_DIRS = {
     "checkpoints": ["models/checkpoints"],
@@ -46,7 +74,14 @@ class ModelPaths:
         # Load defaults -- try both "base_dir/models/X" and "base_dir/X" layouts
         # Also handle case-insensitive directory names (VAE vs vae, Lora vs loras)
         for folder, subdirs in DEFAULT_MODEL_DIRS.items():
-            paths = []
+            paths: list[str] = []
+
+            # Prepend unified ~/.serenity/models/<type> dir as FIRST search path
+            unified_type = _UNIFIED_TYPE_MAP.get(folder)
+            if unified_type is not None:
+                unified_dir = os.path.join(_UNIFIED_BASE, unified_type)
+                paths.append(unified_dir)
+
             for sd in subdirs:
                 paths.append(os.path.join(base_dir, sd))
                 # Also try the leaf directory directly under base_dir
@@ -79,8 +114,31 @@ class ModelPaths:
 
     def find(self, filename: str, folder: str = "checkpoints") -> str:
         """Find model file by name in the given folder's search paths.
+
+        Checks the unified Stagehand resolver first (fast index lookup),
+        then falls back to the legacy directory walk.
         Returns full path. Raises FileNotFoundError if not found.
         """
+        # 1. Try unified resolver first (fast index lookup)
+        if _HAS_UNIFIED:
+            unified_type = _UNIFIED_TYPE_MAP.get(folder)
+            if unified_type is not None:
+                try:
+                    resolver = _get_unified_resolver()
+                    path = resolver.resolve_file(filename, unified_type)
+                    return str(path)
+                except FileNotFoundError:
+                    pass
+                # Also try just the stem (name without extension)
+                stem = Path(filename).stem
+                if stem != filename:
+                    try:
+                        path = resolver.resolve_file(stem, unified_type)
+                        return str(path)
+                    except FileNotFoundError:
+                        pass
+
+        # 2. Fall back to existing directory walk
         search_dirs = self.dirs.get(folder, [])
         for search_dir in search_dirs:
             full_path = os.path.join(search_dir, filename)
@@ -88,21 +146,43 @@ class ModelPaths:
                 return full_path
             # Also check subdirectories one level deep
             if os.path.isdir(search_dir):
-                for entry in os.scandir(search_dir):
-                    if entry.is_dir():
-                        sub_path = os.path.join(entry.path, filename)
-                        if os.path.exists(sub_path):
-                            return sub_path
+                try:
+                    for entry in os.scandir(search_dir):
+                        if entry.is_dir():
+                            sub_path = os.path.join(entry.path, filename)
+                            if os.path.exists(sub_path):
+                                return sub_path
+                except OSError:
+                    pass
 
         raise FileNotFoundError(
             f"Model '{filename}' not found in {folder} paths: {search_dirs}"
         )
 
     def list_models(self, folder: str) -> list[str]:
-        """List all model files in a folder's search paths."""
+        """List all model files in a folder's search paths.
+
+        Includes models from the unified Stagehand index when available.
+        """
+        models: list[str] = []
+        seen: set[str] = set()
+
+        # Include models from unified resolver index
+        if _HAS_UNIFIED:
+            unified_type = _UNIFIED_TYPE_MAP.get(folder)
+            if unified_type is not None:
+                try:
+                    resolver = _get_unified_resolver()
+                    for entry in resolver.list_models(unified_type):
+                        for fname in entry.files:
+                            if fname not in seen:
+                                seen.add(fname)
+                                models.append(fname)
+                except Exception:
+                    pass
+
+        # Legacy directory walk
         search_dirs = self.dirs.get(folder, [])
-        models = []
-        seen = set()
         for search_dir in search_dirs:
             if not os.path.isdir(search_dir):
                 continue
@@ -151,6 +231,7 @@ _instance: ModelPaths | None = None
 
 
 _WELL_KNOWN_MODEL_DIRS = [
+    _UNIFIED_BASE,
     os.path.expanduser("~/EriDiffusion/Models"),
     os.path.expanduser("~/eriui/comfyui/ComfyUI/models"),
     os.path.expanduser("~/SwarmUI/Models"),
@@ -163,6 +244,16 @@ def _detect_base_dir() -> str:
         if os.path.isdir(d):
             return d
     return os.getcwd()
+
+
+def _count_unified_models() -> int:
+    """Count models available through the unified resolver. Returns 0 on error."""
+    if not _HAS_UNIFIED:
+        return 0
+    try:
+        return len(_get_unified_resolver().list_models())
+    except Exception:
+        return 0
 
 
 def get_model_paths(base_dir: str | None = None) -> ModelPaths:
@@ -195,4 +286,12 @@ def set_model_paths(paths: ModelPaths) -> None:
     _instance = paths
 
 
-__all__ = ["ModelPaths", "DEFAULT_MODEL_DIRS", "get_model_paths", "set_model_paths"]
+__all__ = [
+    "ModelPaths",
+    "DEFAULT_MODEL_DIRS",
+    "get_model_paths",
+    "set_model_paths",
+    "_UNIFIED_TYPE_MAP",
+    "_HAS_UNIFIED",
+    "_count_unified_models",
+]

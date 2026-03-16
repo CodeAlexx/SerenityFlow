@@ -227,18 +227,26 @@ def svd_img2vid_conditioning(clip_vision, init_image, vae, width, height,
         "strength_2": ("FLOAT",),
         "lora_name_3": ("STRING",),
         "strength_3": ("FLOAT",),
+        "lora_name_4": ("STRING",),
+        "strength_4": ("FLOAT",),
+        "lora_name_5": ("STRING",),
+        "strength_5": ("FLOAT",),
     }},
 )
 def lora_loader_stack(model, clip, lora_name_1, strength_1=1.0,
                       lora_name_2=None, strength_2=1.0,
-                      lora_name_3=None, strength_3=1.0):
+                      lora_name_3=None, strength_3=1.0,
+                      lora_name_4=None, strength_4=1.0,
+                      lora_name_5=None, strength_5=1.0):
     from serenityflow.bridge.serenity_api import apply_lora, apply_lora_clip
     from serenityflow.bridge.model_paths import get_model_paths
     paths = get_model_paths()
 
     for lora_name, strength in [(lora_name_1, strength_1),
                                  (lora_name_2, strength_2),
-                                 (lora_name_3, strength_3)]:
+                                 (lora_name_3, strength_3),
+                                 (lora_name_4, strength_4),
+                                 (lora_name_5, strength_5)]:
         if lora_name:
             lora_path = paths.find(lora_name, "loras")
             model = apply_lora(model, lora_path, strength=strength)

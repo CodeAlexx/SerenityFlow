@@ -49,9 +49,9 @@ var SerenityWS = (function () {
                 return;
             }
             try {
-                var msg = JSON.parse(event.data); // TODO: tighten type
+                var msg = JSON.parse(event.data);
                 var type = msg.type;
-                var data = msg.data || msg; // TODO: tighten type
+                var data = msg.data || msg;
                 emit(type, data);
             }
             catch (e) {
