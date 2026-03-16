@@ -250,7 +250,16 @@
     <!-- Generate tab -->
     <script src="js/generate.js"></script>
 
-    <!-- Canvas tab -->
+    <!-- Canvas tab: layer types, tools, SAM, video, compositor must load before canvas-tab -->
+    <script src="js/layer-types.js"></script>
+    <script src="js/canvas-tools.js"></script>
+    <script src="js/canvas-sam.js"></script>
+    <script src="js/canvas-video.js"></script>
+    <script src="js/canvas-compositor.js"></script>
+    <script src="js/canvas-staging.js"></script>
+    <script src="js/canvas-preprocess.js"></script>
+    <script src="js/canvas-refimages.js"></script>
+    <script src="js/canvas-statusbar.js"></script>
     <script src="js/canvas-tab.js"></script>
 
     <!-- Simple mode -->

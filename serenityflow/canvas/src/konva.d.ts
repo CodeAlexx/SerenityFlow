@@ -197,6 +197,7 @@ declare namespace Konva {
             strokeWidth?: number;
             tension?: number;
             bezier?: boolean;
+            closed?: boolean;
             dash?: number[];
             lineCap?: string;
             lineJoin?: string;
@@ -208,6 +209,8 @@ declare namespace Konva {
         tension(val: number): this;
         bezier(): boolean;
         bezier(val: boolean): this;
+        closed(): boolean;
+        closed(val: boolean): this;
     }
 
     class Text extends Shape {
@@ -230,6 +233,8 @@ declare namespace Konva {
         fontSize(val: number): this;
         fontFamily(): string;
         fontFamily(val: string): this;
+        fontStyle(): string;
+        fontStyle(val: string): this;
         getTextWidth(): number;
         measureSize(text: string): { width: number; height: number };
         align(): string;
