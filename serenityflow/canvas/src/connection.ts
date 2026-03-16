@@ -1,24 +1,37 @@
-"use strict";
 /**
  * Bezier connections between output and input ports.
  */
 class SFConnection {
-    constructor(sourceNodeId, sourceSlot, targetNodeId, targetSlot, canvas) {
-        this._dashAnim = null;
+    sourceNode: string;
+    sourceSlot: number;
+    targetNode: string;
+    targetSlot: number;
+    canvas: SFCanvas;
+    line: Konva.Shape;
+    _dashAnim: Konva.Animation | null = null;
+
+    constructor(sourceNodeId: string, sourceSlot: number, targetNodeId: string, targetSlot: number, canvas: SFCanvas) {
         this.sourceNode = sourceNodeId;
         this.sourceSlot = sourceSlot;
         this.targetNode = targetNodeId;
         this.targetSlot = targetSlot;
         this.canvas = canvas;
+
         const srcType = this._getSourceType();
+
         this.line = new Konva.Shape({
             sceneFunc: (context, shape) => {
                 const src = this._getSourcePos();
                 const tgt = this._getTargetPos();
                 const dx = Math.max(Math.abs(tgt.x - src.x) * 0.5, 30);
+
                 context.beginPath();
                 context.moveTo(src.x, src.y);
-                context.bezierCurveTo(src.x + dx, src.y, tgt.x - dx, tgt.y, tgt.x, tgt.y);
+                context.bezierCurveTo(
+                    src.x + dx, src.y,
+                    tgt.x - dx, tgt.y,
+                    tgt.x, tgt.y
+                );
                 context.fillStrokeShape(shape);
             },
             stroke: getTypeColor(srcType),
@@ -26,35 +39,41 @@ class SFConnection {
             hitStrokeWidth: 10,
             listening: true,
         });
+
         // Right-click to delete
         this.line.on('contextmenu', (e) => {
             e.evt.preventDefault();
             e.cancelBubble = true;
             // Will be handled by context menu system
         });
+
         this._watchDrag();
     }
-    _getSourcePos() {
+
+    _getSourcePos(): { x: number; y: number } {
         const node = this.canvas.nodes.get(this.sourceNode);
         return node ? node.getOutputPortPos(this.sourceSlot) : { x: 0, y: 0 };
     }
-    _getTargetPos() {
+
+    _getTargetPos(): { x: number; y: number } {
         const node = this.canvas.nodes.get(this.targetNode);
         return node ? node.getInputPortPos(this.targetSlot) : { x: 0, y: 0 };
     }
-    _getSourceType() {
+
+    _getSourceType(): string {
         const node = this.canvas.nodes.get(this.sourceNode);
         return node ? node.getOutputType(this.sourceSlot) : '*';
     }
-    update() {
+
+    update(): void {
         const layer = this.line.getLayer();
-        if (layer)
-            layer.batchDraw();
+        if (layer) layer.batchDraw();
     }
+
     /**
      * Toggle animated dash pattern on this connection (used during execution).
      */
-    setAnimated(animated) {
+    setAnimated(animated: boolean): void {
         if (animated) {
             this.line.dash([8, 4]);
             this.line.strokeWidth(2.5);
@@ -65,8 +84,7 @@ class SFConnection {
                 }, this.line.getLayer());
             }
             this._dashAnim.start();
-        }
-        else {
+        } else {
             if (this._dashAnim) {
                 this._dashAnim.stop();
                 this._dashAnim = null;
@@ -77,23 +95,22 @@ class SFConnection {
             this.update();
         }
     }
-    _watchDrag() {
+
+    _watchDrag(): void {
         const srcNode = this.canvas.nodes.get(this.sourceNode);
         const tgtNode = this.canvas.nodes.get(this.targetNode);
-        if (srcNode)
-            srcNode.group.on('dragmove.conn' + this.sourceNode + this.targetNode, () => this.update());
-        if (tgtNode)
-            tgtNode.group.on('dragmove.conn' + this.sourceNode + this.targetNode, () => this.update());
+        if (srcNode) srcNode.group.on('dragmove.conn' + this.sourceNode + this.targetNode, () => this.update());
+        if (tgtNode) tgtNode.group.on('dragmove.conn' + this.sourceNode + this.targetNode, () => this.update());
     }
-    destroy() {
+
+    destroy(): void {
         // Clean up drag listeners
         const srcNode = this.canvas.nodes.get(this.sourceNode);
         const tgtNode = this.canvas.nodes.get(this.targetNode);
         const ns = '.conn' + this.sourceNode + this.targetNode;
-        if (srcNode)
-            srcNode.group.off('dragmove' + ns);
-        if (tgtNode)
-            tgtNode.group.off('dragmove' + ns);
+        if (srcNode) srcNode.group.off('dragmove' + ns);
+        if (tgtNode) tgtNode.group.off('dragmove' + ns);
+
         if (this._dashAnim) {
             this._dashAnim.stop();
             this._dashAnim = null;
@@ -101,4 +118,3 @@ class SFConnection {
         this.line.destroy();
     }
 }
-//# sourceMappingURL=connection.js.map

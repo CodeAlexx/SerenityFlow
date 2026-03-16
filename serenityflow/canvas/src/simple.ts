@@ -1,13 +1,43 @@
-"use strict";
 /**
  * Simple Mode — SerenityFlow
  * Streamlined single-screen UI for average users.
  * Uses WorkflowBuilder for generation (same backend as Generate tab).
  */
-var SimpleMode = (function () {
+
+var SimpleMode = (function() {
     'use strict';
+
     var initialized = false;
-    var state = {
+
+    interface SimpleRecentItem {
+        src: string;
+        isVideo: boolean;
+    }
+
+    interface SimpleState {
+        model: string | null;
+        prompt: string;
+        negPrompt: string;
+        width: number;
+        height: number;
+        steps: number;
+        cfg: number;
+        guidance: number;
+        scheduler: string;
+        seed: number;
+        generating: boolean;
+        currentImage: string | null;
+        currentIsVideo: boolean;
+        recent: SimpleRecentItem[];
+        arch: string;
+        frames: number;
+        fps: number;
+        activeStyle: string;
+        quality: string;
+        duration: string;
+    }
+
+    var state: SimpleState = {
         model: null,
         prompt: '',
         negPrompt: '',
@@ -29,7 +59,38 @@ var SimpleMode = (function () {
         quality: 'balanced',
         duration: 'medium'
     };
-    var els = {
+
+    interface SimpleEls {
+        model: HTMLSelectElement | null;
+        prompt: HTMLTextAreaElement | null;
+        negPrompt: HTMLTextAreaElement | null;
+        advToggle: HTMLElement | null;
+        advBody: HTMLElement | null;
+        aspectGrid: HTMLElement | null;
+        qualityRow: HTMLElement | null;
+        durationSection: HTMLElement | null;
+        durationRow: HTMLElement | null;
+        genBtn: HTMLButtonElement | null;
+        recentGrid: HTMLElement | null;
+        empty: HTMLElement | null;
+        previewImg: (HTMLImageElement & { _previewUrl?: string | null }) | null;
+        previewVideo: HTMLVideoElement | null;
+        actionBar: HTMLElement | null;
+        download: HTMLElement | null;
+        variations: HTMLElement | null;
+        toAdvanced: HTMLElement | null;
+        clearPreview: HTMLElement | null;
+        progress: HTMLElement | null;
+        progressBar: HTMLElement | null;
+        errorBanner: HTMLElement | null;
+        enhanceBtn: HTMLButtonElement | null;
+        enhanceResult: HTMLElement | null;
+        styleScroll: HTMLElement | null;
+        archBadge: HTMLElement | null;
+        showIntroLink: HTMLElement | null;
+    }
+
+    var els: SimpleEls = {
         model: null,
         prompt: null,
         negPrompt: null,
@@ -58,7 +119,9 @@ var SimpleMode = (function () {
         archBadge: null,
         showIntroLink: null
     };
+
     // ── Presets ──
+
     var imageStylePresets = [
         { id: 'none', label: 'None', suffix: '', bg: 'var(--shell-bg-panel)' },
         { id: 'photo', label: 'Photo', suffix: ', photorealistic, 8k, sharp focus, natural lighting', bg: 'linear-gradient(135deg, #1a1a2e, #2d4a6e)' },
@@ -73,6 +136,7 @@ var SimpleMode = (function () {
         { id: 'neon', label: 'Neon Noir', suffix: ', neon noir, cyberpunk, rain-slicked streets, neon lights, dark atmosphere', bg: 'linear-gradient(135deg, #0f0c29, #302b63)' },
         { id: 'minimal', label: 'Minimal', suffix: ', minimalist, clean lines, negative space, simple composition, elegant', bg: 'linear-gradient(135deg, #e8e8e8, #c0c0c0)' }
     ];
+
     var videoStylePresets = [
         { id: 'none', label: 'None', suffix: '', bg: 'var(--shell-bg-panel)' },
         { id: 'cinematic', label: 'Cinematic', suffix: ', cinematic movement, smooth motion, film quality', bg: 'linear-gradient(135deg, #0d0d0d, #1a0a00)' },
@@ -80,78 +144,90 @@ var SimpleMode = (function () {
         { id: 'dynamic', label: 'Dynamic', suffix: ', dynamic motion, energy, fast movement, action', bg: 'linear-gradient(135deg, #c0392b, #e74c3c)' },
         { id: 'slow', label: 'Slow-Mo', suffix: ', slow motion, graceful, fluid movement, detail', bg: 'linear-gradient(135deg, #2c3e50, #3498db)' }
     ];
-    var qualityPresets = {
-        draft: { steps: 8 },
+
+    var qualityPresets: Record<string, { steps: number }> = {
+        draft:    { steps: 8 },
         balanced: { steps: 20 },
-        quality: { steps: 40 }
+        quality:  { steps: 40 }
     };
-    var durationPresets = {
-        short: { frames: 49, fps: 24 },
-        medium: { frames: 97, fps: 24 },
-        long: { frames: 193, fps: 24 }
+
+    var durationPresets: Record<string, { frames: number; fps: number }> = {
+        short:  { frames: 49,  fps: 24 },
+        medium: { frames: 97,  fps: 24 },
+        long:   { frames: 193, fps: 24 }
     };
+
     var imageAspects = [
-        { label: '1:1', w: 1024, h: 1024, vw: 16, vh: 16 },
-        { label: '4:3', w: 1152, h: 896, vw: 18, vh: 14 },
-        { label: '16:9', w: 1344, h: 768, vw: 20, vh: 11 },
-        { label: '3:4', w: 896, h: 1152, vw: 14, vh: 18 },
-        { label: '9:16', w: 768, h: 1344, vw: 11, vh: 20 }
+        { label: '1:1',  w: 1024, h: 1024, vw: 16, vh: 16 },
+        { label: '4:3',  w: 1152, h: 896,  vw: 18, vh: 14 },
+        { label: '16:9', w: 1344, h: 768,  vw: 20, vh: 11 },
+        { label: '3:4',  w: 896,  h: 1152, vw: 14, vh: 18 },
+        { label: '9:16', w: 768,  h: 1344, vw: 11, vh: 20 }
     ];
+
     var videoAspects = [
-        { label: '1:1', w: 512, h: 512, vw: 16, vh: 16 },
-        { label: '4:3', w: 768, h: 576, vw: 18, vh: 14 },
+        { label: '1:1',  w: 512, h: 512, vw: 16, vh: 16 },
+        { label: '4:3',  w: 768, h: 576, vw: 18, vh: 14 },
         { label: '16:9', w: 768, h: 432, vw: 20, vh: 11 },
-        { label: '3:4', w: 576, h: 768, vw: 14, vh: 18 },
+        { label: '3:4',  w: 576, h: 768, vw: 14, vh: 18 },
         { label: '9:16', w: 432, h: 768, vw: 11, vh: 20 }
     ];
-    function isVideoModel() {
+
+    function isVideoModel(): boolean {
         return ModelUtils.isVideoModel(state.model);
     }
+
     function getActiveAspects() {
         return isVideoModel() ? videoAspects : imageAspects;
     }
+
     function getActiveStylePresets() {
         return isVideoModel() ? videoStylePresets : imageStylePresets;
     }
+
     // ── Quality Config (arch-aware) ──
-    function getQualityConfig(quality) {
+
+    function getQualityConfig(quality: string) {
         var base = qualityPresets[quality] || qualityPresets.balanced;
-        var cfg, scheduler;
+        var cfg: number, scheduler: string;
         if (state.arch === 'flux') {
             cfg = 1.0;
             scheduler = 'euler';
-        }
-        else if (quality === 'draft') {
+        } else if (quality === 'draft') {
             cfg = 5.0;
             scheduler = 'euler';
-        }
-        else if (quality === 'quality') {
+        } else if (quality === 'quality') {
             cfg = 7.5;
             scheduler = 'dpmpp_2m';
-        }
-        else {
+        } else {
             cfg = 7.0;
             scheduler = 'euler';
         }
         return { steps: base.steps, cfg: cfg, scheduler: scheduler };
     }
+
     // ── Build DOM ──
+
     function buildUI() {
         var container = document.getElementById('simple-mode-container');
-        if (!container)
-            return;
+        if (!container) return;
         container.innerHTML = '';
+
         var layout = document.createElement('div');
         layout.className = 'simple-layout';
+
         var left = document.createElement('div');
         left.className = 'simple-left';
         left.innerHTML = buildLeftHTML();
         layout.appendChild(left);
+
         var center = document.createElement('div');
         center.className = 'simple-center';
         center.innerHTML = buildCenterHTML();
         layout.appendChild(center);
+
         container.appendChild(layout);
+
         // Onboarding overlay (appended to container, not layout)
         var onboarding = document.createElement('div');
         onboarding.id = 'simple-onboarding';
@@ -162,125 +238,135 @@ var SimpleMode = (function () {
                 '<div class="onboarding-title">Welcome to SerenityFlow</div>' +
                 '<div class="onboarding-subtitle">Create images and videos with AI in just a few clicks.</div>' +
                 '<div class="onboarding-steps">' +
-                '<div class="onboarding-step"><span class="onboarding-num">1</span> Pick a model from the sidebar</div>' +
-                '<div class="onboarding-step"><span class="onboarding-num">2</span> Describe what you want to create</div>' +
-                '<div class="onboarding-step"><span class="onboarding-num">3</span> Choose a style and hit Create</div>' +
+                    '<div class="onboarding-step"><span class="onboarding-num">1</span> Pick a model from the sidebar</div>' +
+                    '<div class="onboarding-step"><span class="onboarding-num">2</span> Describe what you want to create</div>' +
+                    '<div class="onboarding-step"><span class="onboarding-num">3</span> Choose a style and hit Create</div>' +
                 '</div>' +
                 '<div class="onboarding-note">You can switch to Advanced mode anytime for full control.</div>' +
                 '<button id="onboarding-start-btn" class="onboarding-start-btn">Get Started</button>' +
-                '</div>';
+            '</div>';
         container.appendChild(onboarding);
+
         cacheElements();
     }
+
     function buildLeftHTML() {
         return '' +
-            // Model
-            '<div class="simple-section">' +
+        // Model
+        '<div class="simple-section">' +
             '<label class="simple-label">Model</label>' +
             '<select id="simple-model" class="simple-select"><option disabled selected>Loading models...</option></select>' +
             '<div id="simple-arch-badge" class="simple-arch-badge" data-arch="sd15">SD1.5 \u00b7 Image</div>' +
-            '</div>' +
-            // Prompt
-            '<div class="simple-section">' +
+        '</div>' +
+
+        // Prompt
+        '<div class="simple-section">' +
             '<label class="simple-label">Prompt</label>' +
             '<textarea id="simple-prompt" class="simple-prompt" rows="5" placeholder="Describe what you want to create..."></textarea>' +
             '<button id="simple-enhance-btn" class="simple-enhance-btn">+ Enhance prompt</button>' +
             '<div id="simple-enhance-result" class="simple-enhance-result" style="display:none"></div>' +
             '<div id="simple-adv-toggle" class="simple-disclosure">' +
-            '<span class="simple-disclosure-arrow">&#9654;</span> Advanced prompt' +
+                '<span class="simple-disclosure-arrow">&#9654;</span> Advanced prompt' +
             '</div>' +
             '<div id="simple-adv-body" class="simple-disclosure-body">' +
-            '<textarea id="simple-neg-prompt" class="simple-neg-prompt" rows="2" placeholder="What to avoid..."></textarea>' +
+                '<textarea id="simple-neg-prompt" class="simple-neg-prompt" rows="2" placeholder="What to avoid..."></textarea>' +
             '</div>' +
-            '</div>' +
-            // Style presets (cards)
-            '<div class="simple-section">' +
+        '</div>' +
+
+        // Style presets (cards)
+        '<div class="simple-section">' +
             '<label class="simple-label">Style</label>' +
             '<div id="simple-style-scroll" class="simple-style-scroll"></div>' +
             '<div id="simple-prompt-preview" class="simple-prompt-preview" style="display:none">' +
-            '<span class="simple-prompt-preview-label">Full prompt:</span>' +
-            '<span id="simple-prompt-preview-text" class="simple-prompt-preview-text"></span>' +
+                '<span class="simple-prompt-preview-label">Full prompt:</span>' +
+                '<span id="simple-prompt-preview-text" class="simple-prompt-preview-text"></span>' +
             '</div>' +
-            '</div>' +
-            // Quick Settings
-            '<div class="simple-section simple-quick">' +
+        '</div>' +
+
+        // Quick Settings
+        '<div class="simple-section simple-quick">' +
             '<span class="simple-quick-label">Aspect Ratio</span>' +
             '<div id="simple-aspects" class="simple-aspect-grid"></div>' +
             '<span class="simple-quick-label">Quality</span>' +
             '<div id="simple-quality" class="simple-quality-row">' +
-            '<button class="simple-quality-btn" data-quality="draft">Draft</button>' +
-            '<button class="simple-quality-btn active" data-quality="balanced">Balanced</button>' +
-            '<button class="simple-quality-btn" data-quality="quality">Quality</button>' +
+                '<button class="simple-quality-btn" data-quality="draft">Draft</button>' +
+                '<button class="simple-quality-btn active" data-quality="balanced">Balanced</button>' +
+                '<button class="simple-quality-btn" data-quality="quality">Quality</button>' +
             '</div>' +
             '<div id="simple-duration-section" class="simple-duration-section">' +
-            '<span class="simple-quick-label">Duration</span>' +
-            '<div id="simple-duration" class="simple-duration-row">' +
-            '<button class="simple-duration-btn" data-duration="short">Short (2s)</button>' +
-            '<button class="simple-duration-btn active" data-duration="medium">Medium (4s)</button>' +
-            '<button class="simple-duration-btn" data-duration="long">Long (8s)</button>' +
+                '<span class="simple-quick-label">Duration</span>' +
+                '<div id="simple-duration" class="simple-duration-row">' +
+                    '<button class="simple-duration-btn" data-duration="short">Short (2s)</button>' +
+                    '<button class="simple-duration-btn active" data-duration="medium">Medium (4s)</button>' +
+                    '<button class="simple-duration-btn" data-duration="long">Long (8s)</button>' +
+                '</div>' +
             '</div>' +
-            '</div>' +
-            '</div>' +
-            // Generate button
-            '<div class="simple-section">' +
+        '</div>' +
+
+        // Generate button
+        '<div class="simple-section">' +
             '<button id="simple-gen-btn" class="simple-gen-btn">\u2726 Create Image</button>' +
-            '</div>' +
-            // Recent
-            '<div class="simple-recent-section">' +
+        '</div>' +
+
+        // Recent
+        '<div class="simple-recent-section">' +
             '<div class="simple-recent-label">Recent</div>' +
             '<div id="simple-recent-grid" class="simple-recent-grid"></div>' +
-            '</div>' +
-            // Show intro link
-            '<div class="simple-show-intro">' +
+        '</div>' +
+
+        // Show intro link
+        '<div class="simple-show-intro">' +
             '<a id="simple-show-intro-link">Show intro</a>' +
-            '</div>';
+        '</div>';
     }
+
     function buildCenterHTML() {
         return '' +
             '<div id="simple-empty" class="simple-empty">' +
-            '<div class="simple-empty-icon">\u2726</div>' +
-            '<div class="simple-empty-title">Ready to create</div>' +
-            '<div class="simple-empty-subtitle">Pick a model, describe your idea, and hit Create</div>' +
-            '<div class="simple-empty-examples">' +
-            '<span class="simple-example-prompt">A fox in a rainy forest at night</span>' +
-            '<span class="simple-example-prompt">Portrait of an astronaut, oil painting style</span>' +
-            '<span class="simple-example-prompt">Neon city street at midnight, cinematic</span>' +
-            '</div>' +
+                '<div class="simple-empty-icon">\u2726</div>' +
+                '<div class="simple-empty-title">Ready to create</div>' +
+                '<div class="simple-empty-subtitle">Pick a model, describe your idea, and hit Create</div>' +
+                '<div class="simple-empty-examples">' +
+                    '<span class="simple-example-prompt">A fox in a rainy forest at night</span>' +
+                    '<span class="simple-example-prompt">Portrait of an astronaut, oil painting style</span>' +
+                    '<span class="simple-example-prompt">Neon city street at midnight, cinematic</span>' +
+                '</div>' +
             '</div>' +
             '<img id="simple-preview-img" class="simple-preview-img" style="display:none" alt="Generated">' +
             '<video id="simple-preview-video" class="simple-preview-video" style="display:none" autoplay loop muted playsinline controls></video>' +
             '<div id="simple-action-bar" class="simple-action-bar" style="display:none">' +
-            '<button class="simple-action-btn" id="simple-download" title="Download">' +
-            '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
-            '</button>' +
-            '<button class="simple-action-btn" id="simple-variations" title="Variations (new seed)">' +
-            '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/></svg>' +
-            '</button>' +
-            '<button class="simple-action-btn" id="simple-to-advanced" title="Send to Advanced">' +
-            '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>' +
-            '</button>' +
-            '<button class="simple-action-btn" id="simple-clear-preview" title="Clear">' +
-            '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>' +
-            '</button>' +
+                '<button class="simple-action-btn" id="simple-download" title="Download">' +
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
+                '</button>' +
+                '<button class="simple-action-btn" id="simple-variations" title="Variations (new seed)">' +
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/></svg>' +
+                '</button>' +
+                '<button class="simple-action-btn" id="simple-to-advanced" title="Send to Advanced">' +
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>' +
+                '</button>' +
+                '<button class="simple-action-btn" id="simple-clear-preview" title="Clear">' +
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>' +
+                '</button>' +
             '</div>' +
             '<div id="simple-progress" class="simple-progress"><div id="simple-progress-bar" class="simple-progress-bar"></div></div>' +
             '<div id="simple-error-banner" class="simple-error-banner"></div>';
     }
+
     function cacheElements() {
-        els.model = document.getElementById('simple-model');
-        els.prompt = document.getElementById('simple-prompt');
-        els.negPrompt = document.getElementById('simple-neg-prompt');
+        els.model = document.getElementById('simple-model') as HTMLSelectElement;
+        els.prompt = document.getElementById('simple-prompt') as HTMLTextAreaElement;
+        els.negPrompt = document.getElementById('simple-neg-prompt') as HTMLTextAreaElement;
         els.advToggle = document.getElementById('simple-adv-toggle');
         els.advBody = document.getElementById('simple-adv-body');
         els.aspectGrid = document.getElementById('simple-aspects');
         els.qualityRow = document.getElementById('simple-quality');
         els.durationSection = document.getElementById('simple-duration-section');
         els.durationRow = document.getElementById('simple-duration');
-        els.genBtn = document.getElementById('simple-gen-btn');
+        els.genBtn = document.getElementById('simple-gen-btn') as HTMLButtonElement;
         els.recentGrid = document.getElementById('simple-recent-grid');
         els.empty = document.getElementById('simple-empty');
-        els.previewImg = document.getElementById('simple-preview-img');
-        els.previewVideo = document.getElementById('simple-preview-video');
+        els.previewImg = document.getElementById('simple-preview-img') as HTMLImageElement & { _previewUrl?: string | null };
+        els.previewVideo = document.getElementById('simple-preview-video') as HTMLVideoElement;
         els.actionBar = document.getElementById('simple-action-bar');
         els.download = document.getElementById('simple-download');
         els.variations = document.getElementById('simple-variations');
@@ -289,51 +375,54 @@ var SimpleMode = (function () {
         els.progress = document.getElementById('simple-progress');
         els.progressBar = document.getElementById('simple-progress-bar');
         els.errorBanner = document.getElementById('simple-error-banner');
-        els.enhanceBtn = document.getElementById('simple-enhance-btn');
+        els.enhanceBtn = document.getElementById('simple-enhance-btn') as HTMLButtonElement;
         els.enhanceResult = document.getElementById('simple-enhance-result');
         els.styleScroll = document.getElementById('simple-style-scroll');
         els.archBadge = document.getElementById('simple-arch-badge');
         els.showIntroLink = document.getElementById('simple-show-intro-link');
     }
+
     // ── Style Presets (visual cards) ──
-    function renderStylePresets(isVideo) {
+
+    function renderStylePresets(isVideo: boolean) {
         var presets = isVideo ? videoStylePresets : imageStylePresets;
         var scroll = document.getElementById('simple-style-scroll');
-        if (!scroll)
-            return;
+        if (!scroll) return;
         scroll.innerHTML = '';
+
         // Restore saved preset or default to none
         var savedPreset = localStorage.getItem('sf-simple-preset') || 'none';
-        if (!presets.find(function (p) { return p.id === savedPreset; }))
-            savedPreset = 'none';
+        if (!presets.find(function(p) { return p.id === savedPreset; })) savedPreset = 'none';
         state.activeStyle = savedPreset;
-        presets.forEach(function (p) {
+
+        presets.forEach(function(p) {
             var card = document.createElement('div');
             card.className = 'simple-style-card' + (p.id === savedPreset ? ' active' : '');
             card.dataset.style = p.id;
             card.innerHTML =
                 '<div class="simple-style-swatch" style="background:' + p.bg + '"></div>' +
-                    '<span class="simple-style-card-label">' + p.label + '</span>';
-            scroll.appendChild(card);
+                '<span class="simple-style-card-label">' + p.label + '</span>';
+            scroll!.appendChild(card);
         });
-        scroll.onclick = function (e) {
-            var card = e.target.closest('.simple-style-card');
-            if (!card)
-                return;
+
+        scroll!.onclick = function(e: MouseEvent) {
+            var card = (e.target as HTMLElement).closest('.simple-style-card') as HTMLElement | null;
+            if (!card) return;
             state.activeStyle = card.dataset.style || 'none';
             localStorage.setItem('sf-simple-preset', state.activeStyle);
-            scroll.querySelectorAll('.simple-style-card').forEach(function (c) {
-                c.classList.toggle('active', c.dataset.style === state.activeStyle);
+            scroll!.querySelectorAll('.simple-style-card').forEach(function(c) {
+                (c as HTMLElement).classList.toggle('active', (c as HTMLElement).dataset.style === state.activeStyle);
             });
             updatePromptPreview();
         };
     }
+
     // ── Prompt Preview ──
+
     function updatePromptPreview() {
         var previewEl = document.getElementById('simple-prompt-preview');
         var textEl = document.getElementById('simple-prompt-preview-text');
-        if (!previewEl || !textEl)
-            return;
+        if (!previewEl || !textEl) return;
         if (state.activeStyle === 'none' || !state.prompt.trim()) {
             previewEl.style.display = 'none';
             return;
@@ -341,13 +430,14 @@ var SimpleMode = (function () {
         previewEl.style.display = 'block';
         textEl.textContent = getEffectivePrompt();
     }
+
     // ── Aspect Ratio Buttons ──
+
     function buildAspectButtons() {
         var aspects = getActiveAspects();
-        if (!els.aspectGrid)
-            return;
+        if (!els.aspectGrid) return;
         els.aspectGrid.innerHTML = '';
-        aspects.forEach(function (a) {
+        aspects.forEach(function(a) {
             var btn = document.createElement('button');
             var isActive = a.w === state.width && a.h === state.height;
             btn.className = 'simple-aspect-btn' + (isActive ? ' active' : '');
@@ -357,26 +447,30 @@ var SimpleMode = (function () {
             btn.innerHTML =
                 '<svg width="' + (sw + 4) + '" height="' + (sh + 4) + '" viewBox="0 0 ' + (sw + 4) + ' ' + (sh + 4) + '" fill="none" stroke-width="1.5">' +
                     '<rect x="1" y="1" width="' + sw + '" height="' + sh + '" rx="2"/>' +
-                    '</svg>' +
-                    '<span class="simple-aspect-btn-label">' + a.label + '</span>';
-            btn.addEventListener('click', function () {
+                '</svg>' +
+                '<span class="simple-aspect-btn-label">' + a.label + '</span>';
+            btn.addEventListener('click', function() {
                 state.width = a.w;
                 state.height = a.h;
                 if (els.aspectGrid) {
-                    els.aspectGrid.querySelectorAll('.simple-aspect-btn').forEach(function (b) {
+                    els.aspectGrid.querySelectorAll('.simple-aspect-btn').forEach(function(b) {
                         b.classList.remove('active');
                     });
                 }
                 btn.classList.add('active');
             });
-            els.aspectGrid.appendChild(btn);
+            els.aspectGrid!.appendChild(btn);
         });
     }
+
     // ── Smart Defaults ──
-    function applySmartDefaults(arch) {
+
+    function applySmartDefaults(arch: string) {
         var isVideo = arch === 'ltxv' || arch === 'wan';
+
         // Set quality
         setQualityPreset('balanced');
+
         // Set aspect (16:9 for video, 1:1 for image)
         var aspects = isVideo ? videoAspects : imageAspects;
         var defaultIdx = isVideo ? 2 : 0; // 16:9 for video, 1:1 for image
@@ -384,13 +478,15 @@ var SimpleMode = (function () {
             state.width = aspects[defaultIdx].w;
             state.height = aspects[defaultIdx].h;
         }
+
         // Duration
-        if (isVideo)
-            setDurationPreset('medium');
+        if (isVideo) setDurationPreset('medium');
+
         // Render style presets
         renderStylePresets(isVideo);
     }
-    function setQualityPreset(q) {
+
+    function setQualityPreset(q: string) {
         state.quality = q;
         var config = getQualityConfig(q);
         state.steps = config.steps;
@@ -398,219 +494,242 @@ var SimpleMode = (function () {
         state.scheduler = config.scheduler;
         var row = document.getElementById('simple-quality');
         if (row) {
-            row.querySelectorAll('.simple-quality-btn').forEach(function (b) {
-                b.classList.toggle('active', b.dataset.quality === q);
+            row.querySelectorAll('.simple-quality-btn').forEach(function(b) {
+                (b as HTMLElement).classList.toggle('active', (b as HTMLElement).dataset.quality === q);
             });
         }
     }
-    function setDurationPreset(d) {
+
+    function setDurationPreset(d: string) {
         state.duration = d;
         var dp = durationPresets[d];
         state.frames = dp.frames;
         state.fps = dp.fps;
         var row = document.getElementById('simple-duration');
         if (row) {
-            row.querySelectorAll('.simple-duration-btn').forEach(function (b) {
-                b.classList.toggle('active', b.dataset.duration === d);
+            row.querySelectorAll('.simple-duration-btn').forEach(function(b) {
+                (b as HTMLElement).classList.toggle('active', (b as HTMLElement).dataset.duration === d);
             });
         }
     }
+
     // ── Prompt Enhancer (local, no API) ──
+
     function enhancePrompt() {
         var original = state.prompt.trim();
-        if (!original)
-            return;
-        var enhanceBtn = document.getElementById('simple-enhance-btn');
+        if (!original) return;
+
+        var enhanceBtn = document.getElementById('simple-enhance-btn') as HTMLButtonElement | null;
         if (enhanceBtn) {
             enhanceBtn.textContent = 'Enhancing...';
             enhanceBtn.disabled = true;
         }
+
         // Try backend endpoint first, fall back to local
         fetch('/enhance_prompt', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ prompt: original, arch: state.arch })
         })
-            .then(function (resp) {
-            if (!resp.ok)
-                throw new Error('HTTP ' + resp.status);
+        .then(function(resp) {
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
             return resp.json();
         })
-            .then(function (data) {
+        .then(function(data: { enhanced?: string; source?: string }) {
             if (data.enhanced) {
                 showEnhancedResult(original, data.enhanced, data.source || 'backend');
             }
         })
-            .catch(function () {
+        .catch(function() {
             // Fallback to local enhancement
             var enhanced = localEnhance(original, state.arch);
             showEnhancedResult(original, enhanced, 'local');
         })
-            .finally(function () {
+        .finally(function() {
             if (enhanceBtn) {
                 enhanceBtn.textContent = '+ Enhance prompt';
                 enhanceBtn.disabled = false;
             }
         });
     }
-    function localEnhance(prompt, arch) {
-        var details = [];
+
+    function localEnhance(prompt: string, arch: string) {
+        var details: string[] = [];
         var lower = prompt.toLowerCase();
+
         // Add lighting if not mentioned
         if (lower.indexOf('light') === -1 && lower.indexOf('lit') === -1) {
             var lightOptions = ['soft natural lighting', 'golden hour lighting', 'dramatic side lighting', 'studio lighting with rim light', 'ambient diffused lighting'];
             details.push(lightOptions[Math.floor(Math.random() * lightOptions.length)]);
         }
+
         // Add composition if not mentioned
         if (lower.indexOf('composit') === -1 && lower.indexOf('angle') === -1 && lower.indexOf('shot') === -1) {
             var compOptions = ['carefully composed', 'rule of thirds composition', 'centered symmetrical composition', 'dynamic diagonal composition'];
             details.push(compOptions[Math.floor(Math.random() * compOptions.length)]);
         }
+
         // Add detail level
         if (lower.indexOf('detail') === -1 && lower.indexOf('quality') === -1) {
             details.push('highly detailed');
         }
+
         // Add mood/atmosphere if not mentioned
         if (lower.indexOf('mood') === -1 && lower.indexOf('atmosphere') === -1 && lower.indexOf('vibe') === -1) {
             var moodOptions = ['atmospheric', 'evocative atmosphere', 'rich atmosphere'];
             details.push(moodOptions[Math.floor(Math.random() * moodOptions.length)]);
         }
+
         // Add technical quality
         if (lower.indexOf('8k') === -1 && lower.indexOf('4k') === -1 && lower.indexOf('hd') === -1) {
             details.push('high resolution');
         }
+
         // Arch-specific additions
         if (arch === 'flux' || arch === 'sdxl') {
             details.push('masterful execution');
         }
+
         return prompt + ', ' + details.join(', ');
     }
-    function showEnhancedResult(original, enhanced, source) {
+
+    function showEnhancedResult(original: string, enhanced: string, source: string) {
         var container = document.getElementById('simple-enhance-result');
-        if (!container)
-            return;
+        if (!container) return;
         container.innerHTML =
             '<div class="enhance-original">' + escapeHtml(original) + '</div>' +
-                '<div class="enhance-arrow">\u2193 Enhanced</div>' +
-                '<div class="enhance-source">' + (source === 'llm' ? 'AI enhanced' : 'Auto-enhanced') + '</div>' +
-                '<div class="enhance-new">' + escapeHtml(enhanced) + '</div>' +
-                '<div class="enhance-actions">' +
+            '<div class="enhance-arrow">\u2193 Enhanced</div>' +
+            '<div class="enhance-source">' + (source === 'llm' ? 'AI enhanced' : 'Auto-enhanced') + '</div>' +
+            '<div class="enhance-new">' + escapeHtml(enhanced) + '</div>' +
+            '<div class="enhance-actions">' +
                 '<button id="enhance-accept" class="enhance-accept-btn">Use this \u25b6</button>' +
                 '<button id="enhance-dismiss" class="enhance-dismiss-btn">Keep original \u2715</button>' +
-                '</div>';
+            '</div>';
         container.style.display = 'block';
-        document.getElementById('enhance-accept').onclick = function () {
+
+        (document.getElementById('enhance-accept') as HTMLElement).onclick = function() {
             state.prompt = enhanced;
             if (els.prompt) {
                 els.prompt.value = enhanced;
                 els.prompt.style.height = 'auto';
                 els.prompt.style.height = Math.max(100, els.prompt.scrollHeight) + 'px';
             }
-            container.style.display = 'none';
+            container!.style.display = 'none';
             updatePromptPreview();
         };
-        document.getElementById('enhance-dismiss').onclick = function () {
-            container.style.display = 'none';
+        (document.getElementById('enhance-dismiss') as HTMLElement).onclick = function() {
+            container!.style.display = 'none';
         };
     }
-    function escapeHtml(str) {
+
+    function escapeHtml(str: string) {
         var div = document.createElement('div');
         div.textContent = str;
         return div.innerHTML;
     }
+
     // ── Onboarding ──
+
     function showOnboarding() {
         var overlay = document.getElementById('simple-onboarding');
         if (overlay) {
             overlay.style.display = 'flex';
             overlay.style.opacity = '0';
-            requestAnimationFrame(function () {
-                overlay.style.opacity = '1';
+            requestAnimationFrame(function() {
+                overlay!.style.opacity = '1';
             });
         }
     }
+
     function dismissOnboarding() {
         var overlay = document.getElementById('simple-onboarding');
         if (overlay) {
             overlay.style.opacity = '0';
-            setTimeout(function () { overlay.style.display = 'none'; }, 300);
+            setTimeout(function() { overlay!.style.display = 'none'; }, 300);
         }
         localStorage.setItem('sf-has-visited', '1');
     }
+
     // ── Event Binding ──
+
     function bindEvents() {
         // Prompt auto-grow + preview update
         if (els.prompt) {
-            els.prompt.addEventListener('input', function () {
+            els.prompt.addEventListener('input', function(this: HTMLTextAreaElement) {
                 state.prompt = this.value;
                 this.style.height = 'auto';
                 this.style.height = Math.max(100, this.scrollHeight) + 'px';
                 updatePromptPreview();
             });
         }
+
         if (els.negPrompt) {
-            els.negPrompt.addEventListener('input', function () {
+            els.negPrompt.addEventListener('input', function(this: HTMLTextAreaElement) {
                 state.negPrompt = this.value;
             });
         }
+
         // Advanced prompt disclosure
         if (els.advToggle) {
-            els.advToggle.addEventListener('click', function () {
+            els.advToggle.addEventListener('click', function(this: HTMLElement) {
                 this.classList.toggle('open');
-                if (els.advBody)
-                    els.advBody.classList.toggle('open');
+                if (els.advBody) els.advBody.classList.toggle('open');
             });
         }
+
         // Quality presets (with arch-aware config)
         if (els.qualityRow) {
-            els.qualityRow.addEventListener('click', function (e) {
-                var btn = e.target.closest('.simple-quality-btn');
-                if (!btn)
-                    return;
+            els.qualityRow.addEventListener('click', function(e: MouseEvent) {
+                var btn = (e.target as HTMLElement).closest('.simple-quality-btn') as HTMLElement | null;
+                if (!btn) return;
                 setQualityPreset(btn.dataset.quality || 'balanced');
             });
         }
+
         // Duration presets
         if (els.durationRow) {
-            els.durationRow.addEventListener('click', function (e) {
-                var btn = e.target.closest('.simple-duration-btn');
-                if (!btn)
-                    return;
+            els.durationRow.addEventListener('click', function(e: MouseEvent) {
+                var btn = (e.target as HTMLElement).closest('.simple-duration-btn') as HTMLElement | null;
+                if (!btn) return;
                 setDurationPreset(btn.dataset.duration || 'medium');
             });
         }
+
         // Model change
         if (els.model) {
-            els.model.addEventListener('change', function () {
+            els.model.addEventListener('change', function(this: HTMLSelectElement) {
                 state.model = this.value;
                 var arch = ModelUtils.detectArchFromFilename(this.value);
                 updateUIForArch(arch);
                 applySmartDefaults(arch);
                 // Update topbar model badge
                 var badge = document.querySelector('.model-badge');
-                if (badge)
-                    badge.textContent = this.value;
+                if (badge) badge.textContent = this.value;
             });
         }
+
         // Generate
         if (els.genBtn) {
-            els.genBtn.addEventListener('click', function () {
+            els.genBtn.addEventListener('click', function() {
                 generate();
             });
         }
+
         // Enhance prompt
         if (els.enhanceBtn) {
-            els.enhanceBtn.addEventListener('click', function () {
+            els.enhanceBtn.addEventListener('click', function() {
                 enhancePrompt();
             });
         }
+
         // Show intro link
         if (els.showIntroLink) {
-            els.showIntroLink.addEventListener('click', function (e) {
+            els.showIntroLink.addEventListener('click', function(e: MouseEvent) {
                 e.preventDefault();
                 showOnboarding();
             });
         }
+
         // Onboarding dismiss
         var onboardingStartBtn = document.getElementById('onboarding-start-btn');
         if (onboardingStartBtn) {
@@ -618,16 +737,15 @@ var SimpleMode = (function () {
         }
         var onboardingBackdrop = document.getElementById('simple-onboarding');
         if (onboardingBackdrop) {
-            onboardingBackdrop.addEventListener('click', function (e) {
-                if (e.target === onboardingBackdrop)
-                    dismissOnboarding();
+            onboardingBackdrop.addEventListener('click', function(e: MouseEvent) {
+                if (e.target === onboardingBackdrop) dismissOnboarding();
             });
         }
+
         // Action bar
         if (els.download) {
-            els.download.addEventListener('click', function () {
-                if (!state.currentImage)
-                    return;
+            els.download.addEventListener('click', function() {
+                if (!state.currentImage) return;
                 var a = document.createElement('a');
                 a.href = state.currentImage;
                 var ext = state.currentIsVideo ? '.mp4' : '.png';
@@ -635,18 +753,18 @@ var SimpleMode = (function () {
                 a.click();
             });
         }
+
         if (els.variations) {
-            els.variations.addEventListener('click', function () {
-                if (state.generating || !state.prompt.trim())
-                    return;
+            els.variations.addEventListener('click', function() {
+                if (state.generating || !state.prompt.trim()) return;
                 state.seed = -1; // force new random seed
                 generate();
             });
         }
+
         if (els.toAdvanced) {
-            els.toAdvanced.addEventListener('click', function () {
-                if (!state.currentImage)
-                    return;
+            els.toAdvanced.addEventListener('click', function() {
+                if (!state.currentImage) return;
                 // Store data for Canvas tab
                 localStorage.setItem('sf-send-to-canvas', JSON.stringify({
                     src: state.currentImage,
@@ -660,14 +778,16 @@ var SimpleMode = (function () {
                 }
             });
         }
+
         if (els.clearPreview) {
-            els.clearPreview.addEventListener('click', function () {
+            els.clearPreview.addEventListener('click', function() {
                 clearPreview();
             });
         }
+
         // Example prompts
-        document.querySelectorAll('.simple-example-prompt').forEach(function (el) {
-            el.addEventListener('click', function () {
+        document.querySelectorAll('.simple-example-prompt').forEach(function(el) {
+            el.addEventListener('click', function(this: HTMLElement) {
                 state.prompt = this.textContent || '';
                 if (els.prompt) {
                     els.prompt.value = this.textContent || '';
@@ -678,70 +798,74 @@ var SimpleMode = (function () {
             });
         });
     }
+
     // ── Model Loading ──
+
     function loadModels() {
         ModelUtils.fetchAllModels()
-            .then(function (models) {
-            if (!models.length)
-                throw new Error('empty');
-            if (!els.model)
-                return;
-            els.model.innerHTML = '';
-            models.forEach(function (m) {
-                var opt = document.createElement('option');
-                opt.value = m.name;
-                opt.textContent = m.name;
-                els.model.appendChild(opt);
+            .then(function(models: ModelUtilEntry[]) {
+                if (!models.length) throw new Error('empty');
+                if (!els.model) return;
+                els.model.innerHTML = '';
+                models.forEach(function(m: ModelUtilEntry) {
+                    var opt = document.createElement('option');
+                    opt.value = m.name;
+                    opt.textContent = m.name;
+                    els.model!.appendChild(opt);
+                });
+                state.model = models[0].name;
+                var arch = ModelUtils.detectArchFromFilename(models[0].name);
+                updateUIForArch(arch);
+                applySmartDefaults(arch);
+                // Update topbar badge
+                var badge = document.querySelector('.model-badge');
+                if (badge) badge.textContent = models[0].name;
+            })
+            .catch(function() {
+                if (els.model) els.model.innerHTML = '<option disabled selected>No models found</option>';
             });
-            state.model = models[0].name;
-            var arch = ModelUtils.detectArchFromFilename(models[0].name);
-            updateUIForArch(arch);
-            applySmartDefaults(arch);
-            // Update topbar badge
-            var badge = document.querySelector('.model-badge');
-            if (badge)
-                badge.textContent = models[0].name;
-        })
-            .catch(function () {
-            if (els.model)
-                els.model.innerHTML = '<option disabled selected>No models found</option>';
-        });
     }
+
     // ── Arch-aware UI ──
-    function updateUIForArch(arch) {
+
+    function updateUIForArch(arch: string) {
         state.arch = arch;
         var isFlux = arch === 'flux';
         var isVideo = arch === 'ltxv' || arch === 'wan';
+
         // Auto-set CFG/Guidance based on arch
         if (isFlux || isVideo) {
             state.cfg = 1.0;
             state.guidance = 3.5;
-        }
-        else {
+        } else {
             state.cfg = 7.0;
         }
+
         // Video duration section
-        if (els.durationSection)
-            els.durationSection.style.display = isVideo ? 'block' : 'none';
+        if (els.durationSection) els.durationSection.style.display = isVideo ? 'block' : 'none';
+
         // Button label
-        if (els.genBtn)
-            els.genBtn.textContent = isVideo ? '\u2726 Create Video' : '\u2726 Create Image';
+        if (els.genBtn) els.genBtn.textContent = isVideo ? '\u2726 Create Video' : '\u2726 Create Image';
+
         // Rebuild aspect buttons
         buildAspectButtons();
+
         // Select first aspect
         var aspects = getActiveAspects();
         if (aspects.length > 0) {
             state.width = aspects[0].w;
             state.height = aspects[0].h;
         }
+
         // Apply current duration preset for video
         if (isVideo) {
             var dp = durationPresets[state.duration];
             state.frames = dp.frames;
             state.fps = dp.fps;
         }
+
         // Update arch badge
-        var archNames = {
+        var archNames: Record<string, string> = {
             flux: 'FLUX \u00b7 Image', sdxl: 'SDXL \u00b7 Image', sd3: 'SD3 \u00b7 Image',
             sd15: 'SD1.5 \u00b7 Image', ltxv: 'LTX-V \u00b7 Video', wan: 'Wan \u00b7 Video',
             klein: 'Klein \u00b7 Image'
@@ -752,18 +876,21 @@ var SimpleMode = (function () {
             badge.dataset.arch = arch;
         }
     }
+
     // ── Workflow Builder ──
+
     function getEffectivePrompt() {
         var prompt = state.prompt;
         if (state.activeStyle && state.activeStyle !== 'none') {
             var presets = getActiveStylePresets();
-            var style = presets.find(function (s) { return s.id === state.activeStyle; });
+            var style = presets.find(function(s) { return s.id === state.activeStyle; });
             if (style && style.suffix) {
                 prompt += style.suffix;
             }
         }
         return prompt;
     }
+
     function buildWorkflow() {
         // Apply quality config before building
         var config = getQualityConfig(state.quality);
@@ -782,10 +909,11 @@ var SimpleMode = (function () {
             fps: state.fps
         });
     }
+
     // ── Generate ──
+
     function generate() {
-        if (state.generating)
-            return;
+        if (state.generating) return;
         if (!state.model) {
             showError('No model selected');
             return;
@@ -794,44 +922,43 @@ var SimpleMode = (function () {
             showError('Enter a prompt');
             return;
         }
+
         setGenerating(true);
         var workflow = buildWorkflow();
+
         SerenityAPI.postPrompt(workflow, {
             prompt: getEffectivePrompt(),
             model: state.model
         })
-            .catch(function (err) {
+        .catch(function(err: Error) {
             showError('Failed to queue: ' + err.message);
             setGenerating(false);
         });
     }
+
     // ── State Helpers ──
-    function setGenerating(v) {
+
+    function setGenerating(v: boolean) {
         state.generating = v;
         if (els.genBtn) {
             els.genBtn.disabled = v;
             if (v) {
                 els.genBtn.textContent = 'Creating...';
-            }
-            else {
+            } else {
                 els.genBtn.textContent = isVideoModel() ? '\u2726 Create Video' : '\u2726 Create Image';
             }
             els.genBtn.classList.toggle('generating', v);
         }
         if (v) {
-            if (els.progress)
-                els.progress.classList.add('active');
-            if (els.progressBar)
-                els.progressBar.style.width = '100%';
-        }
-        else {
-            if (els.progress)
-                els.progress.classList.remove('active');
-            if (els.progressBar)
-                els.progressBar.style.width = '0%';
+            if (els.progress) els.progress.classList.add('active');
+            if (els.progressBar) els.progressBar.style.width = '100%';
+        } else {
+            if (els.progress) els.progress.classList.remove('active');
+            if (els.progressBar) els.progressBar.style.width = '0%';
         }
     }
-    function displayImage(src) {
+
+    function displayImage(src: string) {
         state.currentImage = src;
         state.currentIsVideo = false;
         if (els.previewImg) {
@@ -842,25 +969,22 @@ var SimpleMode = (function () {
             els.previewVideo.style.display = 'none';
             els.previewVideo.pause();
         }
-        if (els.actionBar)
-            els.actionBar.style.display = 'flex';
-        if (els.empty)
-            els.empty.style.display = 'none';
+        if (els.actionBar) els.actionBar.style.display = 'flex';
+        if (els.empty) els.empty.style.display = 'none';
     }
-    function displayVideo(src) {
+
+    function displayVideo(src: string) {
         state.currentImage = src;
         state.currentIsVideo = true;
         if (els.previewVideo) {
             els.previewVideo.src = src;
             els.previewVideo.style.display = 'block';
         }
-        if (els.previewImg)
-            els.previewImg.style.display = 'none';
-        if (els.actionBar)
-            els.actionBar.style.display = 'flex';
-        if (els.empty)
-            els.empty.style.display = 'none';
+        if (els.previewImg) els.previewImg.style.display = 'none';
+        if (els.actionBar) els.actionBar.style.display = 'flex';
+        if (els.empty) els.empty.style.display = 'none';
     }
+
     function clearPreview() {
         state.currentImage = null;
         state.currentIsVideo = false;
@@ -873,109 +997,103 @@ var SimpleMode = (function () {
             els.previewVideo.pause();
             els.previewVideo.removeAttribute('src');
         }
-        if (els.actionBar)
-            els.actionBar.style.display = 'none';
-        if (els.empty)
-            els.empty.style.display = 'flex';
+        if (els.actionBar) els.actionBar.style.display = 'none';
+        if (els.empty) els.empty.style.display = 'flex';
         if (els.recentGrid) {
-            els.recentGrid.querySelectorAll('.simple-recent-thumb').forEach(function (t) {
+            els.recentGrid.querySelectorAll('.simple-recent-thumb').forEach(function(t) {
                 t.classList.remove('active');
             });
         }
     }
-    function addToRecent(src, isVideo) {
+
+    function addToRecent(src: string, isVideo: boolean) {
         state.recent.unshift({ src: src, isVideo: !!isVideo });
-        if (state.recent.length > 8)
-            state.recent.pop();
+        if (state.recent.length > 8) state.recent.pop();
         renderRecent();
         saveRecent();
     }
+
     function renderRecent() {
-        if (!els.recentGrid)
-            return;
+        if (!els.recentGrid) return;
         els.recentGrid.innerHTML = '';
-        state.recent.forEach(function (item, i) {
+        state.recent.forEach(function(item: SimpleRecentItem, i: number) {
             var thumb = document.createElement('div');
             thumb.className = 'simple-recent-thumb' + (i === 0 ? ' active' : '');
             if (item.isVideo) {
                 thumb.innerHTML =
                     '<video src="' + item.src + '" muted preload="metadata"></video>' +
-                        '<div class="simple-recent-play">\u25b6</div>';
-            }
-            else {
+                    '<div class="simple-recent-play">\u25b6</div>';
+            } else {
                 thumb.innerHTML = '<img src="' + item.src + '" alt="recent">';
             }
-            thumb.addEventListener('click', function () {
+            thumb.addEventListener('click', function() {
                 if (item.isVideo) {
                     displayVideo(item.src);
-                }
-                else {
+                } else {
                     displayImage(item.src);
                 }
                 if (els.recentGrid) {
-                    els.recentGrid.querySelectorAll('.simple-recent-thumb').forEach(function (t) {
+                    els.recentGrid.querySelectorAll('.simple-recent-thumb').forEach(function(t) {
                         t.classList.remove('active');
                     });
                 }
                 thumb.classList.add('active');
             });
-            els.recentGrid.appendChild(thumb);
+            els.recentGrid!.appendChild(thumb);
         });
     }
+
     function saveRecent() {
         try {
             localStorage.setItem('sf-simple-recent', JSON.stringify(state.recent));
-        }
-        catch (e) { /* quota */ }
+        } catch(e) { /* quota */ }
     }
+
     function restoreRecent() {
         try {
-            var saved = JSON.parse(localStorage.getItem('sf-simple-recent'));
+            var saved = JSON.parse(localStorage.getItem('sf-simple-recent') as string);
             if (saved && Array.isArray(saved)) {
                 state.recent = saved.slice(0, 8);
                 renderRecent();
             }
-        }
-        catch (e) { /* ignore */ }
+        } catch(e) { /* ignore */ }
     }
+
     // ── Error Display ──
-    function showError(msg) {
-        if (!els.errorBanner)
-            return;
+
+    function showError(msg: string) {
+        if (!els.errorBanner) return;
         els.errorBanner.textContent = msg;
         els.errorBanner.classList.add('visible');
-        setTimeout(function () {
-            if (els.errorBanner)
-                els.errorBanner.classList.remove('visible');
+        setTimeout(function() {
+            if (els.errorBanner) els.errorBanner.classList.remove('visible');
         }, 5000);
     }
+
     // ── WebSocket ──
+
     function connectWS() {
-        SerenityWS.on('progress', function (data) {
-            if (!data || !state.generating)
-                return;
+        SerenityWS.on('progress', function(data: { value: number; max: number; node?: string }) {
+            if (!data || !state.generating) return;
             var pct = (data.value / data.max * 100).toFixed(0);
-            if (els.progressBar)
-                els.progressBar.style.width = pct + '%';
+            if (els.progressBar) els.progressBar.style.width = pct + '%';
         });
-        SerenityWS.on('preview', function (data) {
-            if (!data || !data.blob || !state.generating)
-                return;
+
+        SerenityWS.on('preview', function(data: { blob?: Blob }) {
+            if (!data || !data.blob || !state.generating) return;
             var url = URL.createObjectURL(data.blob);
             if (els.previewImg) {
-                if (els.previewImg._previewUrl)
-                    URL.revokeObjectURL(els.previewImg._previewUrl);
+                if (els.previewImg._previewUrl) URL.revokeObjectURL(els.previewImg._previewUrl);
                 els.previewImg._previewUrl = url;
                 els.previewImg.src = url;
                 els.previewImg.style.display = 'block';
-                if (els.empty)
-                    els.empty.style.display = 'none';
+                if (els.empty) els.empty.style.display = 'none';
                 els.previewImg.classList.add('simple-preview-live');
             }
         });
-        SerenityWS.on('executed', function (data) {
-            if (!data || !data.output || !state.generating)
-                return;
+
+        SerenityWS.on('executed', function(data: { output?: { ui?: { images?: Array<{ filename: string; subfolder?: string; type?: string }>; videos?: Array<{ filename: string; subfolder?: string; type?: string }> }; images?: Array<{ filename: string; subfolder?: string; type?: string }>; videos?: Array<{ filename: string; subfolder?: string; type?: string }> } }) {
+            if (!data || !data.output || !state.generating) return;
             // Clean up live preview state
             if (els.previewImg) {
                 els.previewImg.classList.remove('simple-preview-live');
@@ -991,49 +1109,52 @@ var SimpleMode = (function () {
                 items = out.videos;
                 isVideo = true;
             }
-            if (!items || !items.length)
-                return;
+            if (!items || !items.length) return;
+
             var file = items[0];
             var src = '/view?filename=' + encodeURIComponent(file.filename) +
                 '&subfolder=' + encodeURIComponent(file.subfolder || '') +
                 '&type=' + encodeURIComponent(file.type || 'output');
-            if (!isVideo)
-                isVideo = /\.(webp|mp4|gif)$/i.test(file.filename);
+            if (!isVideo) isVideo = /\.(webp|mp4|gif)$/i.test(file.filename);
             if (isVideo) {
                 displayVideo(src);
-            }
-            else {
+            } else {
                 displayImage(src);
             }
             addToRecent(src, isVideo);
             setGenerating(false);
+
             // Pop animation on preview
             var previewEl = isVideo ? els.previewVideo : els.previewImg;
             if (previewEl) {
                 previewEl.classList.add('simple-pop');
-                setTimeout(function () { previewEl.classList.remove('simple-pop'); }, 400);
+                setTimeout(function() { previewEl!.classList.remove('simple-pop'); }, 400);
             }
+
             // Brief "Done" on button
             if (els.genBtn) {
                 els.genBtn.textContent = '\u2713 Done';
-                setTimeout(function () {
+                setTimeout(function() {
                     if (!state.generating && els.genBtn) {
                         els.genBtn.textContent = isVideoModel() ? '\u2726 Create Video' : '\u2726 Create Image';
                     }
                 }, 1500);
             }
         });
-        SerenityWS.on('execution_error', function (data) {
+
+        SerenityWS.on('execution_error', function(data: { exception_message?: string }) {
             var errMsg = (data && data.exception_message) || 'Generation failed';
             showError(errMsg);
             setGenerating(false);
         });
     }
+
     // ── Public API ──
+
     function init() {
-        if (initialized)
-            return;
+        if (initialized) return;
         initialized = true;
+
         buildUI();
         buildAspectButtons();
         bindEvents();
@@ -1041,15 +1162,16 @@ var SimpleMode = (function () {
         restoreRecent();
         connectWS();
         renderStylePresets(false);
+
         // Show onboarding for first-time visitors
         if (!localStorage.getItem('sf-has-visited')) {
             showOnboarding();
         }
     }
+
     return {
         state: state,
         init: init,
         generate: generate
     };
 })();
-//# sourceMappingURL=simple.js.map

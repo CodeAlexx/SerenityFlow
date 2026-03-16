@@ -1,26 +1,41 @@
-"use strict";
 /**
  * Inline widgets for node inputs.
  * Uses Konva shapes with HTML overlay for actual editing.
  */
+
 const WIDGET_HEIGHT = 22;
 const WIDGET_PADDING = 4;
+
+interface WidgetConfig {
+    default?: number | string | boolean;
+    min?: number;
+    max?: number;
+    step?: number;
+    multiline?: boolean;
+    [key: string]: unknown;
+}
+
 class SFWidgetManager {
+    activeOverlay: HTMLElement | null;
+
     constructor() {
         this.activeOverlay = null;
     }
+
     removeOverlay() {
         if (this.activeOverlay) {
             this.activeOverlay.remove();
             this.activeOverlay = null;
         }
     }
+
     /**
      * Create a Konva group representing a widget for a node input.
      * Returns { group, getValue, setValue, height }
      */
-    createWidget(node, inputName, inputDef, x, y, width) {
+    createWidget(node: SFNode, inputName: string, inputDef: ComfyInputSpec, x: number, y: number, width: number) {
         const type = this._detectType(inputDef);
+
         switch (type) {
             case 'INT':
             case 'FLOAT':
@@ -35,15 +50,15 @@ class SFWidgetManager {
                 return null;
         }
     }
-    _detectType(inputDef) {
-        if (!inputDef)
-            return null;
+
+    _detectType(inputDef: ComfyInputSpec): string | null {
+        if (!inputDef) return null;
+
         // inputDef is usually [type, config] from object_info
         if (Array.isArray(inputDef)) {
             const t = inputDef[0];
             // Combo: array of options
-            if (Array.isArray(t))
-                return 'COMBO';
+            if (Array.isArray(t)) return 'COMBO';
             if (typeof t === 'string') {
                 const upper = t.toUpperCase();
                 if (upper === 'INT' || upper === 'FLOAT' || upper === 'STRING' || upper === 'BOOLEAN') {
@@ -53,26 +68,32 @@ class SFWidgetManager {
         }
         return null;
     }
-    _getDefault(inputDef) {
+
+    _getDefault(inputDef: ComfyInputSpec) {
         if (Array.isArray(inputDef) && inputDef.length > 1 && inputDef[1]) {
             return inputDef[1].default;
         }
         return undefined;
     }
-    _getConfig(inputDef) {
+
+    _getConfig(inputDef: ComfyInputSpec): WidgetConfig {
         if (Array.isArray(inputDef) && inputDef.length > 1 && inputDef[1]) {
-            return inputDef[1];
+            return inputDef[1] as WidgetConfig;
         }
         return {};
     }
-    _createNumberWidget(node, inputName, inputDef, x, y, width, type) {
+
+    _createNumberWidget(node: SFNode, inputName: string, inputDef: ComfyInputSpec, x: number, y: number, width: number, type: string) {
         const config = this._getConfig(inputDef);
         const defaultVal = config.default !== undefined ? Number(config.default) : 0;
         const min = config.min !== undefined ? config.min : -Infinity;
         const max = config.max !== undefined ? config.max : Infinity;
         const step = config.step !== undefined ? config.step : (type === 'INT' ? 1 : 0.01);
-        let value = defaultVal;
+
+        let value: number = defaultVal;
+
         const group = new Konva.Group({ x: x, y: y });
+
         // Background bar
         const bg = new Konva.Rect({
             width: width,
@@ -81,6 +102,7 @@ class SFWidgetManager {
             cornerRadius: 3,
             listening: true,
         });
+
         // Label (left half)
         const labelWidth = Math.floor(width * 0.45);
         const label = new Konva.Text({
@@ -94,6 +116,7 @@ class SFWidgetManager {
             wrap: 'none',
             listening: false,
         });
+
         // Value display (right half)
         const valueWidth = width - labelWidth - 12;
         const valueText = new Konva.Text({
@@ -108,44 +131,49 @@ class SFWidgetManager {
             wrap: 'none',
             listening: false,
         });
+
         const updateValueText = () => {
             const formatted = type === 'INT' ? String(Math.round(value)) : value.toFixed(2);
             valueText.text(formatted);
         };
         updateValueText();
+
         group.add(bg);
         group.add(label);
         group.add(valueText);
+
         // Drag to scrub
         let dragStartX = 0;
         let dragStartVal = 0;
         let isDragging = false;
-        bg.on('mousedown', (e) => {
+
+        bg.on('mousedown', (e: Konva.KonvaEventObject<MouseEvent>) => {
             e.cancelBubble = true;
             dragStartX = e.evt.clientX;
             dragStartVal = value;
             isDragging = false;
-            const onMove = (me) => {
+
+            const onMove = (me: MouseEvent) => {
                 const dx = me.clientX - dragStartX;
-                if (Math.abs(dx) > 3)
-                    isDragging = true;
+                if (Math.abs(dx) > 3) isDragging = true;
                 if (isDragging) {
                     const sensitivity = me.shiftKey ? 0.1 : 1;
                     const delta = dx * step * sensitivity;
                     value = Math.max(min, Math.min(max, dragStartVal + delta));
-                    if (type === 'INT')
-                        value = Math.round(value);
+                    if (type === 'INT') value = Math.round(value);
                     updateValueText();
                     node.setWidgetValue(inputName, value);
                     node.canvas.nodeLayer.batchDraw();
                 }
             };
+
             const onUp = () => {
                 window.removeEventListener('mousemove', onMove);
                 window.removeEventListener('mouseup', onUp);
+
                 if (!isDragging) {
                     // Click -- open overlay input
-                    this._openNumberOverlay(node, bg, inputName, value, min, max, step, type, (newVal) => {
+                    this._openNumberOverlay(node, bg, inputName, value, min, max, step, type, (newVal: number) => {
                         value = newVal;
                         updateValueText();
                         node.setWidgetValue(inputName, value);
@@ -153,13 +181,15 @@ class SFWidgetManager {
                     });
                 }
             };
+
             window.addEventListener('mousemove', onMove);
             window.addEventListener('mouseup', onUp);
         });
+
         return {
             group: group,
             getValue: () => value,
-            setValue: (v) => {
+            setValue: (v: unknown) => {
                 value = type === 'INT' ? Math.round(Number(v)) : Number(v);
                 value = Math.max(min, Math.min(max, value));
                 updateValueText();
@@ -167,13 +197,16 @@ class SFWidgetManager {
             height: WIDGET_HEIGHT,
         };
     }
-    _createStringWidget(node, inputName, inputDef, x, y, width) {
+
+    _createStringWidget(node: SFNode, inputName: string, inputDef: ComfyInputSpec, x: number, y: number, width: number) {
         const config = this._getConfig(inputDef);
         const defaultVal = config.default !== undefined ? String(config.default) : '';
         const multiline = config.multiline || false;
         let value = defaultVal;
+
         const group = new Konva.Group({ x: x, y: y });
         const h = multiline ? WIDGET_HEIGHT * 3 : WIDGET_HEIGHT;
+
         const bg = new Konva.Rect({
             width: width,
             height: h,
@@ -181,6 +214,7 @@ class SFWidgetManager {
             cornerRadius: 3,
             listening: true,
         });
+
         const strLabelWidth = Math.floor(width * 0.3);
         const label = new Konva.Text({
             x: 6,
@@ -193,6 +227,7 @@ class SFWidgetManager {
             wrap: 'none',
             listening: false,
         });
+
         const valueText = new Konva.Text({
             x: multiline ? 6 : (strLabelWidth + 6),
             y: multiline ? 14 : 5,
@@ -206,12 +241,14 @@ class SFWidgetManager {
             wrap: multiline ? 'word' : 'none',
             listening: false,
         });
+
         group.add(bg);
         group.add(label);
         group.add(valueText);
-        bg.on('dblclick', (e) => {
+
+        bg.on('dblclick', (e: Konva.KonvaEventObject<MouseEvent>) => {
             e.cancelBubble = true;
-            this._openStringOverlay(node, bg, inputName, value, multiline, width, h, (newVal) => {
+            this._openStringOverlay(node, bg, inputName, value, multiline, width, h, (newVal: string) => {
                 value = newVal;
                 valueText.text(value || '(empty)');
                 valueText.fill(value ? '#e0e0e0' : '#505060');
@@ -219,10 +256,11 @@ class SFWidgetManager {
                 node.canvas.nodeLayer.batchDraw();
             });
         });
+
         return {
             group: group,
             getValue: () => value,
-            setValue: (v) => {
+            setValue: (v: unknown) => {
                 value = String(v);
                 valueText.text(value || '(empty)');
                 valueText.fill(value ? '#e0e0e0' : '#505060');
@@ -230,10 +268,13 @@ class SFWidgetManager {
             height: h,
         };
     }
-    _createBooleanWidget(node, inputName, inputDef, x, y, width) {
+
+    _createBooleanWidget(node: SFNode, inputName: string, inputDef: ComfyInputSpec, x: number, y: number, width: number) {
         const config = this._getConfig(inputDef);
         let value = config.default !== undefined ? Boolean(config.default) : false;
+
         const group = new Konva.Group({ x: x, y: y });
+
         const bg = new Konva.Rect({
             width: width,
             height: WIDGET_HEIGHT,
@@ -241,6 +282,7 @@ class SFWidgetManager {
             cornerRadius: 3,
             listening: true,
         });
+
         const label = new Konva.Text({
             x: 6,
             y: 5,
@@ -249,6 +291,7 @@ class SFWidgetManager {
             fill: '#808090',
             listening: false,
         });
+
         // Checkbox
         const checkBg = new Konva.Rect({
             x: width - 30,
@@ -261,6 +304,7 @@ class SFWidgetManager {
             strokeWidth: 1,
             listening: false,
         });
+
         const checkMark = new Konva.Text({
             x: width - 27,
             y: 4,
@@ -269,11 +313,13 @@ class SFWidgetManager {
             fill: '#fff',
             listening: false,
         });
+
         group.add(bg);
         group.add(label);
         group.add(checkBg);
         group.add(checkMark);
-        bg.on('click', (e) => {
+
+        bg.on('click', (e: Konva.KonvaEventObject<MouseEvent>) => {
             e.cancelBubble = true;
             value = !value;
             checkBg.fill(value ? '#4a9eff' : '#2a2a4a');
@@ -281,10 +327,11 @@ class SFWidgetManager {
             node.setWidgetValue(inputName, value);
             node.canvas.nodeLayer.batchDraw();
         });
+
         return {
             group: group,
             getValue: () => value,
-            setValue: (v) => {
+            setValue: (v: unknown) => {
                 value = Boolean(v);
                 checkBg.fill(value ? '#4a9eff' : '#2a2a4a');
                 checkMark.text(value ? '\u2713' : '');
@@ -292,11 +339,14 @@ class SFWidgetManager {
             height: WIDGET_HEIGHT,
         };
     }
-    _createComboWidget(node, inputName, inputDef, x, y, width) {
+
+    _createComboWidget(node: SFNode, inputName: string, inputDef: ComfyInputSpec, x: number, y: number, width: number) {
         const options = Array.isArray(inputDef[0]) ? inputDef[0] : [];
         const config = this._getConfig(inputDef);
-        let value = config.default !== undefined ? String(config.default) : (options[0] || '');
+        let value: string = config.default !== undefined ? String(config.default) : (options[0] || '');
+
         const group = new Konva.Group({ x: x, y: y });
+
         const bg = new Konva.Rect({
             width: width,
             height: WIDGET_HEIGHT,
@@ -304,6 +354,7 @@ class SFWidgetManager {
             cornerRadius: 3,
             listening: true,
         });
+
         const comboLabelWidth = Math.floor(width * 0.35);
         const label = new Konva.Text({
             x: 6,
@@ -316,6 +367,7 @@ class SFWidgetManager {
             wrap: 'none',
             listening: false,
         });
+
         const comboValueWidth = width - comboLabelWidth - 22; // 22 for arrow + padding
         const valueText = new Konva.Text({
             x: comboLabelWidth + 6,
@@ -329,6 +381,7 @@ class SFWidgetManager {
             wrap: 'none',
             listening: false,
         });
+
         // Arrow indicator
         const arrow = new Konva.Text({
             x: width - 14,
@@ -338,31 +391,36 @@ class SFWidgetManager {
             fill: '#808090',
             listening: false,
         });
+
         group.add(bg);
         group.add(label);
         group.add(valueText);
         group.add(arrow);
-        bg.on('click', (e) => {
+
+        bg.on('click', (e: Konva.KonvaEventObject<MouseEvent>) => {
             e.cancelBubble = true;
-            this._openComboOverlay(node, bg, inputName, value, options, width, (newVal) => {
+            this._openComboOverlay(node, bg, inputName, value, options, width, (newVal: string) => {
                 value = newVal;
                 valueText.text(String(value));
                 node.setWidgetValue(inputName, value);
                 node.canvas.nodeLayer.batchDraw();
             });
         });
+
         return {
             group: group,
             getValue: () => value,
-            setValue: (v) => {
+            setValue: (v: unknown) => {
                 value = String(v);
                 valueText.text(value);
             },
             height: WIDGET_HEIGHT,
         };
     }
+
     // --- HTML Overlay helpers ---
-    _getOverlayPosition(node, konvaRect) {
+
+    _getOverlayPosition(node: SFNode, konvaRect: Konva.Rect) {
         const absPos = konvaRect.getAbsolutePosition();
         const stage = node.canvas.stage;
         const container = stage.container().getBoundingClientRect();
@@ -371,16 +429,20 @@ class SFWidgetManager {
             y: container.top + absPos.y * stage.scaleY() + stage.y(),
         };
     }
-    _openNumberOverlay(node, konvaRect, name, currentVal, min, max, step, type, onDone) {
+
+    _openNumberOverlay(node: SFNode, konvaRect: Konva.Rect, name: string, currentVal: number, min: number, max: number, step: number, type: string, onDone: (val: number) => void) {
         this.removeOverlay();
+
         const pos = this._getOverlayPosition(node, konvaRect);
         const scale = node.canvas.stage.scaleX();
         const w = konvaRect.width() * scale;
         const h = konvaRect.height() * scale;
+
         const div = document.createElement('div');
         div.className = 'widget-overlay';
         div.style.left = pos.x + 'px';
         div.style.top = pos.y + 'px';
+
         const input = document.createElement('input');
         input.type = 'number';
         input.value = String(currentVal);
@@ -389,106 +451,117 @@ class SFWidgetManager {
         input.step = String(step);
         input.style.width = w + 'px';
         input.style.height = h + 'px';
+
         div.appendChild(input);
         document.body.appendChild(div);
         this.activeOverlay = div;
+
         input.focus();
         input.select();
+
         const finish = () => {
             let v = parseFloat(input.value);
-            if (isNaN(v))
-                v = currentVal;
-            if (type === 'INT')
-                v = Math.round(v);
+            if (isNaN(v)) v = currentVal;
+            if (type === 'INT') v = Math.round(v);
             v = Math.max(min, Math.min(max, v));
             this.removeOverlay();
             onDone(v);
         };
+
         input.addEventListener('blur', finish);
-        input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter')
-                finish();
-            if (e.key === 'Escape') {
-                this.removeOverlay();
-            }
+        input.addEventListener('keydown', (e: KeyboardEvent) => {
+            if (e.key === 'Enter') finish();
+            if (e.key === 'Escape') { this.removeOverlay(); }
         });
     }
-    _openStringOverlay(node, konvaRect, name, currentVal, multiline, width, height, onDone) {
+
+    _openStringOverlay(node: SFNode, konvaRect: Konva.Rect, name: string, currentVal: string, multiline: boolean, width: number, height: number, onDone: (val: string) => void) {
         this.removeOverlay();
+
         const pos = this._getOverlayPosition(node, konvaRect);
         const scale = node.canvas.stage.scaleX();
         const w = width * scale;
         const h = height * scale;
+
         const div = document.createElement('div');
         div.className = 'widget-overlay';
         div.style.left = pos.x + 'px';
         div.style.top = pos.y + 'px';
-        let input;
+
+        let input: HTMLTextAreaElement | HTMLInputElement;
         if (multiline) {
             input = document.createElement('textarea');
             input.style.width = w + 'px';
             input.style.height = h + 'px';
-        }
-        else {
+        } else {
             input = document.createElement('input');
             input.type = 'text';
             input.style.width = w + 'px';
             input.style.height = h + 'px';
         }
         input.value = currentVal;
+
         div.appendChild(input);
         document.body.appendChild(div);
         this.activeOverlay = div;
+
         input.focus();
         input.select();
+
         const finish = () => {
             const v = input.value;
             this.removeOverlay();
             onDone(v);
         };
+
         input.addEventListener('blur', finish);
         if (!multiline) {
-            input.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter')
-                    finish();
-                if (e.key === 'Escape') {
-                    this.removeOverlay();
-                }
+            (input as HTMLInputElement).addEventListener('keydown', (e: KeyboardEvent) => {
+                if (e.key === 'Enter') finish();
+                if (e.key === 'Escape') { this.removeOverlay(); }
             });
         }
     }
-    _openComboOverlay(node, konvaRect, name, currentVal, options, width, onDone) {
+
+    _openComboOverlay(node: SFNode, konvaRect: Konva.Rect, name: string, currentVal: string, options: string[], width: number, onDone: (val: string) => void) {
         this.removeOverlay();
+
         const pos = this._getOverlayPosition(node, konvaRect);
         const scale = node.canvas.stage.scaleX();
         const w = width * scale;
+
         const div = document.createElement('div');
         div.className = 'widget-overlay';
         div.style.left = pos.x + 'px';
         div.style.top = pos.y + 'px';
+
         const select = document.createElement('select');
         select.style.width = w + 'px';
-        options.forEach((opt) => {
+
+        options.forEach((opt: string) => {
             const o = document.createElement('option');
             o.value = opt;
             o.text = opt;
-            if (opt === currentVal)
-                o.selected = true;
+            if (opt === currentVal) o.selected = true;
             select.appendChild(o);
         });
+
         div.appendChild(select);
         document.body.appendChild(div);
         this.activeOverlay = div;
+
         select.focus();
+
         const finish = () => {
             const v = select.value;
             this.removeOverlay();
             onDone(v);
         };
+
         select.addEventListener('change', finish);
         select.addEventListener('blur', finish);
     }
 }
+
 // Global widget manager
 const sfWidgets = new SFWidgetManager();
-//# sourceMappingURL=widget.js.map

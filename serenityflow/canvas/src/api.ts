@@ -1,12 +1,12 @@
-"use strict";
 /**
  * SerenityAPI — Shared API helpers for SerenityFlow.
  * All /prompt, /upload, /interrupt calls go through here.
  * Registers jobs with QueueTab when available.
  */
-var SerenityAPI = (function () {
+var SerenityAPI = (function() {
     'use strict';
-    function postPrompt(workflow, metadata) {
+
+    function postPrompt(workflow: ComfyPrompt, metadata?: GenerationMetadata) {
         var meta = metadata || {};
         return fetch('/prompt', {
             method: 'POST',
@@ -16,12 +16,11 @@ var SerenityAPI = (function () {
                 client_id: SerenityWS.getClientId()
             })
         })
-            .then(function (resp) {
-            if (!resp.ok)
-                throw new Error('HTTP ' + resp.status);
+        .then(function(resp) {
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
             return resp.json();
         })
-            .then(function (data) {
+        .then(function(data) {
             // Register with Queue tab if available
             if (typeof QueueTab !== 'undefined' && QueueTab.registerPending) {
                 QueueTab.registerPending({
@@ -46,30 +45,33 @@ var SerenityAPI = (function () {
             return data;
         });
     }
+
     function interrupt() {
         return fetch('/interrupt', { method: 'POST' });
     }
-    function uploadImage(base64Data, prefix) {
+
+    function uploadImage(base64Data: string, prefix: string) {
         return fetch('data:image/png;base64,' + base64Data)
-            .then(function (r) { return r.blob(); })
-            .then(function (blob) {
-            var form = new FormData();
-            form.append('image', blob, (prefix || 'upload') + '.png');
-            form.append('type', 'input');
-            return fetch('/upload/image', { method: 'POST', body: form });
-        })
-            .then(function (resp) {
-            if (!resp.ok)
-                throw new Error('HTTP ' + resp.status);
-            return resp.json();
-        })
-            .then(function (data) { return data.name; });
+            .then(function(r) { return r.blob(); })
+            .then(function(blob) {
+                var form = new FormData();
+                form.append('image', blob, (prefix || 'upload') + '.png');
+                form.append('type', 'input');
+                return fetch('/upload/image', { method: 'POST', body: form });
+            })
+            .then(function(resp) {
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                return resp.json();
+            })
+            .then(function(data) { return data.name; });
     }
-    function viewUrl(filename, subfolder, type) {
+
+    function viewUrl(filename: string, subfolder: string, type: string) {
         return '/view?filename=' + encodeURIComponent(filename) +
             '&subfolder=' + encodeURIComponent(subfolder || '') +
             '&type=' + encodeURIComponent(type || 'output');
     }
+
     return {
         postPrompt: postPrompt,
         interrupt: interrupt,
@@ -77,20 +79,35 @@ var SerenityAPI = (function () {
         viewUrl: viewUrl
     };
 })();
-function SFApi() {
-    this.connect = function () { };
-    this.on = function (type, fn) { SerenityWS.on(type, fn); };
-    this.off = function (type, fn) { SerenityWS.off(type, fn); };
-    this.interrupt = function () { return SerenityAPI.interrupt(); };
-    this.viewUrl = function (filename, subfolder, type) {
+
+/**
+ * SFApi — Compatibility shim for the graph editor (app.js, toolbar.js,
+ * preview.js, sidebar.js). Delegates to SerenityWS and SerenityAPI.
+ */
+interface SFApiInstance {
+    connect(): void;
+    on(type: string, fn: WSListener): void;
+    off(type: string, fn: WSListener): void;
+    interrupt(): void;
+    viewUrl(filename: string, subfolder: string, type: string): string;
+    getObjectInfo(): Promise<ComfyObjectInfo>;
+    queuePrompt(workflow: ComfyPrompt): Promise<{ error?: string }>;
+    getClientId(): string;
+}
+
+function SFApi(this: SFApiInstance) {
+    this.connect = function() {};
+    this.on = function(type: string, fn: WSListener) { SerenityWS.on(type, fn); };
+    this.off = function(type: string, fn: WSListener) { SerenityWS.off(type, fn); };
+    this.interrupt = function() { return SerenityAPI.interrupt(); };
+    this.viewUrl = function(filename: string, subfolder: string, type: string) {
         return SerenityAPI.viewUrl(filename, subfolder, type);
     };
-    this.getObjectInfo = function () {
-        return fetch('/object_info').then(function (r) { return r.json(); });
+    this.getObjectInfo = function() {
+        return fetch('/object_info').then(function(r) { return r.json(); });
     };
-    this.queuePrompt = function (workflow) {
+    this.queuePrompt = function(workflow: ComfyPrompt) {
         return SerenityAPI.postPrompt(workflow);
     };
-    this.getClientId = function () { return SerenityWS.getClientId(); };
+    this.getClientId = function() { return SerenityWS.getClientId(); };
 }
-//# sourceMappingURL=api.js.map

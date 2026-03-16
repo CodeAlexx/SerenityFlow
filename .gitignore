@@ -7,3 +7,6 @@ dist/
 build/
 .eggs/
 tests/workflow_templates/
+node_modules/
+*.js.map
+package-lock.json

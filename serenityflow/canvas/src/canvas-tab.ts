@@ -1,47 +1,122 @@
-"use strict";
 /**
  * Canvas Tab — SerenityFlow Phase 4
  * Konva.js infinite canvas with layers, bounding box, brush/eraser, inpaint/outpaint.
  * Completely separate Konva instance from the Workflows graph editor.
  */
-var CanvasTab = (function () {
+
+var CanvasTab = (function() {
     'use strict';
-    var initialized = false;
-    var konvaReady = false;
+
+    interface RasterLayerInfo {
+        id: number;
+        name: string;
+        type: string;
+        visible: boolean;
+        locked: boolean;
+        opacity: number;
+        konvaLayer: Konva.Layer;
+        refImageSrc?: string;
+        refImageFile?: File;
+        refImageName?: string;
+        controlType?: string;
+        weight?: number;
+        startStep?: number;
+        endStep?: number;
+        ipaMethod?: string;
+    }
+
+    interface ControlLayerData {
+        imageName: string | null;
+        refImageSrc: string;
+        controlNetModel?: string;
+        weight: number;
+        startStep: number;
+        endStep: number;
+    }
+
+    interface IPALayerData {
+        imageName: string | null;
+        refImageSrc: string;
+        weight: number;
+        ipaMethod: string;
+    }
+
+    interface CanvasEls {
+        layerList: HTMLElement | null;
+        brushSection: HTMLElement | null;
+        brushSizeInput: HTMLInputElement | null;
+        brushSizeVal: HTMLElement | null;
+        brushColorInput: HTMLInputElement | null;
+        prompt: HTMLTextAreaElement | null;
+        denoise: HTMLInputElement | null;
+        denoiseVal: HTMLElement | null;
+        steps: HTMLInputElement | null;
+        stepsRange: HTMLInputElement | null;
+        cfgRow: HTMLElement | null;
+        cfg: HTMLInputElement | null;
+        cfgRange: HTMLInputElement | null;
+        guidanceRow: HTMLElement | null;
+        guidance: HTMLInputElement | null;
+        guidanceRange: HTMLInputElement | null;
+        videoSection: HTMLElement | null;
+        framesInput: HTMLInputElement | null;
+        framesRange: HTMLInputElement | null;
+        fpsInput: HTMLInputElement | null;
+        fpsRange: HTMLInputElement | null;
+        durationHint: HTMLElement | null;
+        model: HTMLSelectElement | null;
+        importBtn: HTMLElement | null;
+        importFile: HTMLInputElement | null;
+        generateBtn: HTMLButtonElement | null;
+        progress: HTMLElement | null;
+        progressBar: HTMLElement | null;
+        progressLabel: HTMLElement | null;
+        errorBanner: HTMLElement | null;
+    }
+
+    interface PreviewBodyElement extends HTMLElement {
+        _previewUrl?: string;
+    }
+
+    var initialized: boolean = false;
+    var konvaReady: boolean = false;
+
     // Konva objects
-    var stage = null;
-    var backgroundLayer = null;
-    var rasterLayers = [];
-    var uiLayer = null;
-    var boundingBox = null;
-    var sizeLabel = null;
-    var resizeHandles = [];
-    var brushCursor = null;
-    var bgRect = null;
+    var stage: Konva.Stage | null = null;
+    var backgroundLayer: Konva.Layer | null = null;
+    var rasterLayers: RasterLayerInfo[] = [];
+    var uiLayer: Konva.Layer | null = null;
+    var boundingBox: Konva.Rect | null = null;
+    var sizeLabel: Konva.Text | null = null;
+    var resizeHandles: Konva.Rect[] = [];
+    var brushCursor: Konva.Circle | null = null;
+    var bgRect: Konva.Rect | null = null;
+
     // State
-    var activeTool = 'select';
-    var activeLayerId = null;
-    var brushSize = 20;
-    var brushColor = '#ffffff';
-    var isDrawing = false;
-    var currentLine = null;
-    var isPanning = false;
-    var isSpaceHeld = false;
+    var activeTool: string = 'select';
+    var activeLayerId: number | null = null;
+    var brushSize: number = 20;
+    var brushColor: string = '#ffffff';
+    var isDrawing: boolean = false;
+    var currentLine: Konva.Line | null = null;
+    var isPanning: boolean = false;
+    var isSpaceHeld: boolean = false;
     var panStart = { x: 0, y: 0 };
     var stageStart = { x: 0, y: 0 };
-    var canvasGenerating = false;
-    var layerIdCounter = 0;
-    var activeHandle = null;
-    var handleStartBox = null;
-    var handleStartMouse = null;
-    var brushHardness = 1;
-    var drawScheduled = false;
-    var historyDebounce = null;
-    var bboxAspectLocked = false;
-    var bboxLockedRatio = 1;
+    var canvasGenerating: boolean = false;
+    var layerIdCounter: number = 0;
+    var activeHandle: string | null = null;
+    var handleStartBox: { x: number; y: number; w: number; h: number } | null = null;
+    var handleStartMouse: { x: number; y: number } | null = null;
+    var brushHardness: number = 1;
+    var drawScheduled: boolean = false;
+    var historyDebounce: ReturnType<typeof setTimeout> | null = null;
+    var bboxAspectLocked: boolean = false;
+    var bboxLockedRatio: number = 1;
+
     // Generation state
     var genState = {
-        model: null,
+        model: null as string | null,
         prompt: '',
         denoise: 0.75,
         steps: 20,
@@ -52,10 +127,13 @@ var CanvasTab = (function () {
         frames: 97,
         fps: 24
     };
+
     // DOM refs
-    var els = {};
+    var els: CanvasEls = {} as CanvasEls;
+
     // Handle size constant
     var HANDLE_SIZE = 12;
+
     // ── Lucide SVG icons ──
     var ICONS = {
         mousePointer: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="M13 13l6 6"/></svg>',
@@ -72,50 +150,69 @@ var CanvasTab = (function () {
         lock: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
         unlock: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>'
     };
+
     // ── Helpers ──
-    function snapTo64(val) { return Math.max(64, Math.round(val / 64) * 64); }
-    function snapTo32(val) { return Math.max(64, Math.round(val / 32) * 32); }
-    function clampDim(val) { return Math.max(256, Math.min(4096, val)); }
-    function isVideoArch() { return genState.arch === 'ltxv' || genState.arch === 'wan'; }
-    function snapDimForArch(val) {
+    function snapTo64(val: number): number { return Math.max(64, Math.round(val / 64) * 64); }
+    function snapTo32(val: number): number { return Math.max(64, Math.round(val / 32) * 32); }
+    function clampDim(val: number): number { return Math.max(256, Math.min(4096, val)); }
+    function isVideoArch(): boolean { return genState.arch === 'ltxv' || genState.arch === 'wan'; }
+    function snapDimForArch(val: number): number {
         return isVideoArch() ? snapTo32(val) : snapTo64(val);
     }
-    function clampDimForArch(val) {
-        if (isVideoArch())
-            return Math.max(64, Math.min(1280, snapTo32(val)));
+    function clampDimForArch(val: number): number {
+        if (isVideoArch()) return Math.max(64, Math.min(1280, snapTo32(val)));
         return clampDim(snapTo64(val));
     }
-    function getRelativePointerPosition() {
-        var transform = stage.getAbsoluteTransform().copy().invert();
-        var pos = stage.getPointerPosition();
-        if (!pos)
-            return { x: 0, y: 0 };
+
+    function getRelativePointerPosition(): { x: number; y: number } {
+        var transform = stage!.getAbsoluteTransform().copy().invert();
+        var pos = stage!.getPointerPosition();
+        if (!pos) return { x: 0, y: 0 };
         return transform.point(pos);
     }
-    function getActiveKonvaLayer() {
+
+    function getActiveKonvaLayer(): Konva.Layer | null {
         for (var i = 0; i < rasterLayers.length; i++) {
-            if (rasterLayers[i].id === activeLayerId)
-                return rasterLayers[i].konvaLayer;
+            if (rasterLayers[i].id === activeLayerId) return rasterLayers[i].konvaLayer;
         }
         return rasterLayers.length > 0 ? rasterLayers[0].konvaLayer : null;
     }
-    function getLayerById(id) {
+
+    function getLayerById(id: number | null): RasterLayerInfo | null {
         for (var i = 0; i < rasterLayers.length; i++) {
-            if (rasterLayers[i].id === id)
-                return rasterLayers[i];
+            if (rasterLayers[i].id === id) return rasterLayers[i];
         }
         return null;
     }
-    var History = (function () {
-        var stack = [];
+
+    // ── Snapshot-based Undo/Redo ──
+
+    interface LayerSnapshot {
+        id: number;
+        type: string;
+        name: string;
+        visible: boolean;
+        locked: boolean;
+        opacity: number;
+        imageData: string;
+    }
+
+    interface CanvasSnapshot {
+        layers: LayerSnapshot[];
+        bbox: { x: number; y: number; width: number; height: number };
+        activeLayerId: number | null;
+    }
+
+    var History = (function() {
+        var stack: CanvasSnapshot[] = [];
         var cursor = -1;
         var MAX = 50;
         var snapshotting = false; // prevent re-entry
+
         function snapshot() {
-            if (!stage || !boundingBox)
-                return null;
+            if (!stage || !boundingBox) return null;
             return {
-                layers: rasterLayers.map(function (l) {
+                layers: rasterLayers.map(function(l) {
                     return {
                         id: l.id, type: l.type, name: l.name,
                         visible: l.visible, locked: l.locked,
@@ -130,105 +227,106 @@ var CanvasTab = (function () {
                 activeLayerId: activeLayerId
             };
         }
+
         function push() {
-            if (snapshotting)
-                return;
+            if (snapshotting) return;
             var snap = snapshot();
-            if (!snap)
-                return;
+            if (!snap) return;
             // Discard redo entries ahead of cursor
             stack.splice(cursor + 1);
             stack.push(snap);
-            if (stack.length > MAX)
-                stack.shift();
+            if (stack.length > MAX) stack.shift();
             cursor = stack.length - 1;
             updateButtons();
         }
+
         function undo() {
-            if (cursor <= 0 || snapshotting)
-                return;
+            if (cursor <= 0 || snapshotting) return;
             cursor--;
             restore(stack[cursor]);
             updateButtons();
         }
+
         function redo() {
-            if (cursor >= stack.length - 1 || snapshotting)
-                return;
+            if (cursor >= stack.length - 1 || snapshotting) return;
             cursor++;
             restore(stack[cursor]);
             updateButtons();
         }
-        function restore(entry) {
-            if (!entry || !stage)
-                return;
+
+        function restore(entry: CanvasSnapshot) {
+            if (!entry || !stage) return;
             snapshotting = true;
+
             // Remove existing raster layers
-            rasterLayers.forEach(function (l) { l.konvaLayer.destroy(); });
+            rasterLayers.forEach(function(l) { l.konvaLayer.destroy(); });
             rasterLayers = [];
+
             // Rebuild layers from snapshot
             var loaded = 0;
             var total = entry.layers.length;
-            entry.layers.forEach(function (saved) {
+
+            entry.layers.forEach(function(saved: LayerSnapshot) {
                 var konvaLayer = new Konva.Layer();
-                stage.add(konvaLayer);
-                if (uiLayer && uiLayer.parent)
-                    uiLayer.moveToTop();
+                stage!.add(konvaLayer);
+                if (uiLayer && uiLayer.parent) uiLayer.moveToTop();
+
                 var info = {
                     id: saved.id, name: saved.name, type: saved.type,
                     visible: saved.visible, locked: saved.locked,
                     opacity: saved.opacity, konvaLayer: konvaLayer
                 };
                 konvaLayer.opacity(saved.opacity);
-                if (!saved.visible)
-                    konvaLayer.hide();
+                if (!saved.visible) konvaLayer.hide();
                 rasterLayers.push(info);
+
                 // Restore pixel content
                 if (saved.imageData && saved.imageData !== 'data:,') {
                     var img = new Image();
-                    img.onload = function () {
+                    img.onload = function() {
                         var kImg = new Konva.Image({ image: img, x: 0, y: 0 });
                         konvaLayer.add(kImg);
                         konvaLayer.batchDraw();
                         loaded++;
-                        if (loaded >= total)
-                            finishRestore(entry);
+                        if (loaded >= total) finishRestore(entry);
                     };
-                    img.onerror = function () {
+                    img.onerror = function() {
                         loaded++;
-                        if (loaded >= total)
-                            finishRestore(entry);
+                        if (loaded >= total) finishRestore(entry);
                     };
                     img.src = saved.imageData;
-                }
-                else {
+                } else {
                     loaded++;
-                    if (loaded >= total)
-                        finishRestore(entry);
+                    if (loaded >= total) finishRestore(entry);
                 }
             });
-            if (total === 0)
-                finishRestore(entry);
+
+            if (total === 0) finishRestore(entry);
         }
-        function finishRestore(entry) {
+
+        function finishRestore(entry: CanvasSnapshot) {
             // Restore bbox
             if (entry.bbox) {
-                boundingBox.x(entry.bbox.x);
-                boundingBox.y(entry.bbox.y);
-                boundingBox.width(entry.bbox.width);
-                boundingBox.height(entry.bbox.height);
+                boundingBox!.x(entry.bbox.x);
+                boundingBox!.y(entry.bbox.y);
+                boundingBox!.width(entry.bbox.width);
+                boundingBox!.height(entry.bbox.height);
                 updateHandles();
                 updateSizeLabel();
             }
+
             // Restore active layer
             activeLayerId = entry.activeLayerId;
-            layerIdCounter = Math.max.apply(null, rasterLayers.map(function (l) { return l.id; }).concat([0]));
+            layerIdCounter = Math.max.apply(null, rasterLayers.map(function(l) { return l.id; }).concat([0]));
+
             renderLayerList();
-            stage.batchDraw();
+            stage!.batchDraw();
             snapshotting = false;
         }
+
         function updateButtons() {
-            var undoBtn = document.getElementById('cv-undo');
-            var redoBtn = document.getElementById('cv-redo');
+            var undoBtn = document.getElementById('cv-undo') as HTMLButtonElement | null;
+            var redoBtn = document.getElementById('cv-redo') as HTMLButtonElement | null;
             if (undoBtn) {
                 undoBtn.disabled = cursor <= 0;
                 undoBtn.title = 'Undo (Ctrl+Z)' + (cursor > 0 ? ' (' + cursor + ')' : '');
@@ -237,47 +335,49 @@ var CanvasTab = (function () {
                 redoBtn.disabled = cursor >= stack.length - 1;
             }
         }
+
         return { push: push, undo: undo, redo: redo, updateButtons: updateButtons };
     })();
+
     function debouncedHistoryPush() {
-        clearTimeout(historyDebounce);
-        historyDebounce = setTimeout(function () {
+        clearTimeout(historyDebounce!);
+        historyDebounce = setTimeout(function() {
             History.push();
         }, 300);
     }
+
     // ── Floating Preview Panel ──
-    var lastPreviewSrc = null;
+    var lastPreviewSrc: string | null = null;
     var lastPreviewIsVideo = false;
-    function showCanvasPreview(src, isVideo) {
+
+    function showCanvasPreview(src: string, isVideo: boolean) {
         lastPreviewSrc = src;
         lastPreviewIsVideo = isVideo;
         var body = document.getElementById('canvas-preview-body');
-        if (!body)
-            return;
+        if (!body) return;
         body.innerHTML = isVideo
             ? '<video src="' + src + '" autoplay loop muted playsinline controls></video>'
             : '<img src="' + src + '">';
         var panel = document.getElementById('canvas-preview-panel');
-        if (panel)
-            panel.style.display = 'block';
+        if (panel) panel.style.display = 'block';
     }
+
     function hideCanvasPreview() {
         var panel = document.getElementById('canvas-preview-panel');
-        if (panel)
-            panel.style.display = 'none';
+        if (panel) panel.style.display = 'none';
         lastPreviewSrc = null;
     }
+
     function acceptCanvasPreview() {
-        if (!lastPreviewSrc)
-            return;
+        if (!lastPreviewSrc) return;
         if (lastPreviewIsVideo) {
             placeVideoOverlayOnCanvas(lastPreviewSrc);
-        }
-        else {
+        } else {
             placeResultOnCanvas(lastPreviewSrc);
         }
         hideCanvasPreview();
     }
+
     function setupPreviewPanel() {
         var panel = document.getElementById('canvas-preview-panel');
         var header = document.getElementById('canvas-preview-header');
@@ -285,37 +385,34 @@ var CanvasTab = (function () {
         var acceptBtn = document.getElementById('canvas-preview-accept');
         var discardBtn = document.getElementById('canvas-preview-discard');
         var downloadBtn = document.getElementById('canvas-preview-download');
-        if (!panel || !header)
-            return;
+
+        if (!panel || !header) return;
+
         // Drag behavior
-        var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
-        header.addEventListener('mousedown', function (e) {
+        var dragging = false, startX: number = 0, startY: number = 0, startLeft: number = 0, startTop: number = 0;
+        header.addEventListener('mousedown', function(e) {
             dragging = true;
             startX = e.clientX;
             startY = e.clientY;
-            startLeft = panel.offsetLeft;
-            startTop = panel.offsetTop;
+            startLeft = panel!.offsetLeft;
+            startTop = panel!.offsetTop;
         });
-        document.addEventListener('mousemove', function (e) {
-            if (!dragging)
-                return;
-            var newLeft = Math.max(0, Math.min(startLeft + e.clientX - startX, window.innerWidth - panel.offsetWidth));
+        document.addEventListener('mousemove', function(e) {
+            if (!dragging) return;
+            var newLeft = Math.max(0, Math.min(startLeft + e.clientX - startX, window.innerWidth - panel!.offsetWidth));
             var newTop = Math.max(0, Math.min(startTop + e.clientY - startY, window.innerHeight - 40));
-            panel.style.left = newLeft + 'px';
-            panel.style.top = newTop + 'px';
-            panel.style.right = 'auto';
+            panel!.style.left = newLeft + 'px';
+            panel!.style.top = newTop + 'px';
+            panel!.style.right = 'auto';
         });
-        document.addEventListener('mouseup', function () { dragging = false; });
-        if (closeBtn)
-            closeBtn.addEventListener('click', hideCanvasPreview);
-        if (discardBtn)
-            discardBtn.addEventListener('click', hideCanvasPreview);
-        if (acceptBtn)
-            acceptBtn.addEventListener('click', acceptCanvasPreview);
+        document.addEventListener('mouseup', function() { dragging = false; });
+
+        if (closeBtn) closeBtn.addEventListener('click', hideCanvasPreview);
+        if (discardBtn) discardBtn.addEventListener('click', hideCanvasPreview);
+        if (acceptBtn) acceptBtn.addEventListener('click', acceptCanvasPreview);
         if (downloadBtn) {
-            downloadBtn.addEventListener('click', function () {
-                if (!lastPreviewSrc)
-                    return;
+            downloadBtn.addEventListener('click', function() {
+                if (!lastPreviewSrc) return;
                 var a = document.createElement('a');
                 a.href = lastPreviewSrc;
                 a.download = 'serenityflow_canvas_' + Date.now() + (lastPreviewIsVideo ? '.mp4' : '.png');
@@ -323,11 +420,12 @@ var CanvasTab = (function () {
             });
         }
     }
+
     // ── Image upload for Control/IPA layers ──
-    function handleLayerImageUpload(layerId, file, wellEl) {
+    function handleLayerImageUpload(layerId: number | null, file: File, wellEl: HTMLElement | null) {
         var reader = new FileReader();
-        reader.onload = function (ev) {
-            var result = ev.target.result;
+        reader.onload = function(ev) {
+            var result = (ev.target as FileReader).result as string;
             var layer = getLayerById(layerId);
             if (layer) {
                 layer.refImageSrc = result;
@@ -337,17 +435,17 @@ var CanvasTab = (function () {
                 }
                 // Also place on canvas as semi-transparent overlay
                 var img = new Image();
-                img.onload = function () {
-                    layer.konvaLayer.destroyChildren();
+                img.onload = function() {
+                    layer!.konvaLayer.destroyChildren();
                     var kImg = new Konva.Image({
                         image: img,
-                        x: boundingBox.x(), y: boundingBox.y(),
-                        width: boundingBox.width(), height: boundingBox.height(),
+                        x: boundingBox!.x(), y: boundingBox!.y(),
+                        width: boundingBox!.width(), height: boundingBox!.height(),
                         opacity: 0.5,
                         draggable: activeTool === 'select'
                     });
-                    layer.konvaLayer.add(kImg);
-                    layer.konvaLayer.batchDraw();
+                    layer!.konvaLayer.add(kImg);
+                    layer!.konvaLayer.batchDraw();
                     History.push();
                 };
                 img.src = result;
@@ -355,13 +453,14 @@ var CanvasTab = (function () {
         };
         reader.readAsDataURL(file);
     }
+
     // ── Checkerboard ──
-    function createCheckerboardImage() {
+    function createCheckerboardImage(): HTMLImageElement {
         var size = 16;
         var c = document.createElement('canvas');
         c.width = size * 2;
         c.height = size * 2;
-        var ctx = c.getContext('2d');
+        var ctx = c.getContext('2d')!;
         ctx.fillStyle = '#181824';
         ctx.fillRect(0, 0, size * 2, size * 2);
         ctx.fillStyle = '#1e1e2e';
@@ -371,271 +470,298 @@ var CanvasTab = (function () {
         img.src = c.toDataURL();
         return img;
     }
+
     // ── Build DOM ──
     function buildUI() {
         var panel = document.getElementById('panel-canvas');
-        if (!panel)
-            return;
+        if (!panel) return;
         panel.innerHTML = '';
+
         var layout = document.createElement('div');
         layout.className = 'cv-layout';
+
         var left = document.createElement('div');
         left.className = 'cv-left';
         left.innerHTML = buildLeftHTML();
         layout.appendChild(left);
+
         var center = document.createElement('div');
         center.className = 'cv-center';
         center.innerHTML = '<div id="canvas-stage-container"></div>';
+
         // Add bbox toolbar to center
         var bboxToolbar = document.createElement('div');
         bboxToolbar.id = 'cv-bbox-toolbar';
         bboxToolbar.className = 'cv-bbox-toolbar';
         bboxToolbar.innerHTML =
             '<input type="number" id="cv-bbox-w" class="cv-bbox-input" min="64" max="4096" step="64" value="1024">' +
-                '<span class="cv-bbox-x">&times;</span>' +
-                '<input type="number" id="cv-bbox-h" class="cv-bbox-input" min="64" max="4096" step="64" value="1024">' +
-                '<span class="cv-bbox-sep">|</span>' +
-                '<select id="cv-bbox-snap" class="cv-bbox-snap">' +
+            '<span class="cv-bbox-x">&times;</span>' +
+            '<input type="number" id="cv-bbox-h" class="cv-bbox-input" min="64" max="4096" step="64" value="1024">' +
+            '<span class="cv-bbox-sep">|</span>' +
+            '<select id="cv-bbox-snap" class="cv-bbox-snap">' +
                 '<option value="32">Snap: 32</option>' +
                 '<option value="64" selected>Snap: 64</option>' +
                 '<option value="128">Snap: 128</option>' +
-                '</select>' +
-                '<button id="cv-bbox-reset" class="cv-bbox-btn" title="Reset to 1024x1024">Reset</button>' +
-                '<button id="cv-bbox-lock" class="cv-bbox-btn" title="Lock aspect ratio">&#128274;</button>' +
-                '<button id="cv-bbox-fit" class="cv-bbox-btn" title="Fit to active layer">Fit</button>';
+            '</select>' +
+            '<button id="cv-bbox-reset" class="cv-bbox-btn" title="Reset to 1024x1024">Reset</button>' +
+            '<button id="cv-bbox-lock" class="cv-bbox-btn" title="Lock aspect ratio">&#128274;</button>' +
+            '<button id="cv-bbox-fit" class="cv-bbox-btn" title="Fit to active layer">Fit</button>';
         center.appendChild(bboxToolbar);
+
         layout.appendChild(center);
+
         var right = document.createElement('div');
         right.className = 'cv-right';
         right.innerHTML = buildRightHTML();
         layout.appendChild(right);
+
         panel.appendChild(layout);
         cacheElements();
     }
+
     function buildLeftHTML() {
         return '' +
             '<div class="cv-tools">' +
-            '<button class="cv-tool-btn active" data-tool="select" title="Select / Move (V)">' + ICONS.mousePointer + '</button>' +
-            '<button class="cv-tool-btn" data-tool="brush" title="Brush (B)">' + ICONS.brush + '</button>' +
-            '<button class="cv-tool-btn" data-tool="eraser" title="Eraser (E)">' + ICONS.eraser + '</button>' +
-            '<button class="cv-tool-btn" data-tool="mask" title="Inpaint Mask (M)">' + ICONS.mask + '</button>' +
-            '<button class="cv-tool-btn" data-tool="pan" title="Pan (H)">' + ICONS.move + '</button>' +
-            '<button class="cv-tool-btn" data-tool="resetView" title="Reset View (F)">' + ICONS.maximize + '</button>' +
-            '<hr class="cv-tool-separator">' +
-            '<button class="cv-tool-btn cv-undo-btn" id="cv-undo" title="Undo (Ctrl+Z)">' + ICONS.undo + '</button>' +
-            '<button class="cv-tool-btn cv-redo-btn" id="cv-redo" title="Redo (Ctrl+Y)">' + ICONS.redo + '</button>' +
+                '<button class="cv-tool-btn active" data-tool="select" title="Select / Move (V)">' + ICONS.mousePointer + '</button>' +
+                '<button class="cv-tool-btn" data-tool="brush" title="Brush (B)">' + ICONS.brush + '</button>' +
+                '<button class="cv-tool-btn" data-tool="eraser" title="Eraser (E)">' + ICONS.eraser + '</button>' +
+                '<button class="cv-tool-btn" data-tool="mask" title="Inpaint Mask (M)">' + ICONS.mask + '</button>' +
+                '<button class="cv-tool-btn" data-tool="pan" title="Pan (H)">' + ICONS.move + '</button>' +
+                '<button class="cv-tool-btn" data-tool="resetView" title="Reset View (F)">' + ICONS.maximize + '</button>' +
+                '<hr class="cv-tool-separator">' +
+                '<button class="cv-tool-btn cv-undo-btn" id="cv-undo" title="Undo (Ctrl+Z)">' + ICONS.undo + '</button>' +
+                '<button class="cv-tool-btn cv-redo-btn" id="cv-redo" title="Redo (Ctrl+Y)">' + ICONS.redo + '</button>' +
             '</div>' +
             '<div id="cv-mask-actions" class="cv-mask-actions" style="display:none">' +
-            '<button class="cv-mask-action-btn" id="cv-mask-fill">Fill All</button>' +
-            '<button class="cv-mask-action-btn" id="cv-mask-clear">Clear Mask</button>' +
-            '<span class="cv-mask-sep">|</span>' +
-            '<span class="cv-mask-label">Opacity</span>' +
-            '<input type="range" id="cv-mask-opacity" class="cv-mask-opacity-range" min="0.1" max="1" step="0.05" value="0.6">' +
+                '<button class="cv-mask-action-btn" id="cv-mask-fill">Fill All</button>' +
+                '<button class="cv-mask-action-btn" id="cv-mask-clear">Clear Mask</button>' +
+                '<span class="cv-mask-sep">|</span>' +
+                '<span class="cv-mask-label">Opacity</span>' +
+                '<input type="range" id="cv-mask-opacity" class="cv-mask-opacity-range" min="0.1" max="1" step="0.05" value="0.6">' +
             '</div>' +
             '<div class="cv-layers">' +
-            '<div class="cv-layers-header">' +
-            '<span class="cv-layers-title">Layers</span>' +
-            '<div class="cv-layers-add-wrap">' +
-            '<button class="cv-layers-add" id="cv-layers-add-btn" title="Add layer">+</button>' +
-            '<div id="cv-layer-type-menu" class="cv-layer-type-menu" style="display:none">' +
-            '<div class="cv-layer-type-item" data-type="raster">Raster Layer</div>' +
-            '<div class="cv-layer-type-item" data-type="mask">Inpaint Mask</div>' +
-            '<div class="cv-layer-type-item" data-type="control">Control Layer</div>' +
-            '<div class="cv-layer-type-item" data-type="ipadapter">IP-Adapter</div>' +
-            '<div class="cv-layer-type-item" data-type="regional">Regional Prompt</div>' +
-            '</div>' +
-            '</div>' +
-            '</div>' +
-            '<div class="cv-layer-list" id="cv-layer-list"></div>' +
+                '<div class="cv-layers-header">' +
+                    '<span class="cv-layers-title">Layers</span>' +
+                    '<div class="cv-layers-add-wrap">' +
+                        '<button class="cv-layers-add" id="cv-layers-add-btn" title="Add layer">+</button>' +
+                        '<div id="cv-layer-type-menu" class="cv-layer-type-menu" style="display:none">' +
+                            '<div class="cv-layer-type-item" data-type="raster">Raster Layer</div>' +
+                            '<div class="cv-layer-type-item" data-type="mask">Inpaint Mask</div>' +
+                            '<div class="cv-layer-type-item" data-type="control">Control Layer</div>' +
+                            '<div class="cv-layer-type-item" data-type="ipadapter">IP-Adapter</div>' +
+                            '<div class="cv-layer-type-item" data-type="regional">Regional Prompt</div>' +
+                        '</div>' +
+                    '</div>' +
+                '</div>' +
+                '<div class="cv-layer-list" id="cv-layer-list"></div>' +
             '</div>';
     }
+
     function buildRightHTML() {
         return '' +
             '<div id="cv-brush-section" class="cv-brush-settings" style="display:none">' +
-            '<div class="cv-section-title">Brush</div>' +
-            '<div class="cv-setting-row">' +
-            '<span class="cv-setting-label">Size</span>' +
-            '<input type="range" id="cv-brush-size" class="cv-range" min="1" max="200" value="20">' +
-            '<span id="cv-brush-size-val" class="cv-setting-value">20</span>' +
+                '<div class="cv-section-title">Brush</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Size</span>' +
+                    '<input type="range" id="cv-brush-size" class="cv-range" min="1" max="200" value="20">' +
+                    '<span id="cv-brush-size-val" class="cv-setting-value">20</span>' +
+                '</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Hardness</span>' +
+                    '<input type="range" id="cv-brush-hardness" class="cv-range" min="0" max="1" step="0.05" value="1">' +
+                    '<span id="cv-brush-hardness-val" class="cv-setting-value">1.0</span>' +
+                '</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Color</span>' +
+                    '<input type="color" id="cv-brush-color" class="cv-color-swatch" value="#ffffff">' +
+                '</div>' +
+                '<hr class="cv-separator">' +
             '</div>' +
-            '<div class="cv-setting-row">' +
-            '<span class="cv-setting-label">Hardness</span>' +
-            '<input type="range" id="cv-brush-hardness" class="cv-range" min="0" max="1" step="0.05" value="1">' +
-            '<span id="cv-brush-hardness-val" class="cv-setting-value">1.0</span>' +
-            '</div>' +
-            '<div class="cv-setting-row">' +
-            '<span class="cv-setting-label">Color</span>' +
-            '<input type="color" id="cv-brush-color" class="cv-color-swatch" value="#ffffff">' +
-            '</div>' +
-            '<hr class="cv-separator">' +
-            '</div>' +
+
             '<div id="cv-control-panel" class="cv-type-panel" style="display:none">' +
-            '<div class="cv-section-title">Control Layer</div>' +
-            '<div class="cv-setting-row">' +
-            '<span class="cv-setting-label">Type</span>' +
-            '<select id="cv-control-type" class="cv-select">' +
-            '<option value="depth">Depth</option>' +
-            '<option value="canny">Canny Edge</option>' +
-            '<option value="pose">Pose</option>' +
-            '<option value="normal">Normal Map</option>' +
-            '<option value="lineart">Lineart</option>' +
-            '</select>' +
+                '<div class="cv-section-title">Control Layer</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Type</span>' +
+                    '<select id="cv-control-type" class="cv-select">' +
+                        '<option value="depth">Depth</option>' +
+                        '<option value="canny">Canny Edge</option>' +
+                        '<option value="pose">Pose</option>' +
+                        '<option value="normal">Normal Map</option>' +
+                        '<option value="lineart">Lineart</option>' +
+                    '</select>' +
+                '</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Weight</span>' +
+                    '<input type="range" id="cv-control-weight" class="cv-range" min="0" max="2" step="0.05" value="1">' +
+                    '<span id="cv-control-weight-val" class="cv-setting-value">1.00</span>' +
+                '</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Start</span>' +
+                    '<input type="range" id="cv-control-start" class="cv-range" min="0" max="1" step="0.05" value="0">' +
+                    '<span id="cv-control-start-val" class="cv-setting-value">0.00</span>' +
+                '</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">End</span>' +
+                    '<input type="range" id="cv-control-end" class="cv-range" min="0" max="1" step="0.05" value="1">' +
+                    '<span id="cv-control-end-val" class="cv-setting-value">1.00</span>' +
+                '</div>' +
+                '<div class="cv-image-well" id="cv-control-well">' +
+                    '<span class="cv-image-well-placeholder">Drop image or click to upload</span>' +
+                '</div>' +
+                '<input type="file" id="cv-control-file" accept="image/*" style="display:none">' +
+                '<div class="cv-helper-text">ControlNet nodes will be added when available on the backend.</div>' +
             '</div>' +
-            '<div class="cv-setting-row">' +
-            '<span class="cv-setting-label">Weight</span>' +
-            '<input type="range" id="cv-control-weight" class="cv-range" min="0" max="2" step="0.05" value="1">' +
-            '<span id="cv-control-weight-val" class="cv-setting-value">1.00</span>' +
-            '</div>' +
-            '<div class="cv-setting-row">' +
-            '<span class="cv-setting-label">Start</span>' +
-            '<input type="range" id="cv-control-start" class="cv-range" min="0" max="1" step="0.05" value="0">' +
-            '<span id="cv-control-start-val" class="cv-setting-value">0.00</span>' +
-            '</div>' +
-            '<div class="cv-setting-row">' +
-            '<span class="cv-setting-label">End</span>' +
-            '<input type="range" id="cv-control-end" class="cv-range" min="0" max="1" step="0.05" value="1">' +
-            '<span id="cv-control-end-val" class="cv-setting-value">1.00</span>' +
-            '</div>' +
-            '<div class="cv-image-well" id="cv-control-well">' +
-            '<span class="cv-image-well-placeholder">Drop image or click to upload</span>' +
-            '</div>' +
-            '<input type="file" id="cv-control-file" accept="image/*" style="display:none">' +
-            '<div class="cv-helper-text">ControlNet nodes will be added when available on the backend.</div>' +
-            '</div>' +
+
             '<div id="cv-ipadapter-panel" class="cv-type-panel" style="display:none">' +
-            '<div class="cv-section-title">IP-Adapter</div>' +
-            '<div class="cv-setting-row">' +
-            '<span class="cv-setting-label">Weight</span>' +
-            '<input type="range" id="cv-ipa-weight" class="cv-range" min="0" max="2" step="0.05" value="1">' +
-            '<span id="cv-ipa-weight-val" class="cv-setting-value">1.00</span>' +
+                '<div class="cv-section-title">IP-Adapter</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Weight</span>' +
+                    '<input type="range" id="cv-ipa-weight" class="cv-range" min="0" max="2" step="0.05" value="1">' +
+                    '<span id="cv-ipa-weight-val" class="cv-setting-value">1.00</span>' +
+                '</div>' +
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Method</span>' +
+                    '<select id="cv-ipa-method" class="cv-select">' +
+                        '<option value="style">Style</option>' +
+                        '<option value="composition">Composition</option>' +
+                        '<option value="style_composition">Style + Composition</option>' +
+                    '</select>' +
+                '</div>' +
+                '<div class="cv-image-well" id="cv-ipa-well">' +
+                    '<span class="cv-image-well-placeholder">Drop image or click to upload</span>' +
+                '</div>' +
+                '<input type="file" id="cv-ipa-file" accept="image/*" style="display:none">' +
+                '<div class="cv-helper-text">IP-Adapter nodes will be added when available on the backend.</div>' +
             '</div>' +
-            '<div class="cv-setting-row">' +
-            '<span class="cv-setting-label">Method</span>' +
-            '<select id="cv-ipa-method" class="cv-select">' +
-            '<option value="style">Style</option>' +
-            '<option value="composition">Composition</option>' +
-            '<option value="style_composition">Style + Composition</option>' +
-            '</select>' +
-            '</div>' +
-            '<div class="cv-image-well" id="cv-ipa-well">' +
-            '<span class="cv-image-well-placeholder">Drop image or click to upload</span>' +
-            '</div>' +
-            '<input type="file" id="cv-ipa-file" accept="image/*" style="display:none">' +
-            '<div class="cv-helper-text">IP-Adapter nodes will be added when available on the backend.</div>' +
-            '</div>' +
+
             '<div id="cv-regional-panel" class="cv-type-panel" style="display:none">' +
-            '<div class="cv-section-title">Regional Prompt</div>' +
-            '<label class="cv-setting-label">Region Prompt</label>' +
-            '<textarea id="cv-regional-prompt" class="cv-textarea" rows="3" placeholder="Prompt for this region..."></textarea>' +
-            '<label class="cv-setting-label" style="margin-top:8px">Negative</label>' +
-            '<textarea id="cv-regional-neg" class="cv-textarea" rows="2" placeholder="Negative for this region..."></textarea>' +
-            '<div class="cv-helper-text">Draw the region on the canvas. Regional conditioning will be applied when supported.</div>' +
+                '<div class="cv-section-title">Regional Prompt</div>' +
+                '<label class="cv-setting-label">Region Prompt</label>' +
+                '<textarea id="cv-regional-prompt" class="cv-textarea" rows="3" placeholder="Prompt for this region..."></textarea>' +
+                '<label class="cv-setting-label" style="margin-top:8px">Negative</label>' +
+                '<textarea id="cv-regional-neg" class="cv-textarea" rows="2" placeholder="Negative for this region..."></textarea>' +
+                '<div class="cv-helper-text">Draw the region on the canvas. Regional conditioning will be applied when supported.</div>' +
             '</div>' +
+
             '<div class="cv-gen-settings">' +
-            '<div class="cv-section-title">Generation</div>' +
-            '<label class="cv-setting-label" style="margin-bottom:2px">Prompt</label>' +
-            '<textarea id="cv-prompt" class="cv-textarea" rows="3" placeholder="Describe the content..."></textarea>' +
-            '<div class="cv-setting-row" style="margin-top:4px">' +
-            '<span class="cv-setting-label">Denoise</span>' +
-            '<input type="range" id="cv-denoise" class="cv-range" min="0" max="1" step="0.01" value="0.75">' +
-            '<span id="cv-denoise-val" class="cv-setting-value">0.75</span>' +
-            '</div>' +
-            '<div class="cv-helper-text">Low = subtle changes &middot; High = full reimagining</div>' +
-            '<div class="cv-setting-row">' +
-            '<span class="cv-setting-label">Steps</span>' +
-            '<input type="number" id="cv-steps" class="cv-number-input" min="1" max="150" value="20">' +
-            '<input type="range" id="cv-steps-range" class="cv-range" min="1" max="150" value="20">' +
-            '</div>' +
-            '<div id="cv-cfg-row" class="cv-setting-row">' +
-            '<span class="cv-setting-label">CFG</span>' +
-            '<input type="number" id="cv-cfg" class="cv-number-input" min="1" max="20" step="0.5" value="7.0">' +
-            '<input type="range" id="cv-cfg-range" class="cv-range" min="1" max="20" step="0.5" value="7.0">' +
-            '</div>' +
-            '<div id="cv-guidance-row" class="cv-setting-row" style="display:none">' +
-            '<span class="cv-setting-label">Guidance</span>' +
-            '<input type="number" id="cv-guidance" class="cv-number-input" min="1" max="10" step="0.5" value="3.5">' +
-            '<input type="range" id="cv-guidance-range" class="cv-range" min="1" max="10" step="0.5" value="3.5">' +
-            '</div>' +
-            '<div id="cv-video-section" style="display:none">' +
-            '<div class="cv-section-title" style="margin-top:8px">Video</div>' +
-            '<div class="cv-setting-row">' +
-            '<span class="cv-setting-label">Frames</span>' +
-            '<input type="number" id="cv-frames" class="cv-number-input" min="9" max="257" step="8" value="97">' +
-            '<input type="range" id="cv-frames-range" class="cv-range" min="9" max="257" step="8" value="97">' +
-            '</div>' +
-            '<div class="cv-setting-row">' +
-            '<span class="cv-setting-label">FPS</span>' +
-            '<input type="number" id="cv-fps" class="cv-number-input" min="8" max="60" value="24">' +
-            '<input type="range" id="cv-fps-range" class="cv-range" min="8" max="60" value="24">' +
-            '</div>' +
-            '<div id="cv-duration-hint" class="cv-duration-hint"></div>' +
-            '</div>' +
-            '<label class="cv-setting-label" style="margin-top:4px">Model</label>' +
-            '<select id="cv-model" class="cv-select"><option disabled selected>Loading models...</option></select>' +
-            '<hr class="cv-separator">' +
-            '<button id="cv-import-btn" class="cv-import-btn">Import Image</button>' +
-            '<input type="file" id="cv-import-file" accept="image/*" style="display:none">' +
-            '<button id="cv-generate-btn" class="cv-generate-btn">Generate</button>' +
-            '<div id="cv-progress" class="cv-progress"><div id="cv-progress-bar" class="cv-progress-bar"></div></div>' +
-            '<div id="cv-progress-label" class="cv-progress-label"></div>' +
-            '<div id="cv-error-banner" class="cv-error-banner"></div>' +
+                '<div class="cv-section-title">Generation</div>' +
+
+                '<label class="cv-setting-label" style="margin-bottom:2px">Prompt</label>' +
+                '<textarea id="cv-prompt" class="cv-textarea" rows="3" placeholder="Describe the content..."></textarea>' +
+
+                '<div class="cv-setting-row" style="margin-top:4px">' +
+                    '<span class="cv-setting-label">Denoise</span>' +
+                    '<input type="range" id="cv-denoise" class="cv-range" min="0" max="1" step="0.01" value="0.75">' +
+                    '<span id="cv-denoise-val" class="cv-setting-value">0.75</span>' +
+                '</div>' +
+                '<div class="cv-helper-text">Low = subtle changes &middot; High = full reimagining</div>' +
+
+                '<div class="cv-setting-row">' +
+                    '<span class="cv-setting-label">Steps</span>' +
+                    '<input type="number" id="cv-steps" class="cv-number-input" min="1" max="150" value="20">' +
+                    '<input type="range" id="cv-steps-range" class="cv-range" min="1" max="150" value="20">' +
+                '</div>' +
+
+                '<div id="cv-cfg-row" class="cv-setting-row">' +
+                    '<span class="cv-setting-label">CFG</span>' +
+                    '<input type="number" id="cv-cfg" class="cv-number-input" min="1" max="20" step="0.5" value="7.0">' +
+                    '<input type="range" id="cv-cfg-range" class="cv-range" min="1" max="20" step="0.5" value="7.0">' +
+                '</div>' +
+
+                '<div id="cv-guidance-row" class="cv-setting-row" style="display:none">' +
+                    '<span class="cv-setting-label">Guidance</span>' +
+                    '<input type="number" id="cv-guidance" class="cv-number-input" min="1" max="10" step="0.5" value="3.5">' +
+                    '<input type="range" id="cv-guidance-range" class="cv-range" min="1" max="10" step="0.5" value="3.5">' +
+                '</div>' +
+
+                '<div id="cv-video-section" style="display:none">' +
+                    '<div class="cv-section-title" style="margin-top:8px">Video</div>' +
+                    '<div class="cv-setting-row">' +
+                        '<span class="cv-setting-label">Frames</span>' +
+                        '<input type="number" id="cv-frames" class="cv-number-input" min="9" max="257" step="8" value="97">' +
+                        '<input type="range" id="cv-frames-range" class="cv-range" min="9" max="257" step="8" value="97">' +
+                    '</div>' +
+                    '<div class="cv-setting-row">' +
+                        '<span class="cv-setting-label">FPS</span>' +
+                        '<input type="number" id="cv-fps" class="cv-number-input" min="8" max="60" value="24">' +
+                        '<input type="range" id="cv-fps-range" class="cv-range" min="8" max="60" value="24">' +
+                    '</div>' +
+                    '<div id="cv-duration-hint" class="cv-duration-hint"></div>' +
+                '</div>' +
+
+                '<label class="cv-setting-label" style="margin-top:4px">Model</label>' +
+                '<select id="cv-model" class="cv-select"><option disabled selected>Loading models...</option></select>' +
+
+                '<hr class="cv-separator">' +
+
+                '<button id="cv-import-btn" class="cv-import-btn">Import Image</button>' +
+                '<input type="file" id="cv-import-file" accept="image/*" style="display:none">' +
+
+                '<button id="cv-generate-btn" class="cv-generate-btn">Generate</button>' +
+
+                '<div id="cv-progress" class="cv-progress"><div id="cv-progress-bar" class="cv-progress-bar"></div></div>' +
+                '<div id="cv-progress-label" class="cv-progress-label"></div>' +
+                '<div id="cv-error-banner" class="cv-error-banner"></div>' +
             '</div>';
     }
+
     function cacheElements() {
         els.layerList = document.getElementById('cv-layer-list');
         els.brushSection = document.getElementById('cv-brush-section');
-        els.brushSizeInput = document.getElementById('cv-brush-size');
+        els.brushSizeInput = document.getElementById('cv-brush-size') as HTMLInputElement | null;
         els.brushSizeVal = document.getElementById('cv-brush-size-val');
-        els.brushColorInput = document.getElementById('cv-brush-color');
-        els.prompt = document.getElementById('cv-prompt');
-        els.denoise = document.getElementById('cv-denoise');
+        els.brushColorInput = document.getElementById('cv-brush-color') as HTMLInputElement | null;
+        els.prompt = document.getElementById('cv-prompt') as HTMLTextAreaElement | null;
+        els.denoise = document.getElementById('cv-denoise') as HTMLInputElement | null;
         els.denoiseVal = document.getElementById('cv-denoise-val');
-        els.steps = document.getElementById('cv-steps');
-        els.stepsRange = document.getElementById('cv-steps-range');
+        els.steps = document.getElementById('cv-steps') as HTMLInputElement | null;
+        els.stepsRange = document.getElementById('cv-steps-range') as HTMLInputElement | null;
         els.cfgRow = document.getElementById('cv-cfg-row');
-        els.cfg = document.getElementById('cv-cfg');
-        els.cfgRange = document.getElementById('cv-cfg-range');
+        els.cfg = document.getElementById('cv-cfg') as HTMLInputElement | null;
+        els.cfgRange = document.getElementById('cv-cfg-range') as HTMLInputElement | null;
         els.guidanceRow = document.getElementById('cv-guidance-row');
-        els.guidance = document.getElementById('cv-guidance');
-        els.guidanceRange = document.getElementById('cv-guidance-range');
+        els.guidance = document.getElementById('cv-guidance') as HTMLInputElement | null;
+        els.guidanceRange = document.getElementById('cv-guidance-range') as HTMLInputElement | null;
         els.videoSection = document.getElementById('cv-video-section');
-        els.framesInput = document.getElementById('cv-frames');
-        els.framesRange = document.getElementById('cv-frames-range');
-        els.fpsInput = document.getElementById('cv-fps');
-        els.fpsRange = document.getElementById('cv-fps-range');
+        els.framesInput = document.getElementById('cv-frames') as HTMLInputElement | null;
+        els.framesRange = document.getElementById('cv-frames-range') as HTMLInputElement | null;
+        els.fpsInput = document.getElementById('cv-fps') as HTMLInputElement | null;
+        els.fpsRange = document.getElementById('cv-fps-range') as HTMLInputElement | null;
         els.durationHint = document.getElementById('cv-duration-hint');
-        els.model = document.getElementById('cv-model');
+        els.model = document.getElementById('cv-model') as HTMLSelectElement | null;
         els.importBtn = document.getElementById('cv-import-btn');
-        els.importFile = document.getElementById('cv-import-file');
-        els.generateBtn = document.getElementById('cv-generate-btn');
+        els.importFile = document.getElementById('cv-import-file') as HTMLInputElement | null;
+        els.generateBtn = document.getElementById('cv-generate-btn') as HTMLButtonElement | null;
         els.progress = document.getElementById('cv-progress');
         els.progressBar = document.getElementById('cv-progress-bar');
         els.progressLabel = document.getElementById('cv-progress-label');
         els.errorBanner = document.getElementById('cv-error-banner');
     }
+
     // ── Konva Stage ──
     function initKonva() {
         var container = document.getElementById('canvas-stage-container');
-        if (!container)
-            return;
+        if (!container) return;
+
         var w = container.offsetWidth;
         var h = container.offsetHeight;
+
         // Bail if layout hasn't happened yet — resize() will fix it
-        if (w < 100 || h < 100) {
-            w = 800;
-            h = 600;
-        }
+        if (w < 100 || h < 100) { w = 800; h = 600; }
+
         stage = new Konva.Stage({
             container: 'canvas-stage-container',
             width: w,
             height: h,
             draggable: false
         });
+
         // Background layer
         backgroundLayer = new Konva.Layer({ listening: false });
         stage.add(backgroundLayer);
+
         var checkerImg = createCheckerboardImage();
-        checkerImg.onload = function () {
+        checkerImg.onload = function() {
             bgRect = new Konva.Rect({
                 x: -10000, y: -10000,
                 width: 20000, height: 20000,
@@ -643,17 +769,22 @@ var CanvasTab = (function () {
                 fillPatternRepeat: 'repeat',
                 listening: false
             });
-            backgroundLayer.add(bgRect);
-            backgroundLayer.batchDraw();
+            backgroundLayer!.add(bgRect);
+            backgroundLayer!.batchDraw();
         };
+
         // UI layer (will be moved to top after raster layers)
         uiLayer = new Konva.Layer();
+
         // Initial raster layer
         addLayer('Raster Layer', 'raster');
+
         // UI layer on top
         stage.add(uiLayer);
+
         // Bounding box
         initBoundingBox(w, h);
+
         // Brush cursor
         brushCursor = new Konva.Circle({
             x: 0, y: 0,
@@ -664,16 +795,19 @@ var CanvasTab = (function () {
             listening: false
         });
         uiLayer.add(brushCursor);
+
         setupStageEvents();
         uiLayer.batchDraw();
         konvaReady = true;
     }
+
     // ── Bounding Box ──
-    function initBoundingBox(stageW, stageH) {
+    function initBoundingBox(stageW: number, stageH: number) {
         var bw = 1024;
         var bh = 1024;
         var cx = Math.round(stageW / 2 - bw / 2);
         var cy = Math.round(stageH / 2 - bh / 2);
+
         boundingBox = new Konva.Rect({
             x: cx, y: cy,
             width: bw, height: bh,
@@ -688,7 +822,8 @@ var CanvasTab = (function () {
             shadowOpacity: 0.3,
             shadowEnabled: true
         });
-        uiLayer.add(boundingBox);
+        uiLayer!.add(boundingBox);
+
         sizeLabel = new Konva.Text({
             x: cx, y: cy + bh + 8,
             text: bw + ' \u00d7 ' + bh,
@@ -699,20 +834,25 @@ var CanvasTab = (function () {
             listening: false,
             padding: 2
         });
-        uiLayer.add(sizeLabel);
-        boundingBox.on('dragmove', function () {
+        uiLayer!.add(sizeLabel);
+
+        boundingBox.on('dragmove', function() {
             updateHandles();
             updateSizeLabel();
             updateVideoOverlayPosition();
         });
-        boundingBox.on('dragend', function () {
+
+        boundingBox.on('dragend', function() {
             History.push();
         });
+
         createResizeHandles();
     }
+
     function createResizeHandles() {
-        resizeHandles.forEach(function (h) { h.destroy(); });
+        resizeHandles.forEach(function(h) { h.destroy(); });
         resizeHandles = [];
+
         var positions = [
             { name: 'tl', cursor: 'nwse-resize' },
             { name: 'tc', cursor: 'ns-resize' },
@@ -723,9 +863,11 @@ var CanvasTab = (function () {
             { name: 'bc', cursor: 'ns-resize' },
             { name: 'br', cursor: 'nwse-resize' }
         ];
+
         var hs = HANDLE_SIZE;
         var half = hs / 2;
-        positions.forEach(function (p) {
+
+        positions.forEach(function(p) {
             var handle = new Konva.Rect({
                 width: hs, height: hs,
                 fill: '#6c6af5',
@@ -735,97 +877,99 @@ var CanvasTab = (function () {
                 draggable: true,
                 name: 'handle-' + p.name
             });
-            handle.on('mouseenter', function () {
-                stage.container().style.cursor = p.cursor;
+
+            handle.on('mouseenter', function() {
+                stage!.container().style.cursor = p.cursor;
             });
-            handle.on('mouseleave', function () {
-                if (!activeHandle)
-                    updateCursor();
+            handle.on('mouseleave', function() {
+                if (!activeHandle) updateCursor();
             });
-            handle.on('dragstart', function () {
+
+            handle.on('dragstart', function() {
                 activeHandle = p.name;
                 handleStartBox = {
-                    x: boundingBox.x(), y: boundingBox.y(),
-                    w: boundingBox.width(), h: boundingBox.height()
+                    x: boundingBox!.x(), y: boundingBox!.y(),
+                    w: boundingBox!.width(), h: boundingBox!.height()
                 };
                 handleStartMouse = getRelativePointerPosition();
             });
-            handle.on('dragmove', function () {
+
+            handle.on('dragmove', function() {
                 handle.position(handle.position());
+
                 var pos = getRelativePointerPosition();
-                var dx = pos.x - handleStartMouse.x;
-                var dy = pos.y - handleStartMouse.y;
-                var newX = handleStartBox.x;
-                var newY = handleStartBox.y;
-                var newW = handleStartBox.w;
-                var newH = handleStartBox.h;
-                var nm = activeHandle;
-                if (nm.indexOf('l') >= 0) {
-                    newX = handleStartBox.x + dx;
-                    newW = handleStartBox.w - dx;
-                }
-                else if (nm.indexOf('r') >= 0) {
-                    newW = handleStartBox.w + dx;
-                }
-                if (nm.indexOf('t') >= 0) {
-                    newY = handleStartBox.y + dy;
-                    newH = handleStartBox.h - dy;
-                }
-                else if (nm.indexOf('b') >= 0) {
-                    newH = handleStartBox.h + dy;
-                }
+                var dx = pos.x - handleStartMouse!.x;
+                var dy = pos.y - handleStartMouse!.y;
+
+                var newX = handleStartBox!.x;
+                var newY = handleStartBox!.y;
+                var newW = handleStartBox!.w;
+                var newH = handleStartBox!.h;
+
+                var nm = activeHandle!;
+                if (nm.indexOf('l') >= 0) { newX = handleStartBox!.x + dx; newW = handleStartBox!.w - dx; }
+                else if (nm.indexOf('r') >= 0) { newW = handleStartBox!.w + dx; }
+                if (nm.indexOf('t') >= 0) { newY = handleStartBox!.y + dy; newH = handleStartBox!.h - dy; }
+                else if (nm.indexOf('b') >= 0) { newH = handleStartBox!.h + dy; }
+
                 newW = clampDimForArch(newW);
                 newH = clampDimForArch(newH);
-                if (nm.indexOf('l') >= 0)
-                    newX = handleStartBox.x + handleStartBox.w - newW;
-                if (nm.indexOf('t') >= 0)
-                    newY = handleStartBox.y + handleStartBox.h - newH;
-                boundingBox.x(newX);
-                boundingBox.y(newY);
-                boundingBox.width(newW);
-                boundingBox.height(newH);
+
+                if (nm.indexOf('l') >= 0) newX = handleStartBox!.x + handleStartBox!.w - newW;
+                if (nm.indexOf('t') >= 0) newY = handleStartBox!.y + handleStartBox!.h - newH;
+
+                boundingBox!.x(newX);
+                boundingBox!.y(newY);
+                boundingBox!.width(newW);
+                boundingBox!.height(newH);
+
                 updateHandles();
                 updateSizeLabel();
                 updateVideoOverlayPosition();
             });
-            handle.on('dragend', function () {
+
+            handle.on('dragend', function() {
                 activeHandle = null;
                 handleStartBox = null;
                 handleStartMouse = null;
                 updateCursor();
                 History.push();
             });
-            uiLayer.add(handle);
+
+            uiLayer!.add(handle);
             resizeHandles.push(handle);
         });
+
         updateHandles();
     }
+
     function updateHandles() {
-        if (!boundingBox)
-            return;
+        if (!boundingBox) return;
         var bx = boundingBox.x();
         var by = boundingBox.y();
         var bw = boundingBox.width();
         var bh = boundingBox.height();
         var half = HANDLE_SIZE / 2;
+
         var coords = [
-            { x: bx - half, y: by - half }, // tl
-            { x: bx + bw / 2 - half, y: by - half }, // tc
-            { x: bx + bw - half, y: by - half }, // tr
-            { x: bx - half, y: by + bh / 2 - half }, // ml
-            { x: bx + bw - half, y: by + bh / 2 - half }, // mr
-            { x: bx - half, y: by + bh - half }, // bl
-            { x: bx + bw / 2 - half, y: by + bh - half }, // bc
-            { x: bx + bw - half, y: by + bh - half } // br
+            { x: bx - half,          y: by - half },           // tl
+            { x: bx + bw / 2 - half, y: by - half },           // tc
+            { x: bx + bw - half,     y: by - half },           // tr
+            { x: bx - half,          y: by + bh / 2 - half },  // ml
+            { x: bx + bw - half,     y: by + bh / 2 - half },  // mr
+            { x: bx - half,          y: by + bh - half },      // bl
+            { x: bx + bw / 2 - half, y: by + bh - half },      // bc
+            { x: bx + bw - half,     y: by + bh - half }       // br
         ];
-        resizeHandles.forEach(function (h, i) {
+
+        resizeHandles.forEach(function(h, i) {
             h.x(coords[i].x);
             h.y(coords[i].y);
         });
     }
+
     function updateSizeLabel() {
-        if (!sizeLabel || !boundingBox)
-            return;
+        if (!sizeLabel || !boundingBox) return;
         var bw = boundingBox.width();
         var bh = boundingBox.height();
         var label = bw + ' \u00d7 ' + bh;
@@ -836,86 +980,88 @@ var CanvasTab = (function () {
         // Center label under bbox
         sizeLabel.x(boundingBox.x() + bw / 2 - sizeLabel.width() / 2);
         sizeLabel.y(boundingBox.y() + bh + 8);
-        uiLayer.batchDraw();
+        uiLayer!.batchDraw();
         updateBboxInputs();
     }
+
     function updateBboxInputs() {
-        var bboxW = document.getElementById('cv-bbox-w');
-        var bboxH = document.getElementById('cv-bbox-h');
-        if (bboxW && boundingBox)
-            bboxW.value = String(Math.round(boundingBox.width()));
-        if (bboxH && boundingBox)
-            bboxH.value = String(Math.round(boundingBox.height()));
+        var bboxW = document.getElementById('cv-bbox-w') as HTMLInputElement | null;
+        var bboxH = document.getElementById('cv-bbox-h') as HTMLInputElement | null;
+        if (bboxW && boundingBox) bboxW.value = String(Math.round(boundingBox.width()));
+        if (bboxH && boundingBox) bboxH.value = String(Math.round(boundingBox.height()));
     }
+
     // ── Stage Events ──
     function setupStageEvents() {
-        var container = stage.container();
+        var container = stage!.container();
+
         // Pan: middle mouse OR space+drag OR pan tool
-        container.addEventListener('mousedown', function (e) {
+        container.addEventListener('mousedown', function(e) {
             if (e.button === 1 || (e.button === 0 && (isSpaceHeld || activeTool === 'pan'))) {
                 isPanning = true;
                 panStart.x = e.clientX;
                 panStart.y = e.clientY;
-                stageStart.x = stage.x();
-                stageStart.y = stage.y();
+                stageStart.x = stage!.x();
+                stageStart.y = stage!.y();
                 container.style.cursor = 'grabbing';
                 e.preventDefault();
             }
         });
-        container.addEventListener('mousemove', function (e) {
+
+        container.addEventListener('mousemove', function(e) {
             if (isPanning) {
-                stage.position({
+                stage!.position({
                     x: stageStart.x + (e.clientX - panStart.x),
                     y: stageStart.y + (e.clientY - panStart.y)
                 });
-                stage.batchDraw();
+                stage!.batchDraw();
                 updateVideoOverlayPosition();
             }
         });
-        container.addEventListener('mouseup', function () {
+
+        container.addEventListener('mouseup', function() {
             if (isPanning) {
                 isPanning = false;
                 updateCursor();
             }
         });
-        container.addEventListener('auxclick', function (e) {
-            if (e.button === 1)
-                e.preventDefault();
+
+        container.addEventListener('auxclick', function(e) {
+            if (e.button === 1) e.preventDefault();
         });
+
         // Zoom
-        stage.on('wheel', function (e) {
+        stage!.on('wheel', function(e) {
             e.evt.preventDefault();
             var scaleBy = 1.08;
-            var oldScale = stage.scaleX();
-            var pointer = stage.getPointerPosition();
-            if (!pointer)
-                return;
+            var oldScale = stage!.scaleX();
+            var pointer = stage!.getPointerPosition();
+            if (!pointer) return;
             var newScale = e.evt.deltaY < 0 ? oldScale * scaleBy : oldScale / scaleBy;
             var clampedScale = Math.min(Math.max(newScale, 0.1), 10);
+
             var mousePointTo = {
-                x: (pointer.x - stage.x()) / oldScale,
-                y: (pointer.y - stage.y()) / oldScale
+                x: (pointer.x - stage!.x()) / oldScale,
+                y: (pointer.y - stage!.y()) / oldScale
             };
-            stage.scale({ x: clampedScale, y: clampedScale });
-            stage.position({
+            stage!.scale({ x: clampedScale, y: clampedScale });
+            stage!.position({
                 x: pointer.x - mousePointTo.x * clampedScale,
                 y: pointer.y - mousePointTo.y * clampedScale
             });
-            stage.batchDraw();
+            stage!.batchDraw();
             updateVideoOverlayPosition();
         });
+
         // Drawing
-        stage.on('mousedown', function (e) {
-            if (activeTool !== 'brush' && activeTool !== 'eraser' && activeTool !== 'mask')
-                return;
+        stage!.on('mousedown', function(e) {
+            if (activeTool !== 'brush' && activeTool !== 'eraser' && activeTool !== 'mask') return;
             var activeLayer = getLayerById(activeLayerId);
-            if (activeLayer && activeLayer.locked)
-                return;
-            if (isPanning || isSpaceHeld)
-                return;
+            if (activeLayer && activeLayer.locked) return;
+            if (isPanning || isSpaceHeld) return;
             var target = e.target;
-            if (target && target.name() && (target.name() === 'bounding-box' || target.name().indexOf('handle-') === 0))
-                return;
+            if (target && target.name() && (target.name() === 'bounding-box' || target.name().indexOf('handle-') === 0)) return;
+
             isDrawing = true;
             var pos = getRelativePointerPosition();
             var strokeColor = activeTool === 'mask' ? 'rgba(239, 68, 68, 0.5)' : (activeTool === 'eraser' ? '#000' : brushColor);
@@ -931,71 +1077,73 @@ var CanvasTab = (function () {
                 listening: false
             });
             var layer = getActiveKonvaLayer();
-            if (layer)
-                layer.add(currentLine);
+            if (layer) layer.add(currentLine);
         });
-        stage.on('mousemove', function () {
+
+        stage!.on('mousemove', function() {
             if ((activeTool === 'brush' || activeTool === 'eraser' || activeTool === 'mask') && brushCursor) {
                 var pos = getRelativePointerPosition();
                 brushCursor.x(pos.x);
                 brushCursor.y(pos.y);
-                brushCursor.radius(brushSize / 2 / stage.scaleX());
-                brushCursor.strokeWidth(1.5 / stage.scaleX());
-                if (!brushCursor.visible())
-                    brushCursor.visible(true);
-                uiLayer.batchDraw();
+                brushCursor.radius(brushSize / 2 / stage!.scaleX());
+                brushCursor.strokeWidth(1.5 / stage!.scaleX());
+                if (!brushCursor.visible()) brushCursor.visible(true);
+                uiLayer!.batchDraw();
             }
-            if (!isDrawing || !currentLine)
-                return;
+
+            if (!isDrawing || !currentLine) return;
             var pos = getRelativePointerPosition();
             currentLine.points(currentLine.points().concat([pos.x, pos.y]));
             var layer = getActiveKonvaLayer();
             if (layer && !drawScheduled) {
                 drawScheduled = true;
-                requestAnimationFrame(function () {
-                    layer.batchDraw();
+                requestAnimationFrame(function() {
+                    layer!.batchDraw();
                     drawScheduled = false;
                 });
             }
         });
-        stage.on('mouseup', function () {
+
+        stage!.on('mouseup', function() {
             if (isDrawing && currentLine) {
                 debouncedHistoryPush();
             }
             isDrawing = false;
             currentLine = null;
         });
-        stage.on('mouseleave', function () {
+
+        stage!.on('mouseleave', function() {
             isDrawing = false;
             currentLine = null;
             if (brushCursor) {
                 brushCursor.visible(false);
-                uiLayer.batchDraw();
+                uiLayer!.batchDraw();
             }
         });
+
         // Drag and drop
-        container.addEventListener('dragover', function (e) { e.preventDefault(); });
-        container.addEventListener('drop', function (e) {
+        container.addEventListener('dragover', function(e) { e.preventDefault(); });
+        container.addEventListener('drop', function(e) {
             e.preventDefault();
             var file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-            if (!file || !file.type.startsWith('image/'))
-                return;
+            if (!file || !file.type.startsWith('image/')) return;
             loadImageFile(file);
         });
     }
+
     // ── Image loading ──
-    function loadImageFile(file) {
+    function loadImageFile(file: File) {
         var reader = new FileReader();
-        reader.onload = function (ev) {
-            var result = ev.target.result;
+        reader.onload = function(ev) {
+            var result = (ev.target as FileReader).result as string;
             var img = new Image();
-            img.onload = function () {
+            img.onload = function() {
                 var kImg = new Konva.Image({
                     image: img,
-                    x: boundingBox.x(),
-                    y: boundingBox.y(),
-                    width: boundingBox.width(),
-                    height: boundingBox.height(),
+                    x: boundingBox!.x(),
+                    y: boundingBox!.y(),
+                    width: boundingBox!.width(),
+                    height: boundingBox!.height(),
                     draggable: activeTool === 'select'
                 });
                 var layer = getActiveKonvaLayer();
@@ -1009,76 +1157,84 @@ var CanvasTab = (function () {
         };
         reader.readAsDataURL(file);
     }
+
     // ── Layer Management ──
-    function addLayer(name, type) {
+    function addLayer(name: string, type?: string): RasterLayerInfo {
         var id = ++layerIdCounter;
         var konvaLayer = new Konva.Layer();
-        stage.add(konvaLayer);
+        stage!.add(konvaLayer);
         // Keep uiLayer on top
-        if (uiLayer && uiLayer.parent)
-            uiLayer.moveToTop();
-        var info = { id: id, name: name, type: type || 'raster', visible: true, opacity: 1, locked: false, konvaLayer: konvaLayer };
+        if (uiLayer && uiLayer.parent) uiLayer.moveToTop();
+
+        var info: RasterLayerInfo = { id: id, name: name, type: type || 'raster', visible: true, opacity: 1, locked: false, konvaLayer: konvaLayer };
         rasterLayers.push(info);
         activeLayerId = id;
         renderLayerList();
         History.push();
         return info;
     }
+
     function renderLayerList() {
-        if (!els.layerList)
-            return;
+        if (!els.layerList) return;
         els.layerList.innerHTML = '';
+
         for (var i = rasterLayers.length - 1; i >= 0; i--) {
             var layer = rasterLayers[i];
             var row = document.createElement('div');
             row.className = 'cv-layer-row' + (layer.id === activeLayerId ? ' active' : '');
             row.dataset.layerId = String(layer.id);
             row.draggable = true;
-            (function (dragLayer, dragRow) {
-                dragRow.addEventListener('dragstart', function (e) {
-                    e.dataTransfer.setData('text/plain', String(dragLayer.id));
+
+            (function(dragLayer, dragRow) {
+                dragRow.addEventListener('dragstart', function(e) {
+                    e.dataTransfer!.setData('text/plain', String(dragLayer.id));
                     dragRow.classList.add('cv-layer-dragging');
                 });
-                dragRow.addEventListener('dragend', function () {
+                dragRow.addEventListener('dragend', function() {
                     dragRow.classList.remove('cv-layer-dragging');
                 });
-                dragRow.addEventListener('dragover', function (e) {
+                dragRow.addEventListener('dragover', function(e) {
                     e.preventDefault();
                     dragRow.classList.add('cv-layer-dragover');
                 });
-                dragRow.addEventListener('dragleave', function () {
+                dragRow.addEventListener('dragleave', function() {
                     dragRow.classList.remove('cv-layer-dragover');
                 });
-                dragRow.addEventListener('drop', function (e) {
+                dragRow.addEventListener('drop', function(e) {
                     e.preventDefault();
                     dragRow.classList.remove('cv-layer-dragover');
-                    var draggedId = parseInt(e.dataTransfer.getData('text/plain'));
+                    var draggedId = parseInt(e.dataTransfer!.getData('text/plain'));
                     var targetId = dragLayer.id;
-                    if (draggedId === targetId)
-                        return;
+                    if (draggedId === targetId) return;
                     reorderLayer(draggedId, targetId);
                 });
             })(layer, row);
+
             var eyeBtn = document.createElement('button');
             eyeBtn.className = 'cv-layer-eye' + (layer.visible ? '' : ' hidden-layer');
             eyeBtn.innerHTML = layer.visible ? ICONS.eye : ICONS.eyeOff;
             eyeBtn.dataset.layerId = String(layer.id);
+
             var badge = document.createElement('span');
             badge.className = 'cv-layer-badge ' + layer.type;
             badge.textContent = layer.type.toUpperCase();
+
             var nameSpan = document.createElement('span');
             nameSpan.className = 'cv-layer-name';
             nameSpan.textContent = layer.name;
+
             var deleteBtn = document.createElement('button');
             deleteBtn.className = 'cv-layer-delete';
             deleteBtn.innerHTML = ICONS.trash;
             deleteBtn.dataset.layerId = String(layer.id);
             deleteBtn.title = 'Delete layer';
+
             var lockBtn = document.createElement('button');
             lockBtn.className = 'cv-layer-lock' + (layer.locked ? ' locked' : '');
             lockBtn.innerHTML = layer.locked ? ICONS.lock : ICONS.unlock;
             lockBtn.dataset.layerId = String(layer.id);
             lockBtn.title = layer.locked ? 'Unlock layer' : 'Lock layer';
+
             var opacitySlider = document.createElement('input');
             opacitySlider.type = 'range';
             opacitySlider.className = 'cv-layer-opacity';
@@ -1088,7 +1244,8 @@ var CanvasTab = (function () {
             opacitySlider.value = String(layer.opacity !== undefined ? layer.opacity : 1);
             opacitySlider.title = 'Opacity';
             opacitySlider.dataset.layerId = String(layer.id);
-            nameSpan.addEventListener('dblclick', function (e) {
+
+            nameSpan.addEventListener('dblclick', function(e) {
                 e.stopPropagation();
                 var thisLayer = layer;
                 var input = document.createElement('input');
@@ -1104,16 +1261,12 @@ var CanvasTab = (function () {
                     renderLayerList();
                 }
                 input.addEventListener('blur', finishRename);
-                input.addEventListener('keydown', function (ev) {
-                    if (ev.key === 'Enter') {
-                        ev.preventDefault();
-                        finishRename();
-                    }
-                    if (ev.key === 'Escape') {
-                        renderLayerList();
-                    }
+                input.addEventListener('keydown', function(ev) {
+                    if (ev.key === 'Enter') { ev.preventDefault(); finishRename(); }
+                    if (ev.key === 'Escape') { renderLayerList(); }
                 });
             });
+
             row.appendChild(eyeBtn);
             row.appendChild(lockBtn);
             row.appendChild(badge);
@@ -1122,30 +1275,32 @@ var CanvasTab = (function () {
             row.appendChild(deleteBtn);
             els.layerList.appendChild(row);
         }
+
         if (isVideoArch()) {
             var frameIndicator = document.createElement('div');
             frameIndicator.className = 'cv-frame-indicator';
             frameIndicator.textContent = genState.frames + ' frames @ ' + genState.fps + 'fps';
             els.layerList.appendChild(frameIndicator);
         }
-        els.layerList.onclick = function (e) {
-            var target = e.target;
-            var delEl = target.closest('.cv-layer-delete');
+
+        els.layerList.onclick = function(e) {
+            var target = e.target as HTMLElement;
+            var delEl = target.closest('.cv-layer-delete') as HTMLElement | null;
             if (delEl) {
-                var delId = parseInt(delEl.dataset.layerId);
+                var delId = parseInt(delEl.dataset.layerId!);
                 deleteLayer(delId);
                 e.stopPropagation();
                 return;
             }
-            var eyeEl = target.closest('.cv-layer-eye');
+            var eyeEl = target.closest('.cv-layer-eye') as HTMLElement | null;
             if (eyeEl) {
-                toggleLayerVisibility(parseInt(eyeEl.dataset.layerId));
+                toggleLayerVisibility(parseInt(eyeEl.dataset.layerId!));
                 e.stopPropagation();
                 return;
             }
-            var lockEl = target.closest('.cv-layer-lock');
+            var lockEl = target.closest('.cv-layer-lock') as HTMLElement | null;
             if (lockEl) {
-                var lockId = parseInt(lockEl.dataset.layerId);
+                var lockId = parseInt(lockEl.dataset.layerId!);
                 var lyr = getLayerById(lockId);
                 if (lyr) {
                     lyr.locked = !lyr.locked;
@@ -1154,16 +1309,17 @@ var CanvasTab = (function () {
                 e.stopPropagation();
                 return;
             }
-            var rowEl = target.closest('.cv-layer-row');
+            var rowEl = target.closest('.cv-layer-row') as HTMLElement | null;
             if (rowEl) {
-                activeLayerId = parseInt(rowEl.dataset.layerId);
+                activeLayerId = parseInt(rowEl.dataset.layerId!);
                 renderLayerList();
             }
         };
-        els.layerList.addEventListener('input', function (e) {
-            var inputTarget = e.target;
+
+        els.layerList.addEventListener('input', function(e) {
+            var inputTarget = e.target as HTMLInputElement;
             if (inputTarget.classList.contains('cv-layer-opacity')) {
-                var lid = parseInt(inputTarget.dataset.layerId);
+                var lid = parseInt(inputTarget.dataset.layerId!);
                 var lyr = getLayerById(lid);
                 if (lyr) {
                     lyr.opacity = parseFloat(inputTarget.value);
@@ -1172,55 +1328,53 @@ var CanvasTab = (function () {
                 }
             }
         });
+
         updateMaskActions();
         updateTypePanels();
     }
+
     function updateMaskActions() {
         var maskActions = document.getElementById('cv-mask-actions');
-        if (!maskActions)
-            return;
+        if (!maskActions) return;
         var activeLayer = getLayerById(activeLayerId);
         maskActions.style.display = (activeLayer && activeLayer.type === 'mask') ? 'flex' : 'none';
     }
+
     function updateTypePanels() {
         var controlPanel = document.getElementById('cv-control-panel');
         var ipaPanel = document.getElementById('cv-ipadapter-panel');
         var regionalPanel = document.getElementById('cv-regional-panel');
+
         var activeLayer = getLayerById(activeLayerId);
         var type = activeLayer ? activeLayer.type : 'raster';
-        if (controlPanel)
-            controlPanel.style.display = type === 'control' ? 'block' : 'none';
-        if (ipaPanel)
-            ipaPanel.style.display = type === 'ipadapter' ? 'block' : 'none';
-        if (regionalPanel)
-            regionalPanel.style.display = type === 'regional' ? 'block' : 'none';
+
+        if (controlPanel) controlPanel.style.display = type === 'control' ? 'block' : 'none';
+        if (ipaPanel) ipaPanel.style.display = type === 'ipadapter' ? 'block' : 'none';
+        if (regionalPanel) regionalPanel.style.display = type === 'regional' ? 'block' : 'none';
     }
-    function reorderLayer(fromId, toId) {
+
+    function reorderLayer(fromId: number, toId: number) {
         var fromIdx = -1, toIdx = -1;
         for (var i = 0; i < rasterLayers.length; i++) {
-            if (rasterLayers[i].id === fromId)
-                fromIdx = i;
-            if (rasterLayers[i].id === toId)
-                toIdx = i;
+            if (rasterLayers[i].id === fromId) fromIdx = i;
+            if (rasterLayers[i].id === toId) toIdx = i;
         }
-        if (fromIdx === -1 || toIdx === -1)
-            return;
+        if (fromIdx === -1 || toIdx === -1) return;
         var moved = rasterLayers.splice(fromIdx, 1)[0];
         rasterLayers.splice(toIdx, 0, moved);
         // Reorder Konva layers to match
-        rasterLayers.forEach(function (l) {
+        rasterLayers.forEach(function(l) {
             l.konvaLayer.moveToBottom();
         });
         // Background stays at bottom, UI at top
-        if (backgroundLayer)
-            backgroundLayer.moveToBottom();
-        if (uiLayer)
-            uiLayer.moveToTop();
-        stage.batchDraw();
+        if (backgroundLayer) backgroundLayer.moveToBottom();
+        if (uiLayer) uiLayer.moveToTop();
+        stage!.batchDraw();
         renderLayerList();
         History.push();
     }
-    function toggleLayerVisibility(layerId) {
+
+    function toggleLayerVisibility(layerId: number) {
         for (var i = 0; i < rasterLayers.length; i++) {
             if (rasterLayers[i].id === layerId) {
                 rasterLayers[i].visible = !rasterLayers[i].visible;
@@ -1232,18 +1386,14 @@ var CanvasTab = (function () {
             }
         }
     }
-    function deleteLayer(layerId) {
-        if (rasterLayers.length <= 1)
-            return; // Keep at least one
+
+    function deleteLayer(layerId: number) {
+        if (rasterLayers.length <= 1) return; // Keep at least one
         var idx = -1;
         for (var i = 0; i < rasterLayers.length; i++) {
-            if (rasterLayers[i].id === layerId) {
-                idx = i;
-                break;
-            }
+            if (rasterLayers[i].id === layerId) { idx = i; break; }
         }
-        if (idx === -1)
-            return;
+        if (idx === -1) return;
         var info = rasterLayers[idx];
         info.konvaLayer.remove();
         rasterLayers.splice(idx, 1);
@@ -1253,16 +1403,13 @@ var CanvasTab = (function () {
         }
         renderLayerList();
     }
-    function removeLayerById(layerId, skipUndo) {
+
+    function removeLayerById(layerId: number, skipUndo: boolean) {
         var idx = -1;
         for (var i = 0; i < rasterLayers.length; i++) {
-            if (rasterLayers[i].id === layerId) {
-                idx = i;
-                break;
-            }
+            if (rasterLayers[i].id === layerId) { idx = i; break; }
         }
-        if (idx === -1)
-            return;
+        if (idx === -1) return;
         rasterLayers[idx].konvaLayer.remove();
         rasterLayers.splice(idx, 1);
         if (activeLayerId === layerId && rasterLayers.length > 0) {
@@ -1270,61 +1417,54 @@ var CanvasTab = (function () {
         }
         renderLayerList();
     }
+
     // ── Tool Switching ──
-    function setTool(tool) {
-        if (tool === 'resetView') {
-            resetView();
-            return;
-        }
+    function setTool(tool: string) {
+        if (tool === 'resetView') { resetView(); return; }
         activeTool = tool;
-        document.querySelectorAll('.cv-tool-btn').forEach(function (btn) {
-            btn.classList.toggle('active', btn.dataset.tool === tool);
+
+        document.querySelectorAll('.cv-tool-btn').forEach(function(btn) {
+            (btn as HTMLElement).classList.toggle('active', (btn as HTMLElement).dataset.tool === tool);
         });
+
         if (els.brushSection) {
             els.brushSection.style.display = (tool === 'brush' || tool === 'eraser' || tool === 'mask') ? 'flex' : 'none';
         }
-        if (brushCursor) {
-            brushCursor.visible(false);
-            uiLayer.batchDraw();
-        }
-        rasterLayers.forEach(function (l) {
-            l.konvaLayer.find('Image').forEach(function (img) {
+
+        if (brushCursor) { brushCursor.visible(false); uiLayer!.batchDraw(); }
+
+        rasterLayers.forEach(function(l) {
+            l.konvaLayer.find('Image').forEach(function(img) {
                 img.draggable(tool === 'select');
             });
         });
+
         updateCursor();
     }
+
     function updateCursor() {
-        if (!stage)
-            return;
+        if (!stage) return;
         var c = stage.container();
         switch (activeTool) {
-            case 'select':
-                c.style.cursor = 'default';
-                break;
-            case 'brush':
-            case 'eraser':
-            case 'mask':
-                c.style.cursor = 'none';
-                break;
-            case 'pan':
-                c.style.cursor = 'grab';
-                break;
+            case 'select': c.style.cursor = 'default'; break;
+            case 'brush': case 'eraser': case 'mask': c.style.cursor = 'none'; break;
+            case 'pan': c.style.cursor = 'grab'; break;
             default: c.style.cursor = 'default';
         }
     }
+
     function resetView() {
-        if (!stage || !boundingBox)
-            return;
+        if (!stage || !boundingBox) return;
         var container = document.getElementById('canvas-stage-container');
-        if (!container)
-            return;
+        if (!container) return;
         var cw = container.offsetWidth;
         var ch = container.offsetHeight;
         var bw = boundingBox.width();
         var bh = boundingBox.height();
+
         var padding = 100;
         var scale = Math.min((cw - padding * 2) / bw, (ch - padding * 2) / bh, 1.5);
+
         var bx = boundingBox.x();
         var by = boundingBox.y();
         stage.scale({ x: scale, y: scale });
@@ -1335,21 +1475,16 @@ var CanvasTab = (function () {
         stage.batchDraw();
         updateVideoOverlayPosition();
     }
+
     // ── Keyboard ──
-    function handleKeyDown(e) {
-        if (localStorage.getItem('sf-active-tab') !== 'canvas')
-            return;
-        var tag = e.target.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT')
-            return;
+    function handleKeyDown(e: KeyboardEvent) {
+        if (localStorage.getItem('sf-active-tab') !== 'canvas') return;
+        var tag = (e.target as HTMLElement).tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
             e.preventDefault();
-            if (e.shiftKey) {
-                History.redo();
-            }
-            else {
-                History.undo();
-            }
+            if (e.shiftKey) { History.redo(); } else { History.undo(); }
             return;
         }
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyY') {
@@ -1357,219 +1492,211 @@ var CanvasTab = (function () {
             History.redo();
             return;
         }
+
         switch (e.code) {
-            case 'KeyV':
-                setTool('select');
-                break;
-            case 'KeyB':
-                setTool('brush');
-                break;
-            case 'KeyE':
-                setTool('eraser');
-                break;
-            case 'KeyM':
-                setTool('mask');
-                break;
-            case 'KeyH':
-                setTool('pan');
-                break;
-            case 'KeyF':
-                resetView();
-                break;
+            case 'KeyV': setTool('select'); break;
+            case 'KeyB': setTool('brush'); break;
+            case 'KeyE': setTool('eraser'); break;
+            case 'KeyM': setTool('mask'); break;
+            case 'KeyH': setTool('pan'); break;
+            case 'KeyF': resetView(); break;
             case 'Space':
                 if (!isSpaceHeld) {
                     isSpaceHeld = true;
-                    if (activeTool !== 'pan' && stage)
-                        stage.container().style.cursor = 'grab';
+                    if (activeTool !== 'pan' && stage) stage.container().style.cursor = 'grab';
                 }
                 e.preventDefault();
                 break;
         }
     }
-    function handleKeyUp(e) {
+
+    function handleKeyUp(e: KeyboardEvent) {
         if (e.code === 'Space') {
             isSpaceHeld = false;
-            if (!isPanning)
-                updateCursor();
+            if (!isPanning) updateCursor();
         }
     }
+
     // ── Right Panel ──
     function bindRightPanelEvents() {
-        els.brushSizeInput.addEventListener('input', function () {
+        els.brushSizeInput!.addEventListener('input', function(this: HTMLInputElement) {
             brushSize = parseInt(this.value);
-            els.brushSizeVal.textContent = String(brushSize);
+            els.brushSizeVal!.textContent = String(brushSize);
         });
-        var hardnessInput = document.getElementById('cv-brush-hardness');
+
+        var hardnessInput = document.getElementById('cv-brush-hardness') as HTMLInputElement | null;
         var hardnessVal = document.getElementById('cv-brush-hardness-val');
         if (hardnessInput) {
-            hardnessInput.addEventListener('input', function () {
+            hardnessInput.addEventListener('input', function(this: HTMLInputElement) {
                 brushHardness = parseFloat(this.value);
-                if (hardnessVal)
-                    hardnessVal.textContent = brushHardness.toFixed(1);
+                if (hardnessVal) hardnessVal.textContent = brushHardness.toFixed(1);
             });
         }
-        els.brushColorInput.addEventListener('input', function () {
+
+        els.brushColorInput!.addEventListener('input', function(this: HTMLInputElement) {
             brushColor = this.value;
         });
-        els.prompt.addEventListener('input', function () {
+
+        els.prompt!.addEventListener('input', function(this: HTMLTextAreaElement) {
             genState.prompt = this.value;
             this.style.height = 'auto';
             this.style.height = this.scrollHeight + 'px';
         });
-        els.denoise.addEventListener('input', function () {
+
+        els.denoise!.addEventListener('input', function(this: HTMLInputElement) {
             genState.denoise = parseFloat(this.value);
-            els.denoiseVal.textContent = genState.denoise.toFixed(2);
+            els.denoiseVal!.textContent = genState.denoise.toFixed(2);
         });
-        els.steps.addEventListener('input', function () {
+
+        els.steps!.addEventListener('input', function(this: HTMLInputElement) {
             genState.steps = parseInt(this.value) || 20;
-            els.stepsRange.value = this.value;
+            els.stepsRange!.value = this.value;
         });
-        els.stepsRange.addEventListener('input', function () {
+        els.stepsRange!.addEventListener('input', function(this: HTMLInputElement) {
             genState.steps = parseInt(this.value);
-            els.steps.value = this.value;
+            els.steps!.value = this.value;
         });
-        els.cfg.addEventListener('input', function () {
+
+        els.cfg!.addEventListener('input', function(this: HTMLInputElement) {
             genState.cfg = parseFloat(this.value) || 7.0;
-            els.cfgRange.value = this.value;
+            els.cfgRange!.value = this.value;
         });
-        els.cfgRange.addEventListener('input', function () {
+        els.cfgRange!.addEventListener('input', function(this: HTMLInputElement) {
             genState.cfg = parseFloat(this.value);
-            els.cfg.value = this.value;
+            els.cfg!.value = this.value;
         });
-        els.model.addEventListener('change', function () {
+
+        els.model!.addEventListener('change', function(this: HTMLSelectElement) {
             genState.model = this.value;
             updateTopbarModel(this.value);
             updateCanvasUIForArch(ModelUtils.detectArchFromFilename(this.value));
         });
-        els.guidance.addEventListener('input', function () {
+
+        els.guidance!.addEventListener('input', function(this: HTMLInputElement) {
             genState.guidance = parseFloat(this.value) || 3.5;
-            els.guidanceRange.value = this.value;
+            els.guidanceRange!.value = this.value;
         });
-        els.guidanceRange.addEventListener('input', function () {
+        els.guidanceRange!.addEventListener('input', function(this: HTMLInputElement) {
             genState.guidance = parseFloat(this.value);
-            els.guidance.value = this.value;
+            els.guidance!.value = this.value;
         });
+
         // Frames sync
-        els.framesInput.addEventListener('input', function () {
+        els.framesInput!.addEventListener('input', function(this: HTMLInputElement) {
             genState.frames = parseInt(this.value) || 97;
-            els.framesRange.value = this.value;
+            els.framesRange!.value = this.value;
             updateCanvasDurationHint();
             updateSizeLabel();
         });
-        els.framesRange.addEventListener('input', function () {
+        els.framesRange!.addEventListener('input', function(this: HTMLInputElement) {
             genState.frames = parseInt(this.value);
-            els.framesInput.value = this.value;
+            els.framesInput!.value = this.value;
             updateCanvasDurationHint();
             updateSizeLabel();
         });
+
         // FPS sync
-        els.fpsInput.addEventListener('input', function () {
+        els.fpsInput!.addEventListener('input', function(this: HTMLInputElement) {
             genState.fps = parseInt(this.value) || 24;
-            els.fpsRange.value = this.value;
+            els.fpsRange!.value = this.value;
             updateCanvasDurationHint();
         });
-        els.fpsRange.addEventListener('input', function () {
+        els.fpsRange!.addEventListener('input', function(this: HTMLInputElement) {
             genState.fps = parseInt(this.value);
-            els.fpsInput.value = this.value;
+            els.fpsInput!.value = this.value;
             updateCanvasDurationHint();
         });
-        els.importBtn.addEventListener('click', function () { els.importFile.click(); });
-        els.importFile.addEventListener('change', function () {
+
+        els.importBtn!.addEventListener('click', function() { els.importFile!.click(); });
+        els.importFile!.addEventListener('change', function(this: HTMLInputElement) {
             if (this.files && this.files[0]) {
                 loadImageFile(this.files[0]);
                 this.value = '';
             }
         });
-        els.generateBtn.addEventListener('click', function () { startGeneration(); });
-        document.querySelectorAll('.cv-tool-btn').forEach(function (btn) {
-            btn.addEventListener('click', function () { setTool(btn.dataset.tool); });
+
+        els.generateBtn!.addEventListener('click', function() { startGeneration(); });
+
+        document.querySelectorAll('.cv-tool-btn').forEach(function(btn) {
+            btn.addEventListener('click', function() { setTool((btn as HTMLElement).dataset.tool!); });
         });
+
         // Undo/redo buttons
         var undoBtn = document.getElementById('cv-undo');
         var redoBtn = document.getElementById('cv-redo');
-        if (undoBtn)
-            undoBtn.addEventListener('click', function () { History.undo(); });
-        if (redoBtn)
-            redoBtn.addEventListener('click', function () { History.redo(); });
+        if (undoBtn) undoBtn.addEventListener('click', function() { History.undo(); });
+        if (redoBtn) redoBtn.addEventListener('click', function() { History.redo(); });
+
         // Control layer type panel sliders — persist values to active layer object
-        var controlType = document.getElementById('cv-control-type');
+        var controlType = document.getElementById('cv-control-type') as HTMLSelectElement | null;
         if (controlType) {
-            controlType.addEventListener('change', function () {
+            controlType.addEventListener('change', function(this: HTMLSelectElement) {
                 var layer = getLayerById(activeLayerId);
-                if (layer)
-                    layer.controlType = this.value;
+                if (layer) layer.controlType = this.value;
             });
         }
-        var controlWeight = document.getElementById('cv-control-weight');
+        var controlWeight = document.getElementById('cv-control-weight') as HTMLInputElement | null;
         var controlWeightVal = document.getElementById('cv-control-weight-val');
         if (controlWeight) {
-            controlWeight.addEventListener('input', function () {
+            controlWeight.addEventListener('input', function(this: HTMLInputElement) {
                 var val = parseFloat(this.value);
-                if (controlWeightVal)
-                    controlWeightVal.textContent = val.toFixed(2);
+                if (controlWeightVal) controlWeightVal.textContent = val.toFixed(2);
                 var layer = getLayerById(activeLayerId);
-                if (layer)
-                    layer.weight = val;
+                if (layer) layer.weight = val;
             });
         }
-        var controlStart = document.getElementById('cv-control-start');
+        var controlStart = document.getElementById('cv-control-start') as HTMLInputElement | null;
         var controlStartVal = document.getElementById('cv-control-start-val');
         if (controlStart) {
-            controlStart.addEventListener('input', function () {
+            controlStart.addEventListener('input', function(this: HTMLInputElement) {
                 var val = parseFloat(this.value);
-                if (controlStartVal)
-                    controlStartVal.textContent = val.toFixed(2);
+                if (controlStartVal) controlStartVal.textContent = val.toFixed(2);
                 var layer = getLayerById(activeLayerId);
-                if (layer)
-                    layer.startStep = val;
+                if (layer) layer.startStep = val;
             });
         }
-        var controlEnd = document.getElementById('cv-control-end');
+        var controlEnd = document.getElementById('cv-control-end') as HTMLInputElement | null;
         var controlEndVal = document.getElementById('cv-control-end-val');
         if (controlEnd) {
-            controlEnd.addEventListener('input', function () {
+            controlEnd.addEventListener('input', function(this: HTMLInputElement) {
                 var val = parseFloat(this.value);
-                if (controlEndVal)
-                    controlEndVal.textContent = val.toFixed(2);
+                if (controlEndVal) controlEndVal.textContent = val.toFixed(2);
                 var layer = getLayerById(activeLayerId);
-                if (layer)
-                    layer.endStep = val;
+                if (layer) layer.endStep = val;
             });
         }
         // IP-Adapter weight and method — persist to layer
-        var ipaWeight = document.getElementById('cv-ipa-weight');
+        var ipaWeight = document.getElementById('cv-ipa-weight') as HTMLInputElement | null;
         var ipaWeightVal = document.getElementById('cv-ipa-weight-val');
         if (ipaWeight) {
-            ipaWeight.addEventListener('input', function () {
+            ipaWeight.addEventListener('input', function(this: HTMLInputElement) {
                 var val = parseFloat(this.value);
-                if (ipaWeightVal)
-                    ipaWeightVal.textContent = val.toFixed(2);
+                if (ipaWeightVal) ipaWeightVal.textContent = val.toFixed(2);
                 var layer = getLayerById(activeLayerId);
-                if (layer)
-                    layer.weight = val;
+                if (layer) layer.weight = val;
             });
         }
-        var ipaMethod = document.getElementById('cv-ipa-method');
+        var ipaMethod = document.getElementById('cv-ipa-method') as HTMLSelectElement | null;
         if (ipaMethod) {
-            ipaMethod.addEventListener('change', function () {
+            ipaMethod.addEventListener('change', function(this: HTMLSelectElement) {
                 var layer = getLayerById(activeLayerId);
-                if (layer)
-                    layer.ipaMethod = this.value;
+                if (layer) layer.ipaMethod = this.value;
             });
         }
+
         // Control layer image upload
         var controlWell = document.getElementById('cv-control-well');
-        var controlFile = document.getElementById('cv-control-file');
+        var controlFile = document.getElementById('cv-control-file') as HTMLInputElement | null;
         if (controlWell && controlFile) {
-            controlWell.addEventListener('click', function () { controlFile.click(); });
-            controlFile.addEventListener('change', function () {
+            controlWell.addEventListener('click', function() { controlFile!.click(); });
+            controlFile.addEventListener('change', function(this: HTMLInputElement) {
                 if (this.files && this.files[0]) {
                     handleLayerImageUpload(activeLayerId, this.files[0], controlWell);
                     this.value = '';
                 }
             });
-            controlWell.addEventListener('dragover', function (e) { e.preventDefault(); });
-            controlWell.addEventListener('drop', function (e) {
+            controlWell.addEventListener('dragover', function(e) { e.preventDefault(); });
+            controlWell.addEventListener('drop', function(e) {
                 e.preventDefault();
                 var file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
                 if (file && file.type.startsWith('image/')) {
@@ -1577,19 +1704,20 @@ var CanvasTab = (function () {
                 }
             });
         }
+
         // IP-Adapter image upload
         var ipaWell = document.getElementById('cv-ipa-well');
-        var ipaFile = document.getElementById('cv-ipa-file');
+        var ipaFile = document.getElementById('cv-ipa-file') as HTMLInputElement | null;
         if (ipaWell && ipaFile) {
-            ipaWell.addEventListener('click', function () { ipaFile.click(); });
-            ipaFile.addEventListener('change', function () {
+            ipaWell.addEventListener('click', function() { ipaFile!.click(); });
+            ipaFile.addEventListener('change', function(this: HTMLInputElement) {
                 if (this.files && this.files[0]) {
                     handleLayerImageUpload(activeLayerId, this.files[0], ipaWell);
                     this.value = '';
                 }
             });
-            ipaWell.addEventListener('dragover', function (e) { e.preventDefault(); });
-            ipaWell.addEventListener('drop', function (e) {
+            ipaWell.addEventListener('dragover', function(e) { e.preventDefault(); });
+            ipaWell.addEventListener('drop', function(e) {
                 e.preventDefault();
                 var file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
                 if (file && file.type.startsWith('image/')) {
@@ -1597,20 +1725,20 @@ var CanvasTab = (function () {
                 }
             });
         }
+
         // Layer add menu
         var addBtn = document.getElementById('cv-layers-add-btn');
         var typeMenu = document.getElementById('cv-layer-type-menu');
         if (addBtn && typeMenu) {
-            addBtn.addEventListener('click', function (e) {
+            addBtn.addEventListener('click', function(e) {
                 e.stopPropagation();
-                typeMenu.style.display = typeMenu.style.display === 'none' ? 'block' : 'none';
+                typeMenu!.style.display = typeMenu!.style.display === 'none' ? 'block' : 'none';
             });
-            typeMenu.addEventListener('click', function (e) {
-                var item = e.target.closest('.cv-layer-type-item');
-                if (!item)
-                    return;
-                var type = item.dataset.type;
-                var names = {
+            typeMenu!.addEventListener('click', function(e) {
+                var item = (e.target as HTMLElement).closest('.cv-layer-type-item') as HTMLElement | null;
+                if (!item) return;
+                var type = item.dataset.type!;
+                var names: Record<string, string> = {
                     raster: 'Raster Layer',
                     mask: 'Inpaint Mask',
                     control: 'Control Layer',
@@ -1618,89 +1746,90 @@ var CanvasTab = (function () {
                     regional: 'Regional Prompt'
                 };
                 addLayer((names[type] || 'Layer') + ' ' + (rasterLayers.length + 1), type);
-                typeMenu.style.display = 'none';
+                typeMenu!.style.display = 'none';
             });
-            document.addEventListener('click', function () {
-                typeMenu.style.display = 'none';
+            document.addEventListener('click', function() {
+                typeMenu!.style.display = 'none';
             });
         }
+
         // Bbox toolbar
-        var bboxW = document.getElementById('cv-bbox-w');
-        var bboxH = document.getElementById('cv-bbox-h');
-        var bboxSnap = document.getElementById('cv-bbox-snap');
+        var bboxW = document.getElementById('cv-bbox-w') as HTMLInputElement | null;
+        var bboxH = document.getElementById('cv-bbox-h') as HTMLInputElement | null;
+        var bboxSnap = document.getElementById('cv-bbox-snap') as HTMLSelectElement | null;
         var bboxReset = document.getElementById('cv-bbox-reset');
+
         if (bboxW) {
-            bboxW.addEventListener('change', function () {
+            bboxW.addEventListener('change', function(this: HTMLInputElement) {
                 var v = clampDimForArch(parseInt(this.value) || 1024);
                 this.value = String(v);
-                boundingBox.width(v);
+                boundingBox!.width(v);
                 updateHandles();
                 updateSizeLabel();
             });
         }
         if (bboxH) {
-            bboxH.addEventListener('change', function () {
+            bboxH.addEventListener('change', function(this: HTMLInputElement) {
                 var v = clampDimForArch(parseInt(this.value) || 1024);
                 this.value = String(v);
-                boundingBox.height(v);
+                boundingBox!.height(v);
                 updateHandles();
                 updateSizeLabel();
             });
         }
         if (bboxReset) {
-            bboxReset.addEventListener('click', function () {
+            bboxReset.addEventListener('click', function() {
                 var container = document.getElementById('canvas-stage-container');
-                if (!container)
-                    return;
+                if (!container) return;
                 var w = 1024, h = 1024;
-                boundingBox.width(w);
-                boundingBox.height(h);
-                boundingBox.x(container.offsetWidth / 2 / stage.scaleX() - w / 2 - stage.x() / stage.scaleX());
-                boundingBox.y(container.offsetHeight / 2 / stage.scaleY() - h / 2 - stage.y() / stage.scaleY());
+                boundingBox!.width(w);
+                boundingBox!.height(h);
+                boundingBox!.x(container.offsetWidth / 2 / stage!.scaleX() - w / 2 - stage!.x() / stage!.scaleX());
+                boundingBox!.y(container.offsetHeight / 2 / stage!.scaleY() - h / 2 - stage!.y() / stage!.scaleY());
                 updateHandles();
                 updateSizeLabel();
                 updateBboxInputs();
-                stage.batchDraw();
+                stage!.batchDraw();
             });
         }
+
         var bboxLock = document.getElementById('cv-bbox-lock');
         if (bboxLock) {
-            bboxLock.addEventListener('click', function () {
+            bboxLock.addEventListener('click', function() {
                 bboxAspectLocked = !bboxAspectLocked;
                 this.classList.toggle('active', bboxAspectLocked);
                 if (bboxAspectLocked) {
-                    bboxLockedRatio = boundingBox.width() / boundingBox.height();
+                    bboxLockedRatio = boundingBox!.width() / boundingBox!.height();
                 }
             });
         }
+
         var bboxFit = document.getElementById('cv-bbox-fit');
         if (bboxFit) {
-            bboxFit.addEventListener('click', function () {
+            bboxFit.addEventListener('click', function() {
                 var layer = getActiveKonvaLayer();
-                if (!layer)
-                    return;
+                if (!layer) return;
                 var rect = layer.getClientRect({ skipTransform: true });
-                if (rect.width < 1 || rect.height < 1)
-                    return;
-                boundingBox.x(rect.x);
-                boundingBox.y(rect.y);
-                boundingBox.width(clampDimForArch(rect.width));
-                boundingBox.height(clampDimForArch(rect.height));
+                if (rect.width < 1 || rect.height < 1) return;
+                boundingBox!.x(rect.x);
+                boundingBox!.y(rect.y);
+                boundingBox!.width(clampDimForArch(rect.width));
+                boundingBox!.height(clampDimForArch(rect.height));
                 updateHandles();
                 updateSizeLabel();
-                stage.batchDraw();
+                stage!.batchDraw();
             });
         }
+
         var maskFill = document.getElementById('cv-mask-fill');
         var maskClear = document.getElementById('cv-mask-clear');
         if (maskFill) {
-            maskFill.addEventListener('click', function () {
+            maskFill.addEventListener('click', function() {
                 var layer = getLayerById(activeLayerId);
-                if (!layer || layer.type !== 'mask')
-                    return;
+                if (!layer || layer.type !== 'mask') return;
                 var rect = new Konva.Rect({
-                    x: boundingBox.x(), y: boundingBox.y(),
-                    width: boundingBox.width(), height: boundingBox.height(),
+                    x: boundingBox!.x(), y: boundingBox!.y(),
+                    width: boundingBox!.width(), height: boundingBox!.height(),
                     fill: 'rgba(239, 68, 68, 0.5)',
                     listening: false
                 });
@@ -1710,113 +1839,120 @@ var CanvasTab = (function () {
             });
         }
         if (maskClear) {
-            maskClear.addEventListener('click', function () {
+            maskClear.addEventListener('click', function() {
                 var layer = getLayerById(activeLayerId);
-                if (!layer || layer.type !== 'mask')
-                    return;
+                if (!layer || layer.type !== 'mask') return;
                 layer.konvaLayer.destroyChildren();
                 layer.konvaLayer.batchDraw();
                 History.push();
             });
         }
     }
+
     // ── Models ──
     function loadModels() {
         ModelUtils.fetchAllModels()
-            .then(function (models) {
-            if (!models.length)
-                throw new Error('empty');
-            els.model.innerHTML = '';
-            models.forEach(function (m) {
-                var opt = document.createElement('option');
-                opt.value = m.name;
-                opt.textContent = m.name.split('/').pop() || m.name;
-                els.model.appendChild(opt);
+            .then(function(models) {
+                if (!models.length) throw new Error('empty');
+
+                els.model!.innerHTML = '';
+                models.forEach(function(m) {
+                    var opt = document.createElement('option');
+                    opt.value = m.name;
+                    opt.textContent = m.name.split('/').pop() || m.name;
+                    els.model!.appendChild(opt);
+                });
+                genState.model = models[0].name;
+                updateTopbarModel(models[0].name);
+                updateCanvasUIForArch(ModelUtils.detectArchFromFilename(models[0].name));
+            })
+            .catch(function() {
+                els.model!.innerHTML = '<option disabled selected>No models found</option>';
             });
-            genState.model = models[0].name;
-            updateTopbarModel(models[0].name);
-            updateCanvasUIForArch(ModelUtils.detectArchFromFilename(models[0].name));
-        })
-            .catch(function () {
-            els.model.innerHTML = '<option disabled selected>No models found</option>';
-        });
     }
-    function updateTopbarModel(modelName) {
+
+    function updateTopbarModel(modelName: string) {
         var badge = document.querySelector('.model-badge');
-        if (!badge)
-            return;
+        if (!badge) return;
         // Show just the filename in the topbar badge
-        var short = modelName ? modelName.split('/').pop().replace(/\.\w+$/, '') : 'No model loaded';
+        var short = modelName ? modelName.split('/').pop()!.replace(/\.\w+$/, '') : 'No model loaded';
         badge.textContent = short;
     }
+
     // ── Generation ──
-    function updateCanvasUIForArch(arch) {
+    function updateCanvasUIForArch(arch: string) {
         genState.arch = arch;
         var isFlux = arch === 'flux';
         var isVideo = arch === 'ltxv' || arch === 'wan';
-        els.cfgRow.style.display = (isFlux || isVideo) ? 'none' : 'flex';
-        els.guidanceRow.style.display = isFlux ? 'flex' : 'none';
-        els.videoSection.style.display = isVideo ? 'block' : 'none';
+
+        els.cfgRow!.style.display = (isFlux || isVideo) ? 'none' : 'flex';
+        els.guidanceRow!.style.display = isFlux ? 'flex' : 'none';
+        els.videoSection!.style.display = isVideo ? 'block' : 'none';
+
         // Update generate button label
-        els.generateBtn.textContent = isVideo ? 'Generate Video' : 'Generate';
+        els.generateBtn!.textContent = isVideo ? 'Generate Video' : 'Generate';
+
         // Update size label to show/hide frame count
         updateSizeLabel();
-        if (isVideo)
-            updateCanvasDurationHint();
+
+        if (isVideo) updateCanvasDurationHint();
     }
+
     function updateCanvasDurationHint() {
-        if (!els.durationHint)
-            return;
-        var secs = (genState.frames / genState.fps).toFixed(1);
+        if (!els.durationHint) return;
+        var secs: string = (genState.frames / genState.fps).toFixed(1);
         els.durationHint.textContent = '\u2248 ' + secs + 's at ' + genState.fps + 'fps';
     }
+
     function getMaskLayer() {
         for (var i = 0; i < rasterLayers.length; i++) {
-            if (rasterLayers[i].type === 'mask' && rasterLayers[i].visible)
-                return rasterLayers[i];
+            if (rasterLayers[i].type === 'mask' && rasterLayers[i].visible) return rasterLayers[i];
         }
         return null;
     }
+
     function exportMaskAsBW() {
         var maskLayer = getMaskLayer();
-        if (!maskLayer)
-            return Promise.resolve(null);
+        if (!maskLayer) return Promise.resolve(null);
         var children = maskLayer.konvaLayer.getChildren();
-        if (children.length === 0)
-            return Promise.resolve(null);
-        return new Promise(function (resolve) {
+        if (children.length === 0) return Promise.resolve(null);
+
+        return new Promise(function(resolve) {
             // Export mask layer content in bbox region
-            rasterLayers.forEach(function (l) {
-                if (l !== maskLayer)
-                    l.konvaLayer.hide();
+            rasterLayers.forEach(function(l) {
+                if (l !== maskLayer) l.konvaLayer.hide();
             });
-            uiLayer.hide();
-            backgroundLayer.hide();
-            var maskDataURL = stage.toDataURL({
-                x: boundingBox.x(), y: boundingBox.y(),
-                width: boundingBox.width(), height: boundingBox.height(),
+            uiLayer!.hide();
+            backgroundLayer!.hide();
+
+            var maskDataURL = stage!.toDataURL({
+                x: boundingBox!.x(), y: boundingBox!.y(),
+                width: boundingBox!.width(), height: boundingBox!.height(),
                 pixelRatio: 1
             });
+
             // Restore visibility
-            rasterLayers.forEach(function (l) {
-                if (l.visible)
-                    l.konvaLayer.show();
+            rasterLayers.forEach(function(l) {
+                if (l.visible) l.konvaLayer.show();
             });
-            uiLayer.show();
-            backgroundLayer.show();
-            stage.batchDraw();
+            uiLayer!.show();
+            backgroundLayer!.show();
+            stage!.batchDraw();
+
             // Convert to B&W: any non-transparent pixel becomes white
             var offscreen = document.createElement('canvas');
-            var bw = Math.round(boundingBox.width());
-            var bh = Math.round(boundingBox.height());
+            var bw = Math.round(boundingBox!.width());
+            var bh = Math.round(boundingBox!.height());
             offscreen.width = bw;
             offscreen.height = bh;
-            var ctx = offscreen.getContext('2d');
+            var ctx = offscreen.getContext('2d')!;
+
             // Fill black (keep)
             ctx.fillStyle = '#000000';
             ctx.fillRect(0, 0, bw, bh);
+
             var img = new Image();
-            img.onload = function () {
+            img.onload = function() {
                 // Draw mask content
                 ctx.drawImage(img, 0, 0, bw, bh);
                 // Convert any non-black pixel to white
@@ -1824,44 +1960,35 @@ var CanvasTab = (function () {
                 var data = imageData.data;
                 for (var i = 0; i < data.length; i += 4) {
                     if (data[i + 3] > 127) { // significant alpha = was masked
-                        data[i] = 255;
-                        data[i + 1] = 255;
-                        data[i + 2] = 255;
-                        data[i + 3] = 255;
-                    }
-                    else {
-                        data[i] = 0;
-                        data[i + 1] = 0;
-                        data[i + 2] = 0;
-                        data[i + 3] = 255;
+                        data[i] = 255; data[i + 1] = 255; data[i + 2] = 255; data[i + 3] = 255;
+                    } else {
+                        data[i] = 0; data[i + 1] = 0; data[i + 2] = 0; data[i + 3] = 255;
                     }
                 }
                 ctx.putImageData(imageData, 0, 0);
                 resolve(offscreen.toDataURL('image/png').split(',')[1]);
             };
-            img.onerror = function () { resolve(null); };
+            img.onerror = function() { resolve(null); };
             img.src = maskDataURL;
         });
     }
+
     function startGeneration() {
-        if (canvasGenerating)
-            return;
-        if (!genState.model) {
-            showError('No model selected');
-            return;
-        }
-        if (!genState.prompt.trim()) {
-            showError('Enter a prompt');
-            return;
-        }
+        if (canvasGenerating) return;
+        if (!genState.model) { showError('No model selected'); return; }
+        if (!genState.prompt.trim()) { showError('Enter a prompt'); return; }
+
         setCanvasGenerating(true);
         var isVideo = isVideoArch();
-        checkBboxContent().then(function (hasContent) {
+
+        checkBboxContent().then(function(hasContent) {
             var seed = genState.seed === -1 ? Math.floor(Math.random() * 4294967296) : genState.seed;
-            var bw = isVideo ? ModelUtils.clampVideoDimension(boundingBox.width()) : ModelUtils.clampDimension(boundingBox.width());
-            var bh = isVideo ? ModelUtils.clampVideoDimension(boundingBox.height()) : ModelUtils.clampDimension(boundingBox.height());
+            var bw = isVideo ? ModelUtils.clampVideoDimension(boundingBox!.width()) : ModelUtils.clampDimension(boundingBox!.width());
+            var bh = isVideo ? ModelUtils.clampVideoDimension(boundingBox!.height()) : ModelUtils.clampDimension(boundingBox!.height());
+
             var maskLayerInfo = getMaskLayer();
             var hasMask = maskLayerInfo && maskLayerInfo.konvaLayer.getChildren().length > 0;
+
             if (!hasContent || isVideo) {
                 queueWorkflow(WorkflowBuilder.build({
                     model: genState.model || '', prompt: genState.prompt,
@@ -1870,12 +1997,11 @@ var CanvasTab = (function () {
                     guidance: genState.guidance, seed: seed,
                     frames: genState.frames, fps: genState.fps
                 }));
-            }
-            else if (hasMask && !isVideo) {
+            } else if (hasMask && !isVideo) {
                 // Inpaint: export both init image and mask
-                exportBoundingBoxRegion().then(function (initBase64) {
-                    return uploadInitImage(initBase64).then(function (initName) {
-                        return exportMaskAsBW().then(function (maskBase64) {
+                exportBoundingBoxRegion().then(function(initBase64) {
+                    return uploadInitImage(initBase64 as string).then(function(initName) {
+                        return exportMaskAsBW().then(function(maskBase64) {
                             if (!maskBase64) {
                                 // Mask export failed, fall back to img2img
                                 queueWorkflow(WorkflowBuilder.buildImg2Img({
@@ -1886,7 +2012,7 @@ var CanvasTab = (function () {
                                 }));
                                 return;
                             }
-                            return uploadInitImage(maskBase64).then(function (maskName) {
+                            return uploadInitImage(maskBase64 as string).then(function(maskName) {
                                 queueWorkflow(WorkflowBuilder.buildInpaint({
                                     model: genState.model || '', prompt: genState.prompt,
                                     negPrompt: '', initImageName: initName, maskImageName: maskName,
@@ -1897,15 +2023,14 @@ var CanvasTab = (function () {
                             });
                         });
                     });
-                }).catch(function (err) {
+                }).catch(function(err) {
                     showError('Inpaint failed: ' + err.message);
                     setCanvasGenerating(false);
                 });
-            }
-            else {
-                exportBoundingBoxRegion().then(function (base64) {
-                    return uploadInitImage(base64);
-                }).then(function (imageName) {
+            } else {
+                exportBoundingBoxRegion().then(function(base64) {
+                    return uploadInitImage(base64 as string);
+                }).then(function(imageName) {
                     queueWorkflow(WorkflowBuilder.buildImg2Img({
                         model: genState.model || '', prompt: genState.prompt,
                         initImageName: imageName, width: bw, height: bh,
@@ -1913,72 +2038,80 @@ var CanvasTab = (function () {
                         guidance: genState.guidance,
                         denoise: genState.denoise, seed: seed
                     }));
-                }).catch(function (err) {
+                }).catch(function(err) {
                     showError('Upload failed: ' + err.message);
                     setCanvasGenerating(false);
                 });
             }
         });
     }
+
     // Check if there's actual pixel content in the bbox region by sampling pixels
     function checkBboxContent() {
-        return new Promise(function (resolve) {
-            uiLayer.hide();
-            backgroundLayer.hide();
-            var bx = boundingBox.x();
-            var by = boundingBox.y();
-            var bw = boundingBox.width();
-            var bh = boundingBox.height();
+        return new Promise(function(resolve) {
+            uiLayer!.hide();
+            backgroundLayer!.hide();
+
+            var bx = boundingBox!.x();
+            var by = boundingBox!.y();
+            var bw = boundingBox!.width();
+            var bh = boundingBox!.height();
+
             // Export just the raster layers in the bbox region
-            var dataURL = stage.toDataURL({
+            var dataURL = stage!.toDataURL({
                 x: bx, y: by, width: bw, height: bh, pixelRatio: 0.1
             });
-            uiLayer.show();
-            backgroundLayer.show();
-            stage.batchDraw();
+
+            uiLayer!.show();
+            backgroundLayer!.show();
+            stage!.batchDraw();
+
             // Check if the exported region has any non-transparent pixels
             var testImg = new Image();
-            testImg.onload = function () {
+            testImg.onload = function() {
                 var c = document.createElement('canvas');
                 c.width = testImg.width;
                 c.height = testImg.height;
-                var ctx = c.getContext('2d');
+                var ctx = c.getContext('2d')!;
                 ctx.drawImage(testImg, 0, 0);
                 var data = ctx.getImageData(0, 0, c.width, c.height).data;
                 var hasPixels = false;
                 for (var i = 3; i < data.length; i += 16) {
-                    if (data[i] > 0) {
-                        hasPixels = true;
-                        break;
-                    }
+                    if (data[i] > 0) { hasPixels = true; break; }
                 }
                 resolve(hasPixels);
             };
-            testImg.onerror = function () { resolve(false); };
+            testImg.onerror = function() { resolve(false); };
             testImg.src = dataURL;
         });
     }
+
     function exportBoundingBoxRegion() {
-        return new Promise(function (resolve) {
-            uiLayer.hide();
-            backgroundLayer.hide();
-            var dataURL = stage.toDataURL({
-                x: boundingBox.x(), y: boundingBox.y(),
-                width: boundingBox.width(), height: boundingBox.height(),
+        return new Promise(function(resolve) {
+            uiLayer!.hide();
+            backgroundLayer!.hide();
+
+            var dataURL = stage!.toDataURL({
+                x: boundingBox!.x(), y: boundingBox!.y(),
+                width: boundingBox!.width(), height: boundingBox!.height(),
                 pixelRatio: 1
             });
-            uiLayer.show();
-            backgroundLayer.show();
-            stage.batchDraw();
+
+            uiLayer!.show();
+            backgroundLayer!.show();
+            stage!.batchDraw();
+
             resolve(dataURL.split(',')[1]);
         });
     }
-    function uploadInitImage(base64Data) {
+
+    function uploadInitImage(base64Data: string) {
         return SerenityAPI.uploadImage(base64Data, 'canvas_init');
     }
+
     function collectControlLayers() {
-        var controls = [];
-        rasterLayers.forEach(function (l) {
+        var controls: ControlLayerData[] = [];
+        rasterLayers.forEach(function(l) {
             if (l.type === 'control' && l.visible && l.refImageSrc) {
                 controls.push({
                     imageName: l.refImageName || null,
@@ -1992,9 +2125,10 @@ var CanvasTab = (function () {
         });
         return controls;
     }
+
     function collectIPALayers() {
-        var ipas = [];
-        rasterLayers.forEach(function (l) {
+        var ipas: IPALayerData[] = [];
+        rasterLayers.forEach(function(l) {
             if (l.type === 'ipadapter' && l.visible && l.refImageSrc) {
                 ipas.push({
                     imageName: l.refImageName || null,
@@ -2006,35 +2140,35 @@ var CanvasTab = (function () {
         });
         return ipas;
     }
-    function uploadLayerImages(layers) {
+
+    function uploadLayerImages(layers: ControlLayerData[] | IPALayerData[]) {
         // Upload ref images that haven't been uploaded yet
-        var promises = layers.map(function (l) {
-            if (l.imageName)
-                return Promise.resolve(l);
-            if (!l.refImageSrc)
-                return Promise.resolve(l);
+        var promises = (layers as Array<ControlLayerData | IPALayerData>).map(function(l: ControlLayerData | IPALayerData) {
+            if (l.imageName) return Promise.resolve(l);
+            if (!l.refImageSrc) return Promise.resolve(l);
             var base64 = l.refImageSrc.split(',')[1];
-            if (!base64)
-                return Promise.resolve(l);
-            return uploadInitImage(base64).then(function (name) {
+            if (!base64) return Promise.resolve(l);
+            return uploadInitImage(base64).then(function(name) {
                 l.imageName = name;
                 return l;
             });
         });
         return Promise.all(promises);
     }
-    function queueWorkflow(workflow) {
+
+    function queueWorkflow(workflow: ComfyPrompt) {
         // Apply ControlNet and IP-Adapter nodes if layers exist
         var controlLayers = collectControlLayers();
         var ipaLayers = collectIPALayers();
+
         var prepare = Promise.resolve();
         if (controlLayers.length > 0 || ipaLayers.length > 0) {
             prepare = Promise.all([
                 uploadLayerImages(controlLayers),
                 uploadLayerImages(ipaLayers)
-            ]).then(function (results) {
-                var controls = results[0].filter(function (l) { return l.imageName; });
-                var ipas = results[1].filter(function (l) { return l.imageName; });
+            ]).then(function(results) {
+                var controls = results[0].filter(function(l) { return l.imageName; });
+                var ipas = results[1].filter(function(l) { return l.imageName; });
                 if (controls.length > 0) {
                     workflow = WorkflowBuilder.applyControlNetNodes(workflow, controls);
                 }
@@ -2043,48 +2177,49 @@ var CanvasTab = (function () {
                 }
             });
         }
-        prepare.then(function () {
+
+        prepare.then(function() {
             return SerenityAPI.postPrompt(workflow, {
                 prompt: genState.prompt,
                 model: genState.model
             });
         })
-            .catch(function (err) {
+        .catch(function(err) {
             showError('Failed to queue: ' + err.message);
             setCanvasGenerating(false);
         });
     }
-    function setCanvasGenerating(v) {
+
+    function setCanvasGenerating(v: boolean) {
         canvasGenerating = v;
         var isVideo = isVideoArch();
-        els.generateBtn.disabled = v;
+        els.generateBtn!.disabled = v;
         if (v) {
-            els.generateBtn.textContent = 'Generating...';
+            els.generateBtn!.textContent = 'Generating...';
+        } else {
+            els.generateBtn!.textContent = isVideo ? 'Generate Video' : 'Generate';
         }
-        else {
-            els.generateBtn.textContent = isVideo ? 'Generate Video' : 'Generate';
-        }
-        els.generateBtn.classList.toggle('generating', v);
+        els.generateBtn!.classList.toggle('generating', v);
         if (v) {
-            els.progress.classList.add('active');
-            els.progressBar.style.width = '100%';
-        }
-        else {
-            els.progress.classList.remove('active');
-            els.progressBar.style.width = '0%';
-            els.progressLabel.classList.remove('visible');
+            els.progress!.classList.add('active');
+            els.progressBar!.style.width = '100%';
+        } else {
+            els.progress!.classList.remove('active');
+            els.progressBar!.style.width = '0%';
+            els.progressLabel!.classList.remove('visible');
         }
     }
-    function placeResultOnCanvas(src) {
+
+    function placeResultOnCanvas(src: string) {
         var img = new Image();
         img.crossOrigin = 'anonymous';
-        img.onload = function () {
+        img.onload = function() {
             var kImg = new Konva.Image({
                 image: img,
-                x: boundingBox.x(),
-                y: boundingBox.y(),
-                width: boundingBox.width(),
-                height: boundingBox.height(),
+                x: boundingBox!.x(),
+                y: boundingBox!.y(),
+                width: boundingBox!.width(),
+                height: boundingBox!.height(),
                 draggable: activeTool === 'select'
             });
             var layer = getActiveKonvaLayer();
@@ -2096,19 +2231,20 @@ var CanvasTab = (function () {
         };
         img.src = src;
     }
-    function showError(msg) {
-        if (!els.errorBanner)
-            return;
+
+    function showError(msg: string) {
+        if (!els.errorBanner) return;
         els.errorBanner.textContent = msg;
         els.errorBanner.classList.add('visible');
-        setTimeout(function () { els.errorBanner.classList.remove('visible'); }, 5000);
+        setTimeout(function() { els.errorBanner!.classList.remove('visible'); }, 5000);
     }
+
     // ── Video overlay on canvas ──
-    function placeVideoOverlayOnCanvas(src) {
+    function placeVideoOverlayOnCanvas(src: string) {
         removeVideoOverlay();
         var container = document.getElementById('canvas-stage-container');
-        if (!container || !boundingBox || !stage)
-            return;
+        if (!container || !boundingBox || !stage) return;
+
         var overlay = document.createElement('div');
         overlay.id = 'cv-video-overlay';
         overlay.innerHTML = '<video src="' + src + '" autoplay loop muted playsinline controls' +
@@ -2116,10 +2252,10 @@ var CanvasTab = (function () {
         container.appendChild(overlay);
         updateVideoOverlayPosition();
     }
+
     function updateVideoOverlayPosition() {
         var overlay = document.getElementById('cv-video-overlay');
-        if (!overlay || !boundingBox || !stage)
-            return;
+        if (!overlay || !boundingBox || !stage) return;
         var scale = stage.scaleX();
         var stagePos = stage.position();
         var bx = boundingBox.x() * scale + stagePos.x;
@@ -2129,39 +2265,37 @@ var CanvasTab = (function () {
         overlay.style.cssText = 'position:absolute;left:' + bx + 'px;top:' + by + 'px;' +
             'width:' + bw + 'px;height:' + bh + 'px;pointer-events:auto;overflow:hidden;z-index:50;border-radius:4px;';
     }
+
     function removeVideoOverlay() {
         var overlay = document.getElementById('cv-video-overlay');
-        if (overlay)
-            overlay.remove();
+        if (overlay) overlay.remove();
     }
+
     // ── WebSocket ──
     function connectWS() {
-        SerenityWS.on('preview', function (data) {
-            if (!canvasGenerating || !data || !data.blob)
-                return;
+        SerenityWS.on('preview', function(data) {
+            if (!canvasGenerating || !data || !data.blob) return;
             var url = URL.createObjectURL(data.blob);
-            var body = document.getElementById('canvas-preview-body');
+            var body = document.getElementById('canvas-preview-body') as PreviewBodyElement | null;
             var panel = document.getElementById('canvas-preview-panel');
             if (body && panel) {
                 // Revoke old preview URL
-                if (body._previewUrl)
-                    URL.revokeObjectURL(body._previewUrl);
+                if (body._previewUrl) URL.revokeObjectURL(body._previewUrl);
                 body._previewUrl = url;
                 body.innerHTML = '<img src="' + url + '" style="opacity:0.85">';
                 panel.style.display = 'block';
             }
         });
-        SerenityWS.on('executed', function (data) {
-            if (!canvasGenerating)
-                return;
+
+        SerenityWS.on('executed', function(data) {
+            if (!canvasGenerating) return;
             // Clean up live preview URL
-            var body = document.getElementById('canvas-preview-body');
+            var body = document.getElementById('canvas-preview-body') as PreviewBodyElement | null;
             if (body && body._previewUrl) {
                 URL.revokeObjectURL(body._previewUrl);
                 body._previewUrl = undefined;
             }
-            if (!data || !data.output)
-                return;
+            if (!data || !data.output) return;
             var out = data.output.ui || data.output;
             var items = out.images;
             var isVideoFile = false;
@@ -2169,36 +2303,35 @@ var CanvasTab = (function () {
                 items = out.videos;
                 isVideoFile = true;
             }
-            if (!items || !items.length)
-                return;
+            if (!items || !items.length) return;
+
             var file = items[0];
             var src = '/view?filename=' + encodeURIComponent(file.filename) +
                 '&subfolder=' + encodeURIComponent(file.subfolder || '') +
                 '&type=' + encodeURIComponent(file.type || 'output');
-            if (!isVideoFile)
-                isVideoFile = /\.(webp|mp4|gif)$/i.test(file.filename);
+            if (!isVideoFile) isVideoFile = /\.(webp|mp4|gif)$/i.test(file.filename);
             showCanvasPreview(src, isVideoFile);
             setCanvasGenerating(false);
         });
-        SerenityWS.on('progress', function (data) {
-            if (!canvasGenerating || !data)
-                return;
+
+        SerenityWS.on('progress', function(data) {
+            if (!canvasGenerating || !data) return;
             var pct = (data.value / data.max * 100).toFixed(0);
-            els.progressBar.style.width = pct + '%';
-            els.progressLabel.textContent = 'Step ' + data.value + ' / ' + data.max;
-            els.progressLabel.classList.add('visible');
+            els.progressBar!.style.width = pct + '%';
+            els.progressLabel!.textContent = 'Step ' + data.value + ' / ' + data.max;
+            els.progressLabel!.classList.add('visible');
         });
-        SerenityWS.on('execution_error', function (data) {
-            if (!canvasGenerating)
-                return;
+
+        SerenityWS.on('execution_error', function(data) {
+            if (!canvasGenerating) return;
             showError((data && data.exception_message) || 'Generation failed');
             setCanvasGenerating(false);
         });
     }
+
     // ── State Persistence ──
     function saveState() {
-        if (!stage || !boundingBox)
-            return;
+        if (!stage || !boundingBox) return;
         try {
             localStorage.setItem('sf-canvas-state', JSON.stringify({
                 stageX: stage.x(), stageY: stage.y(), stageScale: stage.scaleX(),
@@ -2206,69 +2339,65 @@ var CanvasTab = (function () {
                 bboxW: boundingBox.width(), bboxH: boundingBox.height(),
                 activeTool: activeTool, brushSize: brushSize
             }));
-        }
-        catch (e) { /* ignore */ }
+        } catch (e) { /* ignore */ }
     }
+
     function restoreState() {
         try {
-            var saved = JSON.parse(localStorage.getItem('sf-canvas-state'));
-            if (!saved)
-                return;
-            if (typeof saved.stageX === 'number')
-                stage.position({ x: saved.stageX, y: saved.stageY });
-            if (typeof saved.stageScale === 'number')
-                stage.scale({ x: saved.stageScale, y: saved.stageScale });
+            var saved = JSON.parse(localStorage.getItem('sf-canvas-state') as string);
+            if (!saved) return;
+
+            if (typeof saved.stageX === 'number') stage!.position({ x: saved.stageX, y: saved.stageY });
+            if (typeof saved.stageScale === 'number') stage!.scale({ x: saved.stageScale, y: saved.stageScale });
             if (typeof saved.bboxX === 'number') {
-                boundingBox.position({ x: saved.bboxX, y: saved.bboxY });
-                boundingBox.width(clampDim(saved.bboxW || 1024));
-                boundingBox.height(clampDim(saved.bboxH || 1024));
+                boundingBox!.position({ x: saved.bboxX, y: saved.bboxY });
+                boundingBox!.width(clampDim(saved.bboxW || 1024));
+                boundingBox!.height(clampDim(saved.bboxH || 1024));
                 updateHandles();
                 updateSizeLabel();
             }
-            if (saved.activeTool)
-                setTool(saved.activeTool);
+            if (saved.activeTool) setTool(saved.activeTool);
             if (typeof saved.brushSize === 'number') {
                 brushSize = saved.brushSize;
-                if (els.brushSizeInput)
-                    els.brushSizeInput.value = String(brushSize);
-                if (els.brushSizeVal)
-                    els.brushSizeVal.textContent = String(brushSize);
+                if (els.brushSizeInput) els.brushSizeInput.value = String(brushSize);
+                if (els.brushSizeVal) els.brushSizeVal.textContent = String(brushSize);
             }
-            stage.batchDraw();
-        }
-        catch (e) { /* ignore */ }
+            stage!.batchDraw();
+        } catch (e) { /* ignore */ }
     }
+
     // ── Resize ──
     function resizeStage() {
-        if (!stage)
-            return;
+        if (!stage) return;
         var container = document.getElementById('canvas-stage-container');
-        if (!container)
-            return;
+        if (!container) return;
         var w = container.offsetWidth;
         var h = container.offsetHeight;
-        if (w < 10 || h < 10)
-            return;
+        if (w < 10 || h < 10) return;
         stage.width(w);
         stage.height(h);
         stage.batchDraw();
     }
+
     // ── Init ──
     function init() {
-        if (initialized)
-            return;
+        if (initialized) return;
         initialized = true;
+
         buildUI();
         bindRightPanelEvents();
         loadModels();
         connectWS();
         setupPreviewPanel();
+
         document.addEventListener('keydown', handleKeyDown);
         document.addEventListener('keyup', handleKeyUp);
+
         // Defer Konva init to next frame so layout is computed
-        requestAnimationFrame(function () {
+        requestAnimationFrame(function() {
             initKonva();
             restoreState();
+
             // Check for image sent from Simple mode
             var pendingImage = localStorage.getItem('sf-send-to-canvas');
             if (pendingImage) {
@@ -2278,13 +2407,13 @@ var CanvasTab = (function () {
                     if (data.src && !data.isVideo) {
                         var img = new Image();
                         img.crossOrigin = 'anonymous';
-                        img.onload = function () {
+                        img.onload = function() {
                             var kImg = new Konva.Image({
                                 image: img,
-                                x: boundingBox.x(),
-                                y: boundingBox.y(),
-                                width: boundingBox.width(),
-                                height: boundingBox.height(),
+                                x: boundingBox!.x(),
+                                y: boundingBox!.y(),
+                                width: boundingBox!.width(),
+                                height: boundingBox!.height(),
                                 draggable: activeTool === 'select'
                             });
                             var layer = getActiveKonvaLayer();
@@ -2295,35 +2424,32 @@ var CanvasTab = (function () {
                         };
                         img.src = data.src;
                     }
-                    if (data.prompt)
-                        setPrompt(data.prompt);
-                    if (data.model)
-                        setModel(data.model);
-                }
-                catch (e) { }
+                    if (data.prompt) setPrompt(data.prompt);
+                    if (data.model) setModel(data.model);
+                } catch(e) {}
             }
+
             resetView();
             updateCursor();
             History.push(); // Initial snapshot
             setInterval(saveState, 5000);
         });
     }
+
     // ── Public API for Simple Mode ──
-    function loadImageFromURL(src) {
-        return new Promise(function (resolve) {
-            if (!konvaReady) {
-                resolve();
-                return;
-            }
+
+    function loadImageFromURL(src: string): Promise<void> {
+        return new Promise<void>(function(resolve) {
+            if (!konvaReady) { resolve(); return; }
             var img = new Image();
             img.crossOrigin = 'anonymous';
-            img.onload = function () {
+            img.onload = function() {
                 var kImg = new Konva.Image({
                     image: img,
-                    x: boundingBox.x(),
-                    y: boundingBox.y(),
-                    width: boundingBox.width(),
-                    height: boundingBox.height(),
+                    x: boundingBox!.x(),
+                    y: boundingBox!.y(),
+                    width: boundingBox!.width(),
+                    height: boundingBox!.height(),
                     draggable: activeTool === 'select'
                 });
                 var layer = getActiveKonvaLayer();
@@ -2334,17 +2460,19 @@ var CanvasTab = (function () {
                 History.push();
                 resolve();
             };
-            img.onerror = function () { resolve(); };
+            img.onerror = function() { resolve(); };
             img.src = src;
         });
     }
-    function setPrompt(text) {
+
+    function setPrompt(text: string) {
         if (els.prompt) {
             els.prompt.value = text || '';
             genState.prompt = text || '';
         }
     }
-    function setModel(modelName) {
+
+    function setModel(modelName: string) {
         if (els.model && modelName) {
             els.model.value = modelName;
             genState.model = modelName;
@@ -2352,6 +2480,7 @@ var CanvasTab = (function () {
             updateCanvasUIForArch(ModelUtils.detectArchFromFilename(modelName));
         }
     }
+
     return {
         init: init,
         resize: resizeStage,
@@ -2361,4 +2490,3 @@ var CanvasTab = (function () {
         setModel: setModel
     };
 })();
-//# sourceMappingURL=canvas-tab.js.map

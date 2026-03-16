@@ -1,18 +1,21 @@
-"use strict";
 /**
  * Port rendering and hit detection for input/output ports on nodes.
  */
 const PORT_RADIUS = 5;
 const PORT_HIT_RADIUS = 10;
-function createOutputPort(node, slotIndex, x, y, typeName, label) {
+
+function createOutputPort(node: SFNode, slotIndex: number, x: number, y: number, typeName: string, label: string) {
     const color = getTypeColor(typeName);
+
     const group = new Konva.Group({ x: x, y: y });
+
     // Hit area (larger, invisible)
     const hitCircle = new Konva.Circle({
         radius: PORT_HIT_RADIUS,
         fill: 'transparent',
         listening: true,
     });
+
     // Visual circle
     const circle = new Konva.Circle({
         radius: PORT_RADIUS,
@@ -21,6 +24,7 @@ function createOutputPort(node, slotIndex, x, y, typeName, label) {
         strokeWidth: 0,
         listening: false,
     });
+
     // Label
     const text = new Konva.Text({
         x: -200,
@@ -32,9 +36,11 @@ function createOutputPort(node, slotIndex, x, y, typeName, label) {
         align: 'right',
         listening: false,
     });
+
     group.add(hitCircle);
     group.add(circle);
     group.add(text);
+
     // Hover effect
     hitCircle.on('mouseenter', () => {
         circle.strokeWidth(1.5);
@@ -42,31 +48,40 @@ function createOutputPort(node, slotIndex, x, y, typeName, label) {
         node.canvas.nodeLayer.batchDraw();
         document.body.style.cursor = 'crosshair';
     });
+
     hitCircle.on('mouseleave', () => {
         circle.strokeWidth(0);
         circle.radius(PORT_RADIUS);
         node.canvas.nodeLayer.batchDraw();
         document.body.style.cursor = '';
     });
+
     // Start connection drag
     hitCircle.on('mousedown', (e) => {
         e.cancelBubble = true;
+
         const absPos = group.getAbsolutePosition();
         const stageTransform = node.canvas.stage.getAbsoluteTransform().copy().invert();
         const worldPos = stageTransform.point(absPos);
+
         node.canvas.startConnectionDrag(node.id, slotIndex, worldPos);
     });
+
     return group;
 }
-function createInputPort(node, slotIndex, x, y, typeName, label) {
+
+function createInputPort(node: SFNode, slotIndex: number, x: number, y: number, typeName: string, label: string) {
     const color = getTypeColor(typeName);
+
     const group = new Konva.Group({ x: x, y: y });
+
     // Hit area
     const hitCircle = new Konva.Circle({
         radius: PORT_HIT_RADIUS,
         fill: 'transparent',
         listening: true,
     });
+
     // Visual circle
     const circle = new Konva.Circle({
         radius: PORT_RADIUS,
@@ -75,6 +90,7 @@ function createInputPort(node, slotIndex, x, y, typeName, label) {
         strokeWidth: 0,
         listening: false,
     });
+
     // Label (skip if empty — widget provides its own label)
     const labelText = label || typeName;
     const text = new Konva.Text({
@@ -85,10 +101,11 @@ function createInputPort(node, slotIndex, x, y, typeName, label) {
         fill: '#c0c0d0',
         listening: false,
     });
+
     group.add(hitCircle);
     group.add(circle);
-    if (label !== '')
-        group.add(text);
+    if (label !== '') group.add(text);
+
     // Hover + connection drag highlight
     hitCircle.on('mouseenter', () => {
         if (node.canvas.draggingConnection) {
@@ -101,14 +118,14 @@ function createInputPort(node, slotIndex, x, y, typeName, label) {
                 circle.strokeWidth(2);
                 circle.radius(PORT_RADIUS + 2);
             }
-        }
-        else {
+        } else {
             circle.strokeWidth(1.5);
             circle.radius(PORT_RADIUS + 1);
         }
         node.canvas.nodeLayer.batchDraw();
         document.body.style.cursor = 'crosshair';
     });
+
     hitCircle.on('mouseleave', () => {
         circle.stroke('#fff');
         circle.strokeWidth(0);
@@ -116,6 +133,7 @@ function createInputPort(node, slotIndex, x, y, typeName, label) {
         node.canvas.nodeLayer.batchDraw();
         document.body.style.cursor = '';
     });
+
     // Drop target for connection drag
     hitCircle.on('mouseup', (e) => {
         e.cancelBubble = true;
@@ -123,6 +141,6 @@ function createInputPort(node, slotIndex, x, y, typeName, label) {
             node.canvas.endConnectionDrag(node.id, slotIndex);
         }
     });
+
     return group;
 }
-//# sourceMappingURL=port.js.map

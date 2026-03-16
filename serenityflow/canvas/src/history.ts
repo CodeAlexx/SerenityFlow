@@ -1,56 +1,89 @@
-"use strict";
+interface SFHistoryNodeData {
+    type: string;
+    x: number;
+    y: number;
+    info: ComfyNodeInfo;
+    widgetValues: Record<string, unknown>;
+}
+
+interface SFHistoryState {
+    nodes: Record<string, SFHistoryNodeData>;
+    connections: Array<{
+        sourceNode: string;
+        sourceSlot: number;
+        targetNode: string;
+        targetSlot: number;
+    }>;
+    nextId: number;
+}
+
 /**
  * Undo/redo stack.
  * Tracks canvas state snapshots (simple approach — serialize full state).
  */
 class SFHistory {
-    constructor(canvas) {
+    canvas: SFCanvas;
+    undoStack: SFHistoryState[];
+    redoStack: SFHistoryState[];
+    maxSize: number;
+    _paused: boolean;
+
+    constructor(canvas: SFCanvas) {
         this.canvas = canvas;
         this.undoStack = [];
         this.redoStack = [];
         this.maxSize = 50;
         this._paused = false;
     }
+
     /**
      * Take a snapshot of the current state.
      * Call this before any destructive operation.
      */
-    saveState() {
-        if (this._paused)
-            return;
+    saveState(): void {
+        if (this._paused) return;
+
         const state = this._serialize();
         this.undoStack.push(state);
+
         if (this.undoStack.length > this.maxSize) {
             this.undoStack.shift();
         }
+
         // Clear redo stack on new action
         this.redoStack = [];
     }
-    undo() {
-        if (this.undoStack.length === 0)
-            return;
+
+    undo(): void {
+        if (this.undoStack.length === 0) return;
+
         // Save current state to redo
         const current = this._serialize();
         this.redoStack.push(current);
-        const state = this.undoStack.pop();
+
+        const state = this.undoStack.pop()!;
         this._restore(state);
     }
-    redo() {
-        if (this.redoStack.length === 0)
-            return;
+
+    redo(): void {
+        if (this.redoStack.length === 0) return;
+
         // Save current state to undo
         const current = this._serialize();
         this.undoStack.push(current);
-        const state = this.redoStack.pop();
+
+        const state = this.redoStack.pop()!;
         this._restore(state);
     }
+
     // Push a generic action for undo (not full state — lightweight)
-    push(action) {
+    push(action: unknown): void {
         this.saveState();
     }
-    _serialize() {
-        const nodes = {};
-        this.canvas.nodes.forEach((node, id) => {
+
+    _serialize(): SFHistoryState {
+        const nodes: Record<string, SFHistoryNodeData> = {};
+        this.canvas.nodes.forEach((node: SFNode, id: string) => {
             nodes[id] = {
                 type: node.nodeType,
                 x: node.x,
@@ -59,21 +92,26 @@ class SFHistory {
                 widgetValues: { ...node.widgetValues },
             };
         });
-        const connections = this.canvas.connections.map((c) => ({
+
+        const connections = this.canvas.connections.map((c: SFConnection) => ({
             sourceNode: c.sourceNode,
             sourceSlot: c.sourceSlot,
             targetNode: c.targetNode,
             targetSlot: c.targetSlot,
         }));
+
         return { nodes: nodes, connections: connections, nextId: this.canvas.nextNodeId };
     }
-    _restore(state) {
+
+    _restore(state: SFHistoryState): void {
         this._paused = true;
+
         // Clear everything
         const ids = [...this.canvas.nodes.keys()];
         ids.forEach(id => this.canvas.removeNode(id));
-        this.canvas.connections.forEach((c) => c.destroy());
+        this.canvas.connections.forEach((c: SFConnection) => c.destroy());
         this.canvas.connections = [];
+
         // Restore nodes
         this.canvas.nextNodeId = state.nextId || 1;
         for (const [id, data] of Object.entries(state.nodes)) {
@@ -81,16 +119,18 @@ class SFHistory {
             if (numId >= this.canvas.nextNodeId) {
                 this.canvas.nextNodeId = numId + 1;
             }
-            const node = new SFNode(id, data.type, data.x, data.y, data.info, this.canvas);
+
+            const node: SFNode = new SFNode(id, data.type, data.x, data.y, data.info, this.canvas);
             this.canvas.nodes.set(id, node);
             this.canvas.nodeLayer.add(node.group);
+
             // Restore widget values
             for (const [name, val] of Object.entries(data.widgetValues || {})) {
                 node.setWidgetValue(name, val);
-                if (node.widgets[name])
-                    node.widgets[name].setValue(val);
+                if (node.widgets[name]) node.widgets[name].setValue(val);
             }
         }
+
         // Restore connections
         for (const c of state.connections) {
             if (this.canvas.nodes.has(c.sourceNode) && this.canvas.nodes.has(c.targetNode)) {
@@ -99,9 +139,9 @@ class SFHistory {
                 this.canvas.connectionLayer.add(conn.line);
             }
         }
+
         this.canvas.nodeLayer.batchDraw();
         this.canvas.connectionLayer.batchDraw();
         this._paused = false;
     }
 }
-//# sourceMappingURL=history.js.map
