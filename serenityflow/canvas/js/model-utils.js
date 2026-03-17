@@ -50,6 +50,10 @@ var ModelUtils = (function () {
         if (!filename)
             return 'sd15';
         var f = filename.toLowerCase();
+        if (f.includes('qwen'))
+            return 'qwen';
+        if (f.includes('zimage') || f.includes('z-image') || f.includes('z_image'))
+            return 'zimage';
         if (f.includes('flux') || f.includes('f1d') || f.includes('f1s'))
             return 'flux';
         if (f.includes('sd3') || f.includes('stable-diffusion-3') || f.includes('sd_3'))

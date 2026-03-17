@@ -14,7 +14,7 @@ interface ModelUtilEntry {
     loader: 'checkpoint' | 'unet';
 }
 
-type ArchType = 'sd15' | 'flux' | 'sd3' | 'sdxl' | 'ltxv' | 'wan' | 'klein';
+type ArchType = 'sd15' | 'flux' | 'sd3' | 'sdxl' | 'ltxv' | 'wan' | 'klein' | 'qwen' | 'zimage';
 
 type ObjectInfo = ComfyObjectInfo | null;
 
@@ -75,6 +75,8 @@ var ModelUtils: ModelUtilsAPI = (function(): ModelUtilsAPI {
     function detectArchFromFilename(filename: string | null | undefined): ArchType {
         if (!filename) return 'sd15';
         var f: string = filename.toLowerCase();
+        if (f.includes('qwen')) return 'qwen';
+        if (f.includes('zimage') || f.includes('z-image') || f.includes('z_image')) return 'zimage';
         if (f.includes('flux') || f.includes('f1d') || f.includes('f1s')) return 'flux';
         if (f.includes('sd3') || f.includes('stable-diffusion-3') || f.includes('sd_3')) return 'sd3';
         if (f.includes('sdxl') || f.includes('xl') || f.includes('pony') || f.includes('illustrious')) return 'sdxl';

@@ -222,13 +222,19 @@ function setupTemplatesDropdown(): void {
     var list = document.getElementById('templates-list');
     if (!btn || !dropdown || !list) return;
 
+    type TemplateEntry = {
+        name?: string;
+        file?: string;
+        url?: string;
+    };
+
     // Known templates as fallback
-    var fallbackTemplates = [
+    const fallbackTemplates: TemplateEntry[] = [
         { name: 'FLUX Text to Image', file: 'flux_t2i.json' },
-        { name: 'LTX2 Text to Video', file: 'ltx2_t2v.json' }
+        { name: 'LTX2 Text to Video', file: 'ltx2_t2v.json' },
     ];
 
-    function renderTemplates(templates: Array<{ name: string; file: string }>): void {
+    function renderTemplates(templates: TemplateEntry[]): void {
         list!.innerHTML = '';
         if (!templates || templates.length === 0) {
             var empty = document.createElement('div');
@@ -240,24 +246,37 @@ function setupTemplatesDropdown(): void {
         templates.forEach(function(t) {
             var item = document.createElement('div');
             item.className = 'wf-template-item';
-            item.textContent = t.name;
+            item.textContent = t.name || (t.file ? t.file.replace(/\.json$/i, '').replace(/_/g, ' ') : 'Workflow');
             item.addEventListener('click', function(e) {
                 e.stopPropagation();
                 dropdown!.classList.add('hidden');
-                loadTemplate(t.file);
+                loadTemplate(t);
             });
             list!.appendChild(item);
         });
     }
 
-    function loadTemplate(filename: string): void {
-        var url = 'workflows/' + filename + '?t=' + Date.now();
-        // Update workflow name from template filename
+    function loadTemplate(template: TemplateEntry): void {
+        if (!template) {
+            console.error('No template provided');
+            return;
+        }
+        var baseUrl = template.url;
+        if (!baseUrl && template.file) {
+            baseUrl = 'workflows/' + template.file;
+        }
+        if (!baseUrl) {
+            console.error('Template URL is missing', template);
+            return;
+        }
+        var url = baseUrl + '?t=' + Date.now();
         var nameInput = document.getElementById('workflow-name') as HTMLInputElement | null;
         if (nameInput) {
-            var name = filename.replace(/\.json$/i, '').replace(/_/g, ' ');
-            name = name.charAt(0).toUpperCase() + name.slice(1);
-            nameInput.value = name;
+            var displayName = template.name || (template.file ? template.file.replace(/\.json$/i, '').replace(/_/g, ' ') : '');
+            if (displayName) {
+                displayName = displayName.charAt(0).toUpperCase() + displayName.slice(1);
+                nameInput.value = displayName;
+            }
         }
         if (typeof sfToolbar !== 'undefined' && sfToolbar) {
             sfToolbar.loadWorkflowFromUrl(url);

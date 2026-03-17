@@ -12,10 +12,13 @@ var WorkflowBuilder = (function() {
         var workflow;
         switch (arch) {
             case 'flux':  workflow = buildFlux(params); break;
+            case 'klein': workflow = buildKlein(params); break;
+            case 'qwen':  workflow = buildQwen(params); break;
             case 'sd3':   workflow = buildSD3(params); break;
             case 'sdxl':  workflow = buildSDXL(params); break;
             case 'ltxv':  workflow = buildLTXV(params); break;
             case 'wan':   workflow = buildWan(params); break;
+            case 'zimage': workflow = buildZImage(params); break;
             default:      workflow = buildSD15(params); break;
         }
         if (params.loras && params.loras.length > 0) {
@@ -29,6 +32,7 @@ var WorkflowBuilder = (function() {
         var workflow;
         switch (arch) {
             case 'flux':  workflow = buildFluxImg2Img(params); break;
+            case 'qwen':  workflow = buildQwenImg2Img(params); break;
             case 'sd3':   workflow = buildSD3Img2Img(params); break;
             case 'sdxl':  workflow = buildSDXLImg2Img(params); break;
             default:      workflow = buildSD15Img2Img(params); break;
@@ -48,6 +52,9 @@ var WorkflowBuilder = (function() {
         // Flux uses standard img2img (no VAEEncodeForInpaint support)
         if (arch === 'flux') {
             return buildFluxImg2Img(params);
+        }
+        if (arch === 'qwen') {
+            return buildQwenImg2Img(params);
         }
         // Video models: fall back to txt2vid
         if (arch === 'ltxv' || arch === 'wan') {
@@ -209,6 +216,146 @@ var WorkflowBuilder = (function() {
         };
     }
 
+    function buildKlein(p: WorkflowParams) {
+        var w = ModelUtils.clampDimension(p.width);
+        var h = ModelUtils.clampDimension(p.height);
+        var seed = resolveSeed(p.seed);
+        var steps = p.steps || 35;
+        var cfg = p.cfg || 3.5;
+        var prompt = p.prompt || '';
+        var negPrompt = typeof p.negPrompt === 'string' ? p.negPrompt.trim() : '';
+        var hasNegPrompt = negPrompt.length > 0;
+        var clipName = resolveKleinClipName(p.model);
+
+        var negativeNode: ComfyPromptNode = hasNegPrompt
+            ? { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text: negPrompt } }
+            : { class_type: 'ConditioningZeroOut', inputs: { conditioning: ['4', 0] } };
+
+        return {
+            '1': { class_type: 'UNETLoader', inputs: { unet_name: p.model, weight_dtype: 'default' } },
+            '2': { class_type: 'CLIPLoader', inputs: { clip_name: clipName, type: 'klein', device: 'default' } },
+            '3': { class_type: 'VAELoader', inputs: { vae_name: 'flux2-vae.safetensors' } },
+            '4': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['2', 0] } },
+            '5': negativeNode,
+            '6': { class_type: 'EmptyFlux2LatentImage', inputs: { width: w, height: h, batch_size: 1 } },
+            '7': { class_type: 'KSampler', inputs: {
+                seed: seed, steps: steps, cfg: cfg,
+                sampler_name: 'euler', scheduler: 'simple', denoise: 1.0,
+                model: ['1', 0], positive: ['4', 0], negative: ['5', 0], latent_image: ['6', 0]
+            }},
+            '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['3', 0] } },
+            '9': { class_type: 'SaveImage', inputs: { images: ['8', 0], filename_prefix: 'klein' } }
+        };
+    }
+
+    function resolveKleinClipName(modelName: string | null | undefined): string {
+        if (matchesKleinSize(modelName, '4b')) {
+            return 'qwen_3_4b.safetensors';
+        }
+        if (matchesKleinSize(modelName, '9b') || matchesKleinSize(modelName, '8b')) {
+            return 'Qwen/Qwen3-8B';
+        }
+        return 'Qwen/Qwen3-8B';
+    }
+
+    function matchesKleinSize(modelName: string | null | undefined, size: string): boolean {
+        var lower = (modelName || '').toLowerCase();
+        return new RegExp('klein[^a-z0-9]*' + size).test(lower);
+    }
+
+    function buildQwen(p: WorkflowParams) {
+        var w = ModelUtils.clampDimension(p.width);
+        var h = ModelUtils.clampDimension(p.height);
+        var seed = resolveSeed(p.seed);
+        var steps = p.steps || 20;
+        var cfg = p.cfg || 1;
+        var prompt = p.prompt || '';
+        var negPrompt = typeof p.negPrompt === 'string' ? p.negPrompt.trim() : '';
+        var hasNegPrompt = negPrompt.length > 0;
+        var negativeNode: ComfyPromptNode = hasNegPrompt
+            ? { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text: negPrompt } }
+            : { class_type: 'ConditioningZeroOut', inputs: { conditioning: ['5', 0] } };
+
+        return {
+            '1': { class_type: 'UNETLoader', inputs: { unet_name: p.model, weight_dtype: 'default' } },
+            '2': { class_type: 'CLIPLoader', inputs: { clip_name: 'qwen_2.5_vl_7b_fp8_scaled.safetensors', type: 'qwen', device: 'default' } },
+            '3': { class_type: 'VAELoader', inputs: { vae_name: 'qwen_image_vae.safetensors' } },
+            '4': { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['1', 0], shift: 3 } },
+            '5': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['2', 0] } },
+            '6': negativeNode,
+            '7': { class_type: 'EmptySD3LatentImage', inputs: { width: w, height: h, batch_size: 1 } },
+            '8': { class_type: 'KSampler', inputs: {
+                seed: seed, steps: steps, cfg: cfg,
+                sampler_name: 'euler', scheduler: 'simple', denoise: 1.0,
+                model: ['4', 0], positive: ['5', 0], negative: ['6', 0], latent_image: ['7', 0]
+            }},
+            '9': { class_type: 'VAEDecode', inputs: { samples: ['8', 0], vae: ['3', 0] } },
+            '10': { class_type: 'SaveImage', inputs: { images: ['9', 0], filename_prefix: 'qwen_image' } }
+        };
+    }
+
+    function buildQwenImg2Img(p: WorkflowParams) {
+        var seed = resolveSeed(p.seed);
+        var steps = p.steps || 20;
+        var denoise = p.denoise || 0.75;
+        var prompt = p.prompt || '';
+        var megapixels = Math.max(0.0625, (ModelUtils.clampDimension(p.width) * ModelUtils.clampDimension(p.height)) / 1000000);
+
+        return {
+            '1': { class_type: 'UNETLoader', inputs: { unet_name: p.model, weight_dtype: 'default' } },
+            '2': { class_type: 'CLIPLoader', inputs: { clip_name: 'qwen_2.5_vl_7b_fp8_scaled.safetensors', type: 'qwen', device: 'default' } },
+            '3': { class_type: 'VAELoader', inputs: { vae_name: 'qwen_image_vae.safetensors' } },
+            '4': { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['1', 0], shift: 3 } },
+            '5': { class_type: 'LoadImage', inputs: { image: p.initImageName } },
+            '6': { class_type: 'ImageScaleToTotalPixels', inputs: {
+                image: ['5', 0],
+                upscale_method: 'bicubic',
+                megapixels: megapixels
+            }},
+            '7': { class_type: 'VAEEncode', inputs: { pixels: ['6', 0], vae: ['3', 0] } },
+            '8': { class_type: 'TextEncodeQwenImageEditPlus', inputs: { clip: ['2', 0], text: prompt, image: ['6', 0] } },
+            '9': { class_type: 'ConditioningZeroOut', inputs: { conditioning: ['8', 0] } },
+            '10': { class_type: 'KSampler', inputs: {
+                seed: seed, steps: steps, cfg: 1,
+                sampler_name: 'euler', scheduler: 'simple', denoise: denoise,
+                model: ['4', 0], positive: ['8', 0], negative: ['9', 0], latent_image: ['7', 0]
+            }},
+            '11': { class_type: 'VAEDecode', inputs: { samples: ['10', 0], vae: ['3', 0] } },
+            '12': { class_type: 'SaveImage', inputs: { images: ['11', 0], filename_prefix: 'qwen_edit' } }
+        };
+    }
+
+    function buildZImage(p: WorkflowParams) {
+        var w = ModelUtils.clampDimension(p.width);
+        var h = ModelUtils.clampDimension(p.height);
+        var seed = resolveSeed(p.seed);
+        var steps = p.steps || 4;
+        var cfg = p.cfg || 1;
+        var prompt = p.prompt || '';
+        var negPrompt = typeof p.negPrompt === 'string' ? p.negPrompt.trim() : '';
+        var hasNegPrompt = negPrompt.length > 0;
+        var negativeNode: ComfyPromptNode = hasNegPrompt
+            ? { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text: negPrompt } }
+            : { class_type: 'ConditioningZeroOut', inputs: { conditioning: ['5', 0] } };
+
+        return {
+            '1': { class_type: 'UNETLoader', inputs: { unet_name: p.model, weight_dtype: 'default' } },
+            '2': { class_type: 'CLIPLoader', inputs: { clip_name: 'qwen_3_4b.safetensors', type: 'zimage', device: 'default' } },
+            '3': { class_type: 'VAELoader', inputs: { vae_name: 'ae.safetensors' } },
+            '4': { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['1', 0], shift: 3 } },
+            '5': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['2', 0] } },
+            '6': negativeNode,
+            '7': { class_type: 'EmptySD3LatentImage', inputs: { width: w, height: h, batch_size: 1 } },
+            '8': { class_type: 'KSampler', inputs: {
+                seed: seed, steps: steps, cfg: cfg,
+                sampler_name: 'res_multistep', scheduler: 'simple', denoise: 1.0,
+                model: ['4', 0], positive: ['5', 0], negative: ['6', 0], latent_image: ['7', 0]
+            }},
+            '9': { class_type: 'VAEDecode', inputs: { samples: ['8', 0], vae: ['3', 0] } },
+            '10': { class_type: 'SaveImage', inputs: { images: ['9', 0], filename_prefix: 'zimage' } }
+        };
+    }
+
     // ─── SD3 ────────────────────────────────────────────────────────────────
 
     function buildSD3(p: WorkflowParams) {
@@ -342,33 +489,49 @@ var WorkflowBuilder = (function() {
         var seed = resolveSeed(p.seed);
         var frames = Math.max(9, p.frames || 97);
         var fps = p.fps || 24;
-        return {
-            '1': { class_type: 'LTXVLoader', inputs: {
-                checkpoint_path: p.model,
-                gemma_path: 'gemma-3-12b-it',
-                dtype: 'bfloat16'
-            }},
-            '2': { class_type: 'LTXVSampler', inputs: {
-                ltxv_model: ['1', 0],
-                prompt: p.prompt,
-                negative_prompt: p.negPrompt || 'worst quality, inconsistent motion, blurry, jittery, distorted',
-                width: w,
-                height: h,
-                num_frames: frames,
-                steps: p.steps || 40,
-                cfg: 3.0,
-                seed: seed,
-                frame_rate: fps,
-                stg_scale: 1.0,
-                mode: 'auto'
-            }},
+        var hasGuideImage = typeof p.initImageName === 'string' && p.initImageName.length > 0;
+        var isDistilled = /distill/i.test(p.model);
+        var defaultSteps = isDistilled ? 8 : 25;
+        var loaderInputs: Record<string, unknown> = {
+            checkpoint_path: p.model,
+            gemma_path: 'gemma-3-12b-it',
+            dtype: 'bfloat16',
+            quantization: 'auto',
+            backend: 'legacy_stagehand'
+        };
+        var samplerInputs: Record<string, unknown> = {
+            ltxv_model: ['1', 0],
+            prompt: p.prompt,
+            negative_prompt: p.negPrompt || 'worst quality, inconsistent motion, blurry, jittery, distorted',
+            width: w,
+            height: h,
+            num_frames: frames,
+            steps: p.steps || defaultSteps,
+            cfg: 3.0,
+            seed: seed,
+            frame_rate: fps,
+            stg_scale: 1.0,
+            mode: isDistilled ? 'distilled' : 'dev'
+        };
+        var workflow: ComfyPrompt = {
+            '1': { class_type: 'LTXVLoader', inputs: loaderInputs },
+            '2': { class_type: 'LTXVSampler', inputs: samplerInputs },
             '3': { class_type: 'SaveVideo', inputs: {
-                video: ['2', 0],
+                video: ['2', 1],
                 filename_prefix: 'sf_video',
                 fps: fps,
                 format: 'mp4'
             }}
         };
+
+        if (hasGuideImage) {
+            workflow['4'] = { class_type: 'LoadImage', inputs: { image: p.initImageName } };
+            workflow['2'].inputs.guide_image = ['4', 0];
+            workflow['2'].inputs.guide_strength = 1.0;
+            workflow['2'].inputs.guide_frame_idx = 0;
+        }
+
+        return workflow;
     }
 
     // ─── WAN (Video) ──────────────────────────────────────────────────────

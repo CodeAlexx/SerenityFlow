@@ -8,7 +8,7 @@ import torch
 
 from serenityflow.executor.graph import WorkflowGraph
 from serenityflow.executor.runner import WorkflowRunner, ExecutionError
-from serenityflow.nodes.registry import registry
+from serenityflow.nodes.registry import NodeDef, registry
 
 # Import mock nodes to register them
 import serenityflow.nodes.mock  # noqa: F401
@@ -253,3 +253,56 @@ class TestProgressCallback:
         runner.execute(graph, progress_callback=on_progress)
         assert progress["6"] == "KSampler"
         assert progress["9"] == "SaveImage"
+
+
+class TestInputNormalization:
+    def test_drops_device_and_unknown_extras(self):
+        node_def = NodeDef(
+            class_type="DummyNode",
+            fn=lambda **kwargs: kwargs,
+            input_types={"required": {"model": ("MODEL",)}, "optional": {}},
+        )
+
+        normalized = WorkflowRunner._normalize_input_names(node_def, {
+            "model": "model-handle",
+            "device": "cuda",
+            "unexpected": "drop-me",
+        })
+
+        assert normalized == {"model": "model-handle"}
+
+    def test_aliases_positive_to_conditioning(self):
+        node_def = NodeDef(
+            class_type="BasicGuider",
+            fn=lambda **kwargs: kwargs,
+            input_types={"required": {
+                "model": ("MODEL",),
+                "conditioning": ("CONDITIONING",),
+            }},
+        )
+
+        normalized = WorkflowRunner._normalize_input_names(node_def, {
+            "model": "model-handle",
+            "positive": [{"cross_attn": torch.randn(1, 4, 8)}],
+        })
+
+        assert "conditioning" in normalized
+        assert "positive" not in normalized
+
+    def test_aliases_video_to_images(self):
+        node_def = NodeDef(
+            class_type="SaveVideo",
+            fn=lambda **kwargs: kwargs,
+            input_types={"required": {
+                "images": ("IMAGE",),
+                "filename_prefix": ("STRING",),
+            }},
+        )
+
+        normalized = WorkflowRunner._normalize_input_names(node_def, {
+            "video": torch.randn(4, 32, 32, 3),
+            "filename_prefix": "clip",
+        })
+
+        assert "images" in normalized
+        assert "video" not in normalized

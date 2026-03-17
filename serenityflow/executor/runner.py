@@ -247,8 +247,8 @@ class WorkflowRunner:
 
         Handles mismatches between litegraph port names and registered
         input_types keys (e.g. port ``video`` → param ``images``).
-        Uses positional mapping: the i-th unrecognized key maps to the
-        i-th missing registered name.
+        Unknown extras that cannot be mapped are dropped instead of being
+        forwarded into node functions as unexpected kwargs.
         """
         it = node_def.input_types
         registered: list[str] = []
@@ -265,22 +265,37 @@ class WorkflowRunner:
         if not unknown:
             return inputs
 
-        # Find registered names that are missing from inputs
-        missing = [k for k in registered if k not in inputs]
-
-        # Positional remap: pair unknown keys with missing registered names
         normalized = {}
         unknown_set = set(unknown)
-        remap = {}
-        for i, uk in enumerate(unknown):
-            if i < len(missing):
-                remap[uk] = missing[i]
+
+        # Prefer explicit aliases for known workflow/UI port names.
+        alias_map = {
+            "images": "video",
+            "video": "images",
+            "positive": "conditioning",
+        }
+        remap = {
+            key: alias_map[key]
+            for key in unknown
+            if key in alias_map and alias_map[key] in registered and alias_map[key] not in inputs
+        }
+
+        # Fall back to a conservative positional remap only when it is
+        # unambiguous. Broad positional remapping caused workflow extras like
+        # `device` or `vae` to be mis-bound into unrelated parameters.
+        remaining_unknown = [k for k in unknown if k not in remap and not k.startswith("_widget_")]
+        missing = [k for k in registered if k not in inputs and k not in remap.values()]
+        if len(remaining_unknown) == 1 and len(missing) == 1:
+            remap[remaining_unknown[0]] = missing[0]
 
         for key, value in inputs.items():
             if key in unknown_set and key in remap:
                 normalized[remap[key]] = value
-            elif key.startswith("_widget_"):
-                # Skip unmapped widget placeholders
+            elif key.startswith("_widget_") or key == "device":
+                # Skip UI-only placeholders and legacy device hints.
+                continue
+            elif key in unknown_set:
+                # Drop unknown extras rather than forwarding unexpected kwargs.
                 continue
             else:
                 normalized[key] = value

@@ -27,9 +27,25 @@ log = logging.getLogger(__name__)
     },
     "optional": {
         "dtype": (["bfloat16", "float16"], {"default": "bfloat16"}),
+        "spatial_upsampler_path": ("STRING", {"default": ""}),
+        "distilled_lora_path": ("STRING", {"default": ""}),
+        "lora_path": ("STRING", {"default": ""}),
+        "lora_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.05}),
+        "quantization": (["auto", "none", "fp8-cast", "fp8-scaled-mm"], {"default": "auto"}),
+        "backend": (["auto", "official", "legacy_stagehand"], {"default": "auto"}),
     }},
 )
-def ltxv_loader(checkpoint_path, gemma_path, dtype="bfloat16"):
+def ltxv_loader(
+    checkpoint_path,
+    gemma_path,
+    dtype="bfloat16",
+    spatial_upsampler_path="",
+    distilled_lora_path="",
+    lora_path="",
+    lora_strength=1.0,
+    quantization="auto",
+    backend="auto",
+):
     """Load LTX-V 19B model (transformer + VAE + text encoder)."""
     import os
     from serenityflow.bridge.serenity_api import load_ltxv_model
@@ -60,14 +76,24 @@ def ltxv_loader(checkpoint_path, gemma_path, dtype="bfloat16"):
                 break
 
     log.info("LTXVLoader: checkpoint=%s, gemma=%s", checkpoint_path, gemma_path)
-    model = load_ltxv_model(checkpoint_path, gemma_path, dtype=dtype)
+    model = load_ltxv_model(
+        checkpoint_path,
+        gemma_path,
+        dtype=dtype,
+        spatial_upsampler_path=spatial_upsampler_path or None,
+        distilled_lora_path=distilled_lora_path or None,
+        lora_paths=(lora_path,) if lora_path else (),
+        lora_strengths=(float(lora_strength),) if lora_path else (),
+        quantization=quantization,
+        backend="legacy_stagehand" if backend == "legacy_stagehand" else backend,
+    )
     return (model,)
 
 
 @registry.register(
     "LTXVSampler",
-    return_types=("IMAGE",),
-    return_names=("frames",),
+    return_types=("IMAGE", "VIDEO", "AUDIO"),
+    return_names=("frames", "video", "audio"),
     category="sampling/video",
     is_output=False,
     input_types={"required": {
@@ -85,11 +111,19 @@ def ltxv_loader(checkpoint_path, gemma_path, dtype="bfloat16"):
         "frame_rate": ("FLOAT", {"default": 25.0, "min": 1.0, "max": 60.0}),
         "stg_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0}),
         "mode": (["auto", "distilled", "dev"], {"default": "auto"}),
+        "guide_image": ("IMAGE",),
+        "guide_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+        "guide_frame_idx": ("INT", {"default": 0, "min": 0, "max": 512}),
+        "audio": ("AUDIO",),
+        "audio_start_time": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 600.0, "step": 0.1}),
+        "audio_duration": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 600.0, "step": 0.1}),
     }},
 )
 def ltxv_sampler(ltxv_model, prompt, width=768, height=512, num_frames=25,
                  steps=8, cfg=3.0, seed=42, negative_prompt="",
-                 frame_rate=25.0, stg_scale=1.0, mode="auto"):
+                 frame_rate=25.0, stg_scale=1.0, mode="auto",
+                 guide_image=None, guide_strength=1.0, guide_frame_idx=0,
+                 audio=None, audio_start_time=0.0, audio_duration=0.0):
     """Generate video frames using LTX-V 19B.
 
     Mode controls the denoising schedule:
@@ -114,6 +148,12 @@ def ltxv_sampler(ltxv_model, prompt, width=768, height=512, num_frames=25,
         seed=seed,
         frame_rate=frame_rate,
         mode=mode,
+        guide_image=guide_image,
+        guide_strength=guide_strength,
+        guide_frame_idx=guide_frame_idx,
+        audio=audio,
+        audio_start_time=audio_start_time,
+        audio_duration=audio_duration if audio_duration and audio_duration > 0 else None,
     )
 
     video = result["video"]
@@ -138,7 +178,9 @@ def ltxv_sampler(ltxv_model, prompt, width=768, height=512, num_frames=25,
 
     frames = frames.clamp(0, 1)
     log.info("Generated %d frames at %dx%d", frames.shape[0], frames.shape[2], frames.shape[1])
-    return (frames,)
+    audio_out = result.get("audio") or {"path": None, "waveform": None, "sample_rate": None}
+    video_out = {"frames": frames, "fps": frame_rate, "audio": audio_out}
+    return (frames, video_out, audio_out)
 
 
 @registry.register(

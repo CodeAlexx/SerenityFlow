@@ -296,11 +296,7 @@ var Compositor = (function () {
             guidance_regions: [],
             control_inputs: [],
             reference_images: [],
-            lanpaint: {
-                enabled: ctx.genState.lanpaint && mode === 'inpaint',
-                thinking_steps: ctx.genState.lanpaintThinkingSteps || 5,
-                mode: ctx.genState.lanpaintMode || 'image_first'
-            },
+            lanpaint: { enabled: false, thinking_steps: 5 },
             params: {
                 seed: seed,
                 steps: ctx.genState.steps,

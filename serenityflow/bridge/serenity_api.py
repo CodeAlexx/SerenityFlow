@@ -10,13 +10,18 @@ import copy
 import io
 import logging
 import os
+import sys
 import threading
+from pathlib import Path
+from types import MethodType
 from typing import Any
 
 import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)
+
+_LTX_GEMMA_TRANSFORMERS_COMPAT_PATCHED = False
 
 
 # ---------------------------------------------------------------------------
@@ -375,9 +380,16 @@ def load_diffusion_model(path: str, dtype: str = "default") -> nn.Module:
 
     # Always load to CPU first to avoid OOM
     model_config = s["detect_from_file"](path)
-    model = s["load_model"](path, device="cpu", dtype=torch_dtype)
+    if _is_flux2_model_config(model_config, s["ModelArchitecture"]):
+        model = _load_flux2_transformer(path, torch_dtype, model_config)
+    elif model_config is not None and model_config.architecture == s["ModelArchitecture"].ZIMAGE:
+        model = _load_zimage_transformer(path, torch_dtype, model_config)
+    elif model_config is not None and model_config.architecture == s["ModelArchitecture"].QWEN:
+        model = _load_qwen_transformer(path, torch_dtype, model_config)
+    else:
+        model = s["load_model"](path, device="cpu", dtype=torch_dtype)
 
-    if model_config is not None:
+    if model_config is not None and not hasattr(model, "_serenity_prediction_type"):
         from serenity.inference.models.loader import _get_adapter
         adapter = _get_adapter(model_config)
         if adapter:
@@ -385,6 +397,9 @@ def load_diffusion_model(path: str, dtype: str = "default") -> nn.Module:
             model._serenity_arch = model_config.architecture
             model._serenity_model_config = model_config
             logger.info("Model prediction type: %s", model._serenity_prediction_type)
+    if _is_flux2_model_config(model_config, s["ModelArchitecture"]):
+        model._serenity_flux2 = True
+        _attach_flux2_vae_stats(model, path)
 
     # Partially load to GPU, keeping headroom for text encoders + VAE (~4GB).
     # Blocks that don't fit get CPU↔GPU streaming hooks.
@@ -519,47 +534,250 @@ def _find_transformer_blocks(model: nn.Module) -> list[nn.Module]:
     return unique
 
 
+def _is_flux2_model_config(model_config, model_architecture) -> bool:
+    """Return True for FLUX.2-style single-file transformers."""
+    if model_config is None:
+        return False
+    if model_config.architecture in (
+        model_architecture.FLUX_2_KLEIN_4B,
+        model_architecture.FLUX_2_KLEIN_9B,
+    ):
+        return True
+    return model_config.unet_config.get("image_model") == "flux2"
+
+
+def _load_flux2_transformer(path: str, dtype: torch.dtype, model_config) -> nn.Module:
+    """Load a FLUX.2 Dev/Klein transformer from a single safetensors file."""
+    try:
+        from diffusers import Flux2Transformer2DModel
+        from serenity.models.flux2_probe import flux2_config_dir, probe_flux2_variant
+        from serenity.models.single_file_utils import (
+            check_not_lora,
+            format_load_diagnostic,
+            strip_accelerate_hooks,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "FLUX.2 loading requires diffusers and Serenity's flux2 helpers."
+        ) from exc
+
+    check_not_lora(path)
+    variant, config = probe_flux2_variant(path)
+    logger.info("Loading FLUX.2 transformer from %s (detected=%s)", os.path.basename(path), variant)
+
+    try:
+        with flux2_config_dir(config) as config_path:
+            try:
+                model = Flux2Transformer2DModel.from_single_file(
+                    path,
+                    config=config_path,
+                    torch_dtype=dtype,
+                    low_cpu_mem_usage=False,
+                )
+            except TypeError:
+                # Older diffusers builds do not expose low_cpu_mem_usage.
+                model = Flux2Transformer2DModel.from_single_file(
+                    path,
+                    config=config_path,
+                    torch_dtype=dtype,
+                )
+    except Exception as exc:
+        diag = format_load_diagnostic(path, f"flux2/{variant}", exc)
+        raise RuntimeError(diag) from exc
+
+    strip_accelerate_hooks(model)
+    model.eval()
+    model._serenity_prediction_type = "flow_flux"
+    model._serenity_arch = model_config.architecture
+    model._serenity_model_config = model_config
+    model._serenity_flux2 = True
+    model._serenity_flux2_variant = variant
+    return model
+
+
+def _load_zimage_transformer(path: str, dtype: torch.dtype, model_config) -> nn.Module:
+    """Load a Z-Image transformer from a single file or diffusers directory."""
+    try:
+        from diffusers import ZImageTransformer2DModel
+    except ImportError as exc:
+        raise RuntimeError("Z-Image loading requires diffusers.") from exc
+
+    candidate = Path(path).expanduser()
+    if candidate.is_file() and candidate.suffix.lower() == ".safetensors":
+        logger.info("Loading Z-Image transformer from %s", os.path.basename(path))
+        model = ZImageTransformer2DModel.from_single_file(
+            str(candidate),
+            torch_dtype=dtype,
+        )
+    else:
+        load_path = candidate
+        subfolder = "transformer" if (load_path / "transformer").is_dir() else None
+        logger.info(
+            "Loading Z-Image transformer from %s (subfolder=%s)",
+            load_path,
+            subfolder,
+        )
+        load_kwargs: dict[str, Any] = {
+            "torch_dtype": dtype,
+            "local_files_only": True,
+        }
+        if subfolder is not None:
+            load_kwargs["subfolder"] = subfolder
+        model = ZImageTransformer2DModel.from_pretrained(str(load_path), **load_kwargs)
+
+    model.eval()
+    model._serenity_prediction_type = "flow"
+    model._serenity_arch = model_config.architecture
+    model._serenity_model_config = model_config
+    return model
+
+
+def _resolve_flux2_vae_path(checkpoint_path: str) -> str | None:
+    """Best-effort lookup for the companion FLUX.2 VAE."""
+    checkpoint = Path(checkpoint_path).expanduser()
+    candidates = [
+        checkpoint.parent / "flux2-vae.safetensors",
+        checkpoint.parent / "vae" / "flux2-vae.safetensors",
+        checkpoint.parent / "vae" / "diffusion_pytorch_model.safetensors",
+        checkpoint.parent.parent / "flux2-vae.safetensors",
+        checkpoint.parent.parent / "vae" / "flux2-vae.safetensors",
+        checkpoint.parent.parent / "vae" / "diffusion_pytorch_model.safetensors",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+
+    try:
+        from serenityflow.bridge.model_paths import get_model_paths
+
+        return get_model_paths().find("flux2-vae.safetensors", "vae")
+    except Exception:
+        return None
+
+
+def _resolve_flux_like_vae_config_dir(path: str) -> str | None:
+    """Best-effort lookup for a diffusers VAE config directory for 16-channel Flux/Z-Image VAEs."""
+    candidate = Path(path).expanduser()
+    for local_dir in (candidate.parent, candidate.parent / "vae", candidate.parent.parent / "vae"):
+        if (local_dir / "config.json").is_file():
+            return str(local_dir)
+
+    for repo_id in (
+        "Tongyi-MAI/Z-Image-Turbo",
+        "black-forest-labs/FLUX.1-dev",
+        "black-forest-labs/FLUX.1-schnell",
+    ):
+        snapshot = _resolve_hf_snapshot_path(repo_id)
+        if not snapshot:
+            continue
+        vae_dir = Path(snapshot) / "vae"
+        if (vae_dir / "config.json").is_file():
+            return str(vae_dir)
+    return None
+
+
+def _attach_flux2_vae_stats(model: nn.Module, checkpoint_path: str) -> None:
+    """Attach BN stats from the FLUX.2 VAE so decode can denormalize latents."""
+    vae_path = _resolve_flux2_vae_path(checkpoint_path)
+    if vae_path is None:
+        logger.debug("No companion FLUX.2 VAE found for %s", checkpoint_path)
+        return
+
+    try:
+        from safetensors import safe_open
+
+        with safe_open(vae_path, framework="pt", device="cpu") as f:
+            keys = set(f.keys())
+            if "bn.running_mean" not in keys or "bn.running_var" not in keys:
+                return
+            model._serenity_flux2_bn_mean = f.get_tensor("bn.running_mean")
+            model._serenity_flux2_bn_var = f.get_tensor("bn.running_var")
+            model._serenity_flux2_bn_eps = 1e-4
+            logger.info("Attached FLUX.2 VAE BN stats from %s", os.path.basename(vae_path))
+    except Exception:
+        logger.debug("Failed to attach FLUX.2 VAE BN stats", exc_info=True)
+
+
 def load_vae(path: str) -> VAEWrapper:
     """Load standalone VAE model."""
     s = _get()
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    use_native_flux2_encoder = False
 
     try:
+        from diffusers import AutoencoderKLFlux2 as DiffusersAutoencoderKLFlux2
         from diffusers.models import AutoencoderKL
 
         # Detect Flux-style VAE (16ch latent) by peeking at decoder.conv_in shape
         sd_peek = s["load_state_dict"](path)
+        if _is_wan_vae_state_dict(sd_peek):
+            return _load_wan_vae(sd_peek, device)
+
         is_flux_vae = False
+        is_flux2_vae = False
         if "decoder.conv_in.weight" in sd_peek:
             latent_ch = sd_peek["decoder.conv_in.weight"].shape[1]
             is_flux_vae = (latent_ch == 16)
+            is_flux2_vae = (latent_ch == 32)
+        if "bn.running_mean" in sd_peek and "bn.running_var" in sd_peek:
+            is_flux2_vae = True
         del sd_peek  # free memory
 
-        if is_flux_vae:
-            # Flux VAE: LDM-format keys with 4D conv attention weights,
-            # custom block_out_channels. Use from_single_file which handles
-            # all conversion internally.
-            # Flux VAE config from known architecture — NO HF download
-            from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL as _AEConfig
-            vae = AutoencoderKL(
-                in_channels=3, out_channels=3, latent_channels=16,
-                block_out_channels=[128, 256, 512, 512],
-                layers_per_block=2, act_fn="silu", norm_num_groups=32,
-                scaling_factor=0.3611,
-            )
-            from safetensors.torch import load_file
-            vae_sd = load_file(path)
-            # Try LDM→diffusers key conversion if needed
+        if is_flux2_vae:
             try:
-                from serenity.inference.models.convert import convert_ldm_vae_to_diffusers
-                converted = convert_ldm_vae_to_diffusers(vae_sd)
-                vae_sd = converted
+                vae = DiffusersAutoencoderKLFlux2.from_single_file(path, torch_dtype=torch.float32)
             except Exception:
-                pass  # Already in diffusers format or conversion not applicable
-            vae.load_state_dict(vae_sd, strict=False, assign=True)
-            # VAE goes on available device (transformer offloaded after sampling)
+                _ensure_serenity_inference_path()
+                from models.vae_flux2 import AutoencoderKLFlux2 as NativeAutoencoderKLFlux2
+
+                logger.info("Falling back to Serenity native FLUX.2 VAE loader for %s", os.path.basename(path))
+                vae_sd = s["load_state_dict"](path)
+                vae = NativeAutoencoderKLFlux2.from_state_dict(vae_sd)
+                use_native_flux2_encoder = True
             vae = vae.to(device=device, dtype=torch.float32).eval()
-            scaling = 0.3611  # Flux VAE scaling factor
+            scaling = 1.0
+        elif is_flux_vae:
+            config_dir = _resolve_flux_like_vae_config_dir(path)
+            if config_dir is not None:
+                logger.info("Loading Flux-like VAE from %s with config %s", os.path.basename(path), config_dir)
+                vae = AutoencoderKL.from_single_file(
+                    path,
+                    config=config_dir,
+                    torch_dtype=torch.float32,
+                )
+                vae = vae.to(device=device, dtype=torch.float32).eval()
+                scaling = float(getattr(vae.config, "scaling_factor", 0.3611) or 0.3611)
+            else:
+                vae = AutoencoderKL(
+                    in_channels=3,
+                    out_channels=3,
+                    latent_channels=16,
+                    block_out_channels=[128, 256, 512, 512],
+                    layers_per_block=2,
+                    act_fn="silu",
+                    norm_num_groups=32,
+                    scaling_factor=0.3611,
+                )
+                from safetensors.torch import load_file
+
+                vae_sd = load_file(path)
+                try:
+                    from serenity.inference.models.convert import convert_ldm_vae_to_diffusers
+
+                    vae_sd = convert_ldm_vae_to_diffusers(vae_sd)
+                except Exception:
+                    pass
+                for k in list(vae_sd.keys()):
+                    if (
+                        hasattr(vae_sd[k], "ndim")
+                        and vae_sd[k].ndim == 4
+                        and vae_sd[k].shape[2:] == (1, 1)
+                        and "attentions" in k
+                    ):
+                        vae_sd[k] = vae_sd[k].squeeze(-1).squeeze(-1)
+                vae.load_state_dict(vae_sd, strict=False, assign=True)
+                vae = vae.to(device=device, dtype=torch.float32).eval()
+                scaling = 0.3611
         else:
             # Standard VAE (SD 1.5 / SDXL / etc.)
             from serenity.inference.models.convert import convert_ldm_vae_to_diffusers, safe_load_state_dict
@@ -584,10 +802,145 @@ def load_vae(path: str) -> VAEWrapper:
             scaling = 0.18215  # SD default
 
         decoder = s["VAEDecoder"](vae_model=vae, dtype=torch.float32, device=device, scaling_factor=scaling)
-        encoder = s["VAEEncoder"](vae_model=vae, dtype=torch.float32, device=device, scaling_factor=scaling)
+        if use_native_flux2_encoder:
+            encoder = _Flux2NativeVAEEncoder(vae, device=device, dtype=torch.float32, scaling_factor=scaling)
+        else:
+            encoder = s["VAEEncoder"](vae_model=vae, dtype=torch.float32, device=device, scaling_factor=scaling)
         return VAEWrapper(decoder, encoder)
     except Exception as e:
         raise RuntimeError(f"Failed to load VAE from {path}: {e}") from e
+
+
+class _Flux2NativeVAEEncoder:
+    """Encoder adapter for Serenity's native FLUX.2 VAE implementation."""
+
+    __slots__ = ("_model", "_device", "_dtype", "scaling_factor")
+
+    def __init__(self, vae_model: nn.Module, device: str, dtype: torch.dtype, scaling_factor: float) -> None:
+        self._model = vae_model
+        self._device = device
+        self._dtype = dtype
+        self.scaling_factor = scaling_factor
+
+    @torch.inference_mode()
+    def encode(self, image: torch.Tensor, tiling: bool = False, tile_size: int = 512) -> torch.Tensor:
+        del tiling, tile_size
+
+        image = image.to(device=self._device, dtype=self._dtype)
+        encoded = self._model.encode((image * 2.0) - 1.0)
+        if hasattr(encoded, "latent_dist"):
+            encoded = encoded.latent_dist.sample()
+        elif hasattr(encoded, "sample"):
+            encoded = encoded.sample
+
+        if isinstance(encoded, torch.Tensor) and encoded.ndim == 4 and encoded.shape[1] == 64:
+            encoded = encoded[:, :32]
+
+        return encoded * self.scaling_factor
+
+
+class _WanVAEDecoder:
+    """Adapter that exposes Wan-style VAEs through the bridge decode API."""
+
+    __slots__ = ("_model", "_device", "_dtype", "_latents_mean", "_latents_std")
+
+    def __init__(self, model: nn.Module, device: str, dtype: torch.dtype) -> None:
+        self._model = model
+        self._device = device
+        self._dtype = dtype
+        self._latents_mean = torch.tensor(
+            model.config.latents_mean,
+            device=device,
+            dtype=dtype,
+        ).view(1, -1, 1, 1, 1)
+        self._latents_std = torch.tensor(
+            model.config.latents_std,
+            device=device,
+            dtype=dtype,
+        ).view(1, -1, 1, 1, 1)
+
+    def decode(self, latents: torch.Tensor, tiling: bool = False, tile_size: int = 512) -> torch.Tensor:
+        del tiling, tile_size
+
+        z = latents
+        squeeze_time = False
+        if z.ndim == 4:
+            z = z.unsqueeze(2)
+            squeeze_time = True
+
+        z = z.to(device=self._device, dtype=self._dtype)
+        if z.shape[1] == self._latents_mean.shape[1]:
+            z = z * self._latents_std + self._latents_mean
+
+        decoded = self._model.decode(z)
+        if squeeze_time and decoded.ndim == 5 and decoded.shape[2] == 1:
+            decoded = decoded.squeeze(2)
+        return ((decoded + 1.0) / 2.0).clamp(0.0, 1.0)
+
+
+class _WanVAEEncoder:
+    """Adapter that exposes Wan-style VAEs through the bridge encode API."""
+
+    __slots__ = ("_model", "_device", "_dtype", "_latents_mean", "_latents_std")
+
+    def __init__(self, model: nn.Module, device: str, dtype: torch.dtype) -> None:
+        self._model = model
+        self._device = device
+        self._dtype = dtype
+        self._latents_mean = torch.tensor(
+            model.config.latents_mean,
+            device=device,
+            dtype=dtype,
+        ).view(1, -1, 1, 1, 1)
+        self._latents_std = torch.tensor(
+            model.config.latents_std,
+            device=device,
+            dtype=dtype,
+        ).view(1, -1, 1, 1, 1)
+
+    def encode(self, image: torch.Tensor, tiling: bool = False, tile_size: int = 512) -> torch.Tensor:
+        del tiling, tile_size
+
+        x = image
+        squeeze_time = False
+        if x.ndim == 4:
+            x = x.unsqueeze(2)
+            squeeze_time = True
+
+        x = (x.to(device=self._device, dtype=self._dtype) * 2.0) - 1.0
+        latents = self._model.encode(x)
+        if latents.shape[1] == self._latents_mean.shape[1]:
+            latents = (latents - self._latents_mean) / self._latents_std
+        if squeeze_time and latents.ndim == 5 and latents.shape[2] == 1:
+            latents = latents.squeeze(2)
+        return latents
+
+
+def _is_wan_vae_state_dict(state_dict: dict[str, Any]) -> bool:
+    """Detect Wan/Qwen image VAE checkpoints by their 3D convolution weights."""
+    for key in (
+        "post_quant_conv.weight",
+        "decoder.conv_in.weight",
+        "conv1.weight",
+        "decoder.conv1.weight",
+    ):
+        weight = state_dict.get(key)
+        if hasattr(weight, "ndim") and weight.ndim == 5:
+            return True
+    return False
+
+
+def _load_wan_vae(state_dict: dict[str, Any], device: str) -> VAEWrapper:
+    """Load Wan/Qwen-style VAE checkpoints with latent mean/std normalization."""
+    _ensure_serenity_inference_path()
+    from models.vae_wan import WanVAE
+
+    compute_dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    vae = WanVAE.from_state_dict(state_dict)
+    vae = vae.to(device=device, dtype=compute_dtype).eval()
+    decoder = _WanVAEDecoder(vae, device, compute_dtype)
+    encoder = _WanVAEEncoder(vae, device, compute_dtype) if vae.encoder is not None else None
+    return VAEWrapper(decoder, encoder)
 
 
 def load_clip(path: str, clip_type: str = "stable_diffusion") -> CLIPWrapper:
@@ -595,12 +948,11 @@ def load_clip(path: str, clip_type: str = "stable_diffusion") -> CLIPWrapper:
     s = _get()
     # Text encoders stay on CPU — moved to GPU only during encode_text()
     device = "cpu"
-    arch_map = {
-        "stable_diffusion": s["ModelArchitecture"].SD15,
-        "sdxl": s["ModelArchitecture"].SDXL,
-        "sd3": s["ModelArchitecture"].SD3,
-    }
-    arch = arch_map.get(clip_type, s["ModelArchitecture"].SD15)
+    arch = _resolve_single_clip_architecture(path, clip_type, s["ModelArchitecture"])
+    external_mode = _resolve_external_text_mode(path, clip_type)
+    if external_mode is not None:
+        external_dtype = torch.bfloat16 if external_mode in {"flux2", "qwen"} else torch.float16
+        return _load_external_clip(path, external_mode, arch, external_dtype, device)
 
     from serenity.inference.text.encoders import TextEncoderType, get_required_encoders, get_default_encoder_path
     required = get_required_encoders(arch)
@@ -609,8 +961,29 @@ def load_clip(path: str, clip_type: str = "stable_diffusion") -> CLIPWrapper:
     for enc_type in required:
         local_file = _match_encoder_file(enc_type, [path])
         if local_file:
-            _load_encoder_from_safetensors(text_mgr, enc_type, local_file,
-                                           dtype=torch.float16, device=device)
+            local_dir = _resolve_text_encoder_dir(local_file)
+            if enc_type in (TextEncoderType.QWEN, TextEncoderType.GEMMA) and local_dir:
+                text_mgr.load_encoder(
+                    enc_type,
+                    model_path=local_dir,
+                    dtype=torch.float16,
+                    device=device,
+                )
+            elif enc_type not in (TextEncoderType.QWEN, TextEncoderType.GEMMA):
+                _load_encoder_from_safetensors(
+                    text_mgr,
+                    enc_type,
+                    local_file,
+                    dtype=torch.float16,
+                    device=device,
+                )
+            else:
+                enc_path = get_default_encoder_path(arch, enc_type)
+                if enc_path:
+                    text_mgr.load_encoder(enc_type, model_path=enc_path.repo,
+                                          dtype=torch.float16, device=device,
+                                          subfolder=enc_path.subfolder,
+                                          tokenizer_subfolder=enc_path.tokenizer_subfolder)
         else:
             enc_path = get_default_encoder_path(arch, enc_type)
             if enc_path:
@@ -620,6 +993,249 @@ def load_clip(path: str, clip_type: str = "stable_diffusion") -> CLIPWrapper:
                                       tokenizer_subfolder=enc_path.tokenizer_subfolder)
 
     return CLIPWrapper(text_mgr, arch, torch.float16, device)
+
+
+class _ExternalTextManager:
+    """Minimal text-manager facade for modern local encoder implementations."""
+
+    def __init__(self, encoder, mode: str):
+        self._encoder = encoder
+        self._mode = mode
+
+    def encode_for_model(self, _arch, prompt: str, negative: str = "", clip_skip: int = 0) -> dict[str, Any]:
+        del negative, clip_skip
+
+        attention_mask = None
+        if self._mode == "qwen":
+            out, attention_mask = self._encoder.encode(prompt, task_type="image")
+        else:
+            out = self._encoder.encode(prompt)
+
+        return {
+            "cond": out.hidden_states,
+            "pooled": getattr(out, "pooled_output", None),
+            "attention_mask": attention_mask,
+        }
+
+
+def _ensure_serenity_inference_path() -> Path:
+    """Make the local serenity-inference repo importable."""
+    root = Path.home() / "serenity-inference"
+    if not root.exists():
+        raise FileNotFoundError(
+            f"Required local encoder repo not found: {root}"
+        )
+    root_str = str(root)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    return root
+
+
+def _resolve_hf_snapshot_path(repo_id: str) -> str | None:
+    """Resolve a HuggingFace repo ID to a local snapshot path if cached."""
+    repo_dir = Path.home() / ".cache" / "huggingface" / "hub" / (
+        "models--" + repo_id.replace("/", "--")
+    )
+    if not repo_dir.exists():
+        return None
+
+    refs_main = repo_dir / "refs" / "main"
+    if refs_main.exists():
+        revision = refs_main.read_text().strip()
+        snapshot = repo_dir / "snapshots" / revision
+        if snapshot.exists():
+            return str(snapshot)
+
+    snapshots_dir = repo_dir / "snapshots"
+    snapshots = sorted(snapshots_dir.glob("*")) if snapshots_dir.exists() else []
+    if snapshots:
+        return str(snapshots[-1])
+    return None
+
+
+def _resolve_external_text_mode(path: str, clip_type: str) -> str | None:
+    """Choose an external text encoder implementation when required."""
+    lowered = (clip_type or "").lower()
+    basename = os.path.basename(path).lower()
+    if lowered in {"klein", "flux2_klein"}:
+        return "klein"
+    if lowered in {"flux2", "mistral"}:
+        return "flux2"
+    if lowered == "zimage":
+        return "zimage"
+    if lowered == "qwen":
+        return "qwen"
+    if lowered == "lumina2" and "qwen" in basename:
+        return "qwen"
+    return None
+
+
+def _resolve_external_text_encoder_path(path: str, mode: str) -> str:
+    """Resolve local encoder assets for the external text backends."""
+    candidate = Path(path).expanduser()
+    if candidate.exists():
+        if mode == "qwen" and candidate.is_file():
+            return str(candidate)
+        if mode == "flux2":
+            if candidate.is_dir() and (candidate / "text_encoder").is_dir():
+                return str(candidate / "text_encoder")
+            if candidate.is_dir():
+                return str(candidate)
+        elif mode == "qwen":
+            if candidate.is_dir():
+                return str(candidate)
+        else:
+            return str(candidate)
+
+    lowered = path.lower()
+    repo_id = None
+    if mode == "klein":
+        repo_id = "Qwen/Qwen3-8B" if "8b" in lowered or "9b" in lowered else "Qwen/Qwen3-4B"
+    elif mode == "zimage":
+        repo_id = "Qwen/Qwen3-4B"
+    elif mode == "qwen":
+        repo_id = "Qwen/Qwen2.5-VL-7B-Instruct"
+    elif mode == "flux2":
+        repo_id = "black-forest-labs/FLUX.2-dev"
+
+    if repo_id is None:
+        # Try local Qwen encoder directory before falling back to HF snapshot
+        local_qwen = _resolve_local_qwen_encoder_path(os.path.basename(path))
+        if local_qwen is not None:
+            return local_qwen
+        return path
+
+    snapshot = _resolve_hf_snapshot_path(repo_id)
+    if snapshot is None:
+        return path
+
+    snapshot_path = Path(snapshot)
+    if mode == "flux2":
+        text_dir = snapshot_path / "text_encoder"
+        if text_dir.is_dir():
+            return str(text_dir)
+    return str(snapshot_path)
+
+
+def _load_external_clip(path: str, mode: str, arch, dtype: torch.dtype, device: str) -> CLIPWrapper:
+    """Load a corrected local text encoder for modern model families."""
+    _ensure_serenity_inference_path()
+    resolved_path = _resolve_external_text_encoder_path(path, mode)
+
+    if mode == "klein":
+        from text.qwen3 import Qwen3Encoder
+
+        encoder = Qwen3Encoder(mode="klein", dtype=dtype, device=device)
+    elif mode == "zimage":
+        from text.qwen3 import Qwen3Encoder
+
+        encoder = Qwen3Encoder(mode="zimage", dtype=dtype, device=device)
+    elif mode == "qwen":
+        from text.qwen25vl import Qwen25VLEncoder
+
+        encoder = Qwen25VLEncoder(dtype=torch.bfloat16, device=device)
+    elif mode == "flux2":
+        from text.mistral import MistralEncoder
+
+        encoder = MistralEncoder(dtype=dtype, device=device)
+    else:
+        raise ValueError(f"Unsupported external text mode: {mode}")
+
+    logger.info("Loading external %s text encoder from %s", mode, resolved_path)
+    encoder.load(resolved_path)
+    return CLIPWrapper(_ExternalTextManager(encoder, mode), arch, dtype, device)
+
+
+def _resolve_local_qwen_encoder_path(filename: str) -> str | None:
+    """Return a local clip path for the named Qwen encoder when available."""
+    try:
+        from serenityflow.bridge.model_paths import get_model_paths
+    except ImportError:
+        return None
+
+    try:
+        return get_model_paths().find(filename, "clip")
+    except Exception:
+        return None
+
+
+def _resolve_single_clip_architecture(path: str, clip_type: str, model_architecture) -> Any:
+    """Map CLIP loader type strings to Serenity architectures.
+
+    The workflow surface uses broader labels like `flux`, `wan`, and
+    `lumina2`; resolve them here so shipped workflows hit the right encoder
+    stack.
+    """
+    lowered = (clip_type or "").lower()
+    basename = os.path.basename(path).lower()
+    arch_map = {
+        "stable_diffusion": model_architecture.SD15,
+        "sdxl": model_architecture.SDXL,
+        "sd3": model_architecture.SD3,
+        "flux": model_architecture.FLUX_DEV,
+        "flux2": model_architecture.FLUX_DEV,
+        "klein": model_architecture.FLUX_2_KLEIN_4B,
+        "wan": model_architecture.WAN,
+        "qwen": model_architecture.QWEN,
+        "zimage": model_architecture.ZIMAGE,
+        "lumina": model_architecture.LUMINA,
+    }
+    if lowered == "stable_diffusion":
+        if "qwen" in basename:
+            return model_architecture.QWEN
+        if "zimage" in basename or "z_image" in basename:
+            return model_architecture.ZIMAGE
+    if lowered == "lumina2":
+        if "qwen" in basename:
+            return model_architecture.QWEN
+        if "zimage" in basename:
+            return model_architecture.ZIMAGE
+        return model_architecture.LUMINA
+    return arch_map.get(lowered, model_architecture.SD15)
+
+
+def _resolve_text_encoder_dir(path: str) -> str | None:
+    """Return a directory suitable for HF/transformers loading if one exists."""
+    if os.path.isdir(path):
+        return path
+    stem = os.path.splitext(path)[0]
+    if os.path.isdir(stem):
+        return stem
+    return None
+
+
+def _load_qwen_transformer(path: str, dtype: torch.dtype, model_config) -> nn.Module:
+    """Load a Qwen transformer from a single safetensors file.
+
+    Serenity's low-level inference loader still marks Qwen as unsupported.
+    Use the native model helper when a local Qwen-Image snapshot is present.
+    """
+    try:
+        from diffusers import QwenImageTransformer2DModel
+        from serenity.models.qwen import _find_qwen_cache_snapshot
+    except ImportError as exc:
+        raise RuntimeError(
+            "Qwen loading requires diffusers and Serenity's native qwen helpers."
+        ) from exc
+
+    cache_snapshot = _find_qwen_cache_snapshot()
+    if cache_snapshot is None:
+        raise RuntimeError(
+            f"Cannot load Qwen model from {path}: no local Qwen-Image pipeline snapshot found."
+        )
+
+    model = QwenImageTransformer2DModel.from_single_file(
+        path,
+        config=str(cache_snapshot),
+        subfolder="transformer",
+        torch_dtype=dtype,
+    )
+    model.eval()
+    model._serenity_prediction_type = "flow"
+    model._serenity_arch = model_config.architecture
+    model._serenity_model_config = model_config
+    model._serenity_edit_mode = "edit" in os.path.basename(path).lower()
+    return model
 
 
 def _match_encoder_file(enc_type, files: list[str]) -> str | None:
@@ -821,6 +1437,9 @@ def encode_text(clip: CLIPWrapper, text: str) -> list[dict]:
 
     cond = result.get("cond")
     pooled = result.get("pooled")
+    if pooled is None:
+        pooled = result.get("pooled_output")
+    attention_mask = result.get("attention_mask")
 
     entry = {}
     if cond is not None:
@@ -830,6 +1449,39 @@ def encode_text(clip: CLIPWrapper, text: str) -> list[dict]:
 
     if pooled is not None:
         entry["pooled_output"] = pooled
+    if attention_mask is not None:
+        entry["attention_mask"] = attention_mask
+
+    # Qwen/Gemma-based image models need the prompt attention mask to recover
+    # effective text sequence lengths during sampling.
+    try:
+        if "attention_mask" in entry:
+            raise StopIteration
+        from serenity.inference.text.encoders import TextEncoderType
+
+        encoder_type = None
+        if getattr(clip, "_arch", None) == clip._arch.__class__.QWEN:
+            encoder_type = TextEncoderType.QWEN
+        elif getattr(clip, "_arch", None) in (clip._arch.__class__.LUMINA, clip._arch.__class__.ZIMAGE):
+            encoder_type = TextEncoderType.GEMMA
+
+        if encoder_type is not None:
+            encoder = clip._manager.get_encoder(encoder_type)
+            tokenizer = getattr(encoder, "_tokenizer", None)
+            if tokenizer is not None:
+                tokens = tokenizer(
+                    text,
+                    max_length=256,
+                    padding="max_length",
+                    truncation=True,
+                    return_tensors="pt",
+                )
+                if "attention_mask" in tokens:
+                    entry["attention_mask"] = tokens["attention_mask"]
+    except StopIteration:
+        pass
+    except Exception:
+        logger.debug("Prompt attention mask inference skipped", exc_info=True)
 
     # Extra conditioning (FLUX clip_cond, etc.)
     for key in ("clip_cond", "neg_pooled"):
@@ -855,6 +1507,555 @@ def _extract_model_output(raw_out):
     return raw_out
 
 
+def _is_qwen_transformer(model: nn.Module) -> bool:
+    """Best-effort detection for diffusers' Qwen image transformer."""
+    return "qwen" in model.__class__.__name__.lower()
+
+
+def _is_zimage_transformer(model: nn.Module) -> bool:
+    """Best-effort detection for diffusers' Z-Image transformer."""
+    class_name = model.__class__.__name__.lower()
+    if "zimage" in class_name or "z_image" in class_name:
+        return True
+    arch = getattr(model, "_serenity_arch", None)
+    return arch is not None and "zimage" in str(arch).lower()
+
+
+def _pack_flux_latents(latents: torch.Tensor) -> torch.Tensor:
+    """Pack FLUX-style BCHW latents to sequence tokens."""
+    batch, channels, height, width = latents.shape
+    packed = latents.view(batch, channels, height // 2, 2, width // 2, 2)
+    packed = packed.permute(0, 2, 4, 1, 3, 5)
+    return packed.reshape(batch, (height // 2) * (width // 2), channels * 4)
+
+
+def _unpack_flux_latents(latents: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    """Unpack FLUX-style sequence tokens to BCHW latents."""
+    batch, _seq, channels = latents.shape
+    latent_channels = channels // 4
+    result = latents.view(batch, height // 2, width // 2, latent_channels, 2, 2)
+    result = result.permute(0, 3, 1, 4, 2, 5)
+    return result.reshape(batch, latent_channels, height, width)
+
+
+def _patchify_flux2_latents(latents: torch.Tensor) -> torch.Tensor:
+    """Patchify FLUX.2 latents from 32 channels to 128 channels."""
+    batch, channels, height, width = latents.shape
+    if channels == 128:
+        return latents
+    if channels != 32:
+        raise ValueError(f"FLUX.2 latents must have 32 or 128 channels, got {channels}")
+    patched = latents.view(batch, channels, height // 2, 2, width // 2, 2)
+    patched = patched.permute(0, 1, 3, 5, 2, 4)
+    return patched.reshape(batch, channels * 4, height // 2, width // 2)
+
+
+def _unpatchify_flux2_latents(latents: torch.Tensor) -> torch.Tensor:
+    """Reverse FLUX.2 patchification back to 32-channel VAE latents."""
+    batch, channels, height, width = latents.shape
+    if channels == 32:
+        return latents
+    if channels != 128:
+        raise ValueError(f"FLUX.2 patchified latents must have 32 or 128 channels, got {channels}")
+    unpacked = latents.view(batch, 32, 2, 2, height, width)
+    unpacked = unpacked.permute(0, 1, 4, 2, 5, 3)
+    return unpacked.reshape(batch, 32, height * 2, width * 2)
+
+
+def _pack_flux2_latents(latents: torch.Tensor) -> torch.Tensor:
+    """Flatten patchified FLUX.2 spatial latents to a token sequence."""
+    batch, channels, height, width = latents.shape
+    return latents.permute(0, 2, 3, 1).reshape(batch, height * width, channels)
+
+
+def _unpack_flux2_latents(latents: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    """Restore FLUX.2 patchified spatial layout from a token sequence."""
+    batch, _seq, channels = latents.shape
+    return latents.view(batch, height, width, channels).permute(0, 3, 1, 2)
+
+
+def _prepare_flux_image_ids(height: int, width: int, device, dtype, t_offset: float = 0.0) -> torch.Tensor:
+    """Create FLUX RoPE image ids for a packed latent grid."""
+    latent_image_ids = torch.zeros(height, width, 3)
+    latent_image_ids[..., 0] = t_offset
+    latent_image_ids[..., 1] = torch.arange(height)[:, None]
+    latent_image_ids[..., 2] = torch.arange(width)[None, :]
+    return latent_image_ids.reshape(height * width, 3).to(device=device, dtype=dtype)
+
+
+def _prepare_flux2_image_ids(height: int, width: int, device, dtype, t_offset: float = 0.0) -> torch.Tensor:
+    """Create FLUX.2 / Klein RoPE ids for a patchified latent grid."""
+    h_pos = torch.arange(height, device=device, dtype=dtype)
+    w_pos = torch.arange(width, device=device, dtype=dtype)
+    h_grid, w_grid = torch.meshgrid(h_pos, w_pos, indexing="ij")
+    t_coord = torch.full_like(h_grid, t_offset)
+    l_coord = torch.zeros_like(h_grid)
+    return torch.stack([t_coord, h_grid, w_grid, l_coord], dim=-1).reshape(height * width, 4)
+
+
+def _prepare_flux2_text_ids(text_seq_len: int, device, dtype) -> torch.Tensor:
+    """Create FLUX.2 text ids following ComfyUI's txt_ids_dims=[3] convention."""
+    txt_ids = torch.zeros((text_seq_len, 4), device=device, dtype=dtype)
+    if text_seq_len > 0:
+        txt_ids[:, 3] = torch.linspace(
+            0,
+            text_seq_len - 1,
+            steps=text_seq_len,
+            device=device,
+            dtype=dtype,
+        )
+    return txt_ids
+
+
+def _pack_qwen_latents(latents: torch.Tensor) -> torch.Tensor:
+    """Pack Qwen latents `[B,C,1,H,W]` to sequence tokens."""
+    batch, channels, frames, height, width = latents.shape
+    if frames != 1:
+        raise ValueError(f"Qwen latents must have exactly one frame, got {frames}")
+    packed = latents.view(batch, channels, height // 2, 2, width // 2, 2)
+    packed = packed.permute(0, 2, 4, 1, 3, 5)
+    return packed.reshape(batch, (height // 2) * (width // 2), channels * 4)
+
+
+def _unpack_qwen_latents(latents: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    """Unpack Qwen sequence tokens to `[B,C,1,H,W]` latents."""
+    batch, _seq, channels = latents.shape
+    result = latents.view(batch, height // 2, width // 2, channels // 4, 2, 2)
+    result = result.permute(0, 3, 1, 4, 2, 5)
+    return result.reshape(batch, channels // 4, 1, height, width)
+
+
+def _run_sampling(
+    model: nn.Module,
+    latent: torch.Tensor,
+    positive: list[dict],
+    negative: list[dict],
+    cfg: float,
+    sampler_name: str,
+    sigmas: torch.Tensor,
+    *,
+    seed: int = 0,
+    add_noise: bool = True,
+    noise: torch.Tensor | None = None,
+    denoise: float = 1.0,
+) -> torch.Tensor:
+    """Shared sampler implementation for KSampler and custom sampler nodes."""
+    s = _get()
+    device = latent.device if latent.is_cuda else (
+        torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    )
+
+    cond_entry = positive[0] if positive else {}
+    uncond_entry = negative[0] if negative else {}
+
+    cond_tensor = cond_entry.get("cross_attn")
+    uncond_tensor = uncond_entry.get("cross_attn")
+    pooled_cond = cond_entry.get("pooled_output")
+    pooled_uncond = uncond_entry.get("pooled_output")
+    cond_mask = cond_entry.get("attention_mask")
+    uncond_mask = uncond_entry.get("attention_mask")
+    reference_latent = cond_entry.get("reference_latent")
+    if reference_latent is None:
+        reference_latent = uncond_entry.get("reference_latent")
+
+    if cond_tensor is not None:
+        cond_tensor = cond_tensor.to(device)
+    if uncond_tensor is not None:
+        uncond_tensor = uncond_tensor.to(device)
+    if pooled_cond is not None:
+        pooled_cond = pooled_cond.to(device)
+    if pooled_uncond is not None:
+        pooled_uncond = pooled_uncond.to(device)
+    if cond_mask is not None:
+        cond_mask = cond_mask.to(device)
+    if uncond_mask is not None:
+        uncond_mask = uncond_mask.to(device)
+
+    logger.info(
+        "Conditioning shapes: cond=%s, uncond=%s, pooled_cond=%s, pooled_uncond=%s",
+        cond_tensor.shape if cond_tensor is not None else None,
+        uncond_tensor.shape if uncond_tensor is not None else None,
+        pooled_cond.shape if pooled_cond is not None else None,
+        pooled_uncond.shape if pooled_uncond is not None else None,
+    )
+
+    prediction_type = "eps"
+    prediction_kwargs = {}
+    if hasattr(model, "_serenity_prediction_type"):
+        prediction_type = model._serenity_prediction_type
+    elif _is_qwen_transformer(model) or _is_zimage_transformer(model):
+        prediction_type = "flow"
+    if hasattr(model, "_serenity_model_config"):
+        from serenity.inference.models.loader import _get_adapter
+        try:
+            adapter = _get_adapter(model._serenity_model_config)
+        except Exception:
+            adapter = None
+        if adapter:
+            prediction_kwargs = adapter.get_prediction_kwargs()
+
+    is_qwen = _is_qwen_transformer(model)
+    is_zimage = _is_zimage_transformer(model)
+    is_flux = not is_qwen and not is_zimage and hasattr(model, "config") and hasattr(model.config, "joint_attention_dim")
+    is_flux2 = bool(getattr(model, "_serenity_flux2", False))
+    is_flux1 = is_flux and not is_flux2
+
+    base_latent = latent.float()
+    qwen_input_was_4d = False
+    if is_qwen and base_latent.ndim == 4:
+        qwen_input_was_4d = True
+        base_latent = base_latent.unsqueeze(2)
+
+    if prediction_type == "flow_flux" and base_latent.ndim == 4:
+        if is_flux2:
+            patched = _patchify_flux2_latents(base_latent)
+            actual_seq_len = patched.shape[-2] * patched.shape[-1]
+            lat_h, lat_w = patched.shape[-2:]
+        else:
+            _, _, lat_h, lat_w = base_latent.shape
+            actual_seq_len = (lat_h // 2) * (lat_w // 2)
+        prediction_kwargs = dict(prediction_kwargs)
+        prediction_kwargs["seq_len"] = actual_seq_len
+        logger.info("Flux seq_len=%d (from %dx%d latent)", actual_seq_len, lat_h, lat_w)
+
+    prediction = s["get_prediction"](prediction_type, **prediction_kwargs)
+    logger.info(
+        "Sample: prediction=%s, is_flux=%s, is_qwen=%s, is_zimage=%s, latent=%s, cfg=%.1f",
+        prediction_type,
+        is_flux,
+        is_qwen,
+        is_zimage,
+        tuple(base_latent.shape),
+        cfg,
+    )
+
+    sigmas = sigmas.to(device)
+    if prediction_type == "flow_flux" and hasattr(prediction, "apply_sigma_shift"):
+        sigma_body = prediction.apply_sigma_shift(sigmas[:-1])
+        sigmas = torch.cat([sigma_body, sigmas[-1:]])
+
+    if noise is None:
+        noise = s["create_noise"](
+            seed=seed,
+            shape=base_latent.shape,
+            device="cpu",
+            dtype=torch.float32,
+        )
+    if is_qwen and noise.ndim == 4:
+        noise = noise.unsqueeze(2)
+
+    if add_noise:
+        if prediction_type in ("flow", "flow_flux"):
+            noisy_latent = prediction.noise_scaling(
+                sigmas[0].cpu(),
+                noise,
+                base_latent.cpu(),
+                max_denoise=(denoise >= 1.0),
+            ).to(device)
+        else:
+            noisy_latent = (noise * sigmas[0].cpu()).to(device)
+    else:
+        noisy_latent = base_latent.to(device).float()
+
+    try:
+        model_dtype = next(model.parameters()).dtype
+    except StopIteration:
+        model_dtype = torch.float32
+
+    log_sigmas = None
+    if not is_flux and not is_qwen and not is_zimage:
+        betas = torch.linspace(0.00085 ** 0.5, 0.012 ** 0.5, 1000) ** 2
+        alphas = 1.0 - betas
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+        log_sigmas = ((1 - alphas_cumprod) / alphas_cumprod).sqrt().log().to(device)
+
+    flux_h = flux_w = None
+    flux_patch_h = flux_patch_w = None
+    flux_img_ids = flux_txt_ids = None
+    flux_condition_tokens = None
+    if is_flux:
+        flux_h = int(base_latent.shape[-2])
+        flux_w = int(base_latent.shape[-1])
+        txt_len = cond_tensor.shape[1] if cond_tensor is not None else 512
+        if is_flux2:
+            patched_latent = _patchify_flux2_latents(noisy_latent)
+            flux_patch_h = int(patched_latent.shape[-2])
+            flux_patch_w = int(patched_latent.shape[-1])
+            noisy_latent = _pack_flux2_latents(patched_latent)
+            flux_img_ids = _prepare_flux2_image_ids(flux_patch_h, flux_patch_w, device, model_dtype)
+            flux_txt_ids = _prepare_flux2_text_ids(txt_len, device, model_dtype)
+        else:
+            noisy_latent = _pack_flux_latents(noisy_latent)
+            flux_patch_h = flux_h // 2
+            flux_patch_w = flux_w // 2
+            flux_img_ids = _prepare_flux_image_ids(flux_patch_h, flux_patch_w, device, model_dtype)
+            flux_txt_ids = torch.zeros(txt_len, 3, device=device, dtype=model_dtype)
+
+        if isinstance(reference_latent, torch.Tensor):
+            ref_latent = reference_latent.float()
+            if ref_latent.ndim == 5 and ref_latent.shape[2] == 1:
+                ref_latent = ref_latent.squeeze(2)
+            if ref_latent.ndim == 4 and ref_latent.shape[-2:] == (flux_h, flux_w):
+                if is_flux2:
+                    ref_latent = _patchify_flux2_latents(ref_latent)
+                    ref_patch_h = int(ref_latent.shape[-2])
+                    ref_patch_w = int(ref_latent.shape[-1])
+                    flux_condition_tokens = _pack_flux2_latents(ref_latent.to(device))
+                    ref_img_ids = _prepare_flux2_image_ids(
+                        ref_patch_h,
+                        ref_patch_w,
+                        device,
+                        model_dtype,
+                        t_offset=10.0,
+                    )
+                else:
+                    flux_condition_tokens = _pack_flux_latents(ref_latent.to(device))
+                    ref_img_ids = _prepare_flux_image_ids(
+                        flux_patch_h,
+                        flux_patch_w,
+                        device,
+                        model_dtype,
+                        t_offset=10.0,
+                    )
+                flux_img_ids = torch.cat([flux_img_ids, ref_img_ids], dim=0)
+
+    qwen_h = qwen_w = None
+    qwen_img_shapes = None
+    qwen_condition_tokens = None
+    if is_qwen:
+        qwen_h = int(base_latent.shape[-2])
+        qwen_w = int(base_latent.shape[-1])
+        noisy_latent = _pack_qwen_latents(noisy_latent)
+        qwen_img_shapes = [[(1, qwen_h // 2, qwen_w // 2)] for _ in range(noisy_latent.shape[0])]
+        if cond_entry.get("edit_image") is not None or getattr(model, "_serenity_edit_mode", False):
+            qwen_condition_tokens = _pack_qwen_latents(base_latent.to(device))
+            qwen_img_shapes = [
+                [(1, qwen_h // 2, qwen_w // 2), (1, qwen_h // 2, qwen_w // 2)]
+                for _ in range(noisy_latent.shape[0])
+            ]
+
+    sdxl_time_ids = None
+    if not is_flux and not is_qwen and not is_zimage and base_latent.ndim == 4:
+        _, _, lh, lw = base_latent.shape
+        target_h, target_w = lh * 8, lw * 8
+        sdxl_time_ids = torch.tensor(
+            [[target_h, target_w, 0, 0, target_h, target_w]],
+            device=device,
+            dtype=model_dtype,
+        )
+
+    def sigma_to_discrete_timestep(sigma):
+        """Convert continuous sigma to discrete diffusers timestep (0-999)."""
+        log_sigma = sigma.log()
+        dists = log_sigma - log_sigmas
+        low_idx = dists.ge(0).cumsum(dim=0).argmax().clamp(max=log_sigmas.shape[0] - 2)
+        high_idx = low_idx + 1
+        low = log_sigmas[low_idx]
+        high = log_sigmas[high_idx]
+        w = (low - log_sigma) / (low - high)
+        w = w.clamp(0, 1)
+        t = (1 - w) * low_idx + w * high_idx
+        return t.view(sigma.shape)
+
+    def build_model_kwargs(enc_hidden, pooled, enc_mask):
+        """Build model kwargs for this model family."""
+        kwargs: dict[str, Any] = {}
+        if enc_hidden is not None:
+            if is_zimage:
+                cap_feats: list[torch.Tensor] = []
+                hidden = enc_hidden.to(dtype=model_dtype, device=device)
+                mask = enc_mask.to(device) if enc_mask is not None else None
+                for batch_idx in range(hidden.shape[0]):
+                    tokens = hidden[batch_idx]
+                    if mask is not None and batch_idx < mask.shape[0] and mask[batch_idx].shape[0] == tokens.shape[0]:
+                        active = mask[batch_idx].bool()
+                        if torch.any(active):
+                            tokens = tokens[active]
+                    cap_feats.append(tokens)
+                kwargs["cap_feats"] = cap_feats
+            else:
+                kwargs["encoder_hidden_states"] = enc_hidden.to(dtype=model_dtype, device=device)
+        if is_flux:
+            if pooled is not None:
+                kwargs["pooled_projections"] = pooled.to(dtype=model_dtype, device=device)
+            else:
+                kwargs["pooled_projections"] = torch.zeros(1, 768, device=device, dtype=model_dtype)
+            flux_guidance = float(cond_entry.get("guidance", 3.5))
+            if hasattr(model, "config") and getattr(model.config, "guidance_embeds", True) is False:
+                flux_guidance = 0.0
+            kwargs["guidance"] = torch.tensor([flux_guidance], device=device, dtype=model_dtype)
+            kwargs["img_ids"] = flux_img_ids
+            kwargs["txt_ids"] = flux_txt_ids
+        elif is_qwen:
+            if enc_hidden is not None:
+                qwen_hidden = enc_hidden.to(dtype=model_dtype, device=device)
+            else:
+                qwen_hidden = None
+            if enc_mask is not None:
+                lengths = enc_mask.sum(dim=1).to(dtype=torch.int64).tolist()
+                max_len = max(max(lengths), 1)
+                if qwen_hidden is not None:
+                    packed_hidden = qwen_hidden.new_zeros((qwen_hidden.shape[0], max_len, qwen_hidden.shape[-1]))
+                    packed_mask = enc_mask.new_zeros((enc_mask.shape[0], max_len))
+                    for batch_idx, length in enumerate(lengths):
+                        active = enc_mask[batch_idx].bool()
+                        tokens = qwen_hidden[batch_idx][active]
+                        if tokens.shape[0] == 0:
+                            tokens = qwen_hidden[batch_idx, :1]
+                        token_count = int(tokens.shape[0])
+                        packed_hidden[batch_idx, :token_count] = tokens
+                        packed_mask[batch_idx, :token_count] = 1
+                        lengths[batch_idx] = token_count
+                    kwargs["encoder_hidden_states"] = packed_hidden
+                    kwargs["encoder_hidden_states_mask"] = packed_mask
+                else:
+                    kwargs["encoder_hidden_states_mask"] = enc_mask[:, :max_len]
+                kwargs["txt_seq_lens"] = lengths
+            else:
+                if qwen_hidden is not None:
+                    kwargs["encoder_hidden_states"] = qwen_hidden
+                seq_len = int(enc_hidden.shape[1]) if enc_hidden is not None else 0
+                kwargs["txt_seq_lens"] = [seq_len] * noisy_latent.shape[0]
+            kwargs["img_shapes"] = qwen_img_shapes
+            if bool(getattr(model.config, "guidance_embeds", False)):
+                kwargs["guidance"] = torch.full(
+                    (noisy_latent.shape[0],),
+                    max(cfg, 1.0),
+                    device=device,
+                    dtype=torch.float32,
+                )
+        elif pooled is not None:
+            pooled_t = pooled.to(dtype=model_dtype, device=device)
+            kwargs["added_cond_kwargs"] = {
+                "text_embeds": pooled_t,
+                "time_ids": sdxl_time_ids,
+            }
+        return kwargs
+
+    def _invoke_with_retry(fn, *args, **kwargs):
+        """Retry model calls after dropping unsupported keyword arguments."""
+        attempted: set[str] = set()
+        while True:
+            try:
+                return fn(*args, **kwargs)
+            except TypeError as exc:
+                msg = str(exc)
+                if "unexpected keyword argument" not in msg:
+                    raise
+                parts = msg.split("'")
+                bad_kwarg = parts[1] if len(parts) >= 2 else None
+                if bad_kwarg is None or bad_kwarg not in kwargs or bad_kwarg in attempted:
+                    raise
+                attempted.add(bad_kwarg)
+                logger.info(
+                    "Dropping unsupported model kwarg '%s' for %s",
+                    bad_kwarg,
+                    model.__class__.__name__,
+                )
+                kwargs = dict(kwargs)
+                kwargs.pop(bad_kwarg, None)
+
+    def call_model(inp, timestep, **kwargs):
+        """Call the underlying model with family-specific timestep handling."""
+        if is_flux:
+            return _invoke_with_retry(model, inp, timestep=timestep, **kwargs)
+        if is_qwen:
+            return _invoke_with_retry(model, inp, timestep=timestep / 1000.0, **kwargs)
+        if is_zimage:
+            if inp.ndim == 4:
+                inp = inp.unsqueeze(2)
+            latents = [sample.to(dtype=model_dtype, device=device) for sample in inp]
+            cap_feats = kwargs.pop("cap_feats", None)
+            if cap_feats is None:
+                cap_feats = [torch.zeros(1, 2560, device=device, dtype=model_dtype) for _ in latents]
+            z_timestep = 1.0 - (timestep.to(device=device, dtype=torch.float32).reshape(-1) / 1000.0)
+            if z_timestep.numel() == 1 and len(latents) != 1:
+                z_timestep = z_timestep.expand(len(latents))
+            return _invoke_with_retry(model, latents, z_timestep, cap_feats, return_dict=True)
+        discrete_t = sigma_to_discrete_timestep(timestep) if log_sigmas is not None else timestep
+        return _invoke_with_retry(model, inp, discrete_t, **kwargs)
+
+    def prepare_model_output(raw_out, dtype: torch.dtype, channels: int) -> torch.Tensor:
+        """Normalize family-specific model outputs to a BCHW/BCHWT tensor."""
+        out = _extract_model_output(raw_out)
+        if is_zimage:
+            out = torch.stack([item.to(device=device, dtype=dtype) for item in out], dim=0)
+            if out.ndim == 5 and out.shape[2] == 1:
+                out = out.squeeze(2)
+            out = -out
+        else:
+            out = out.to(device=device, dtype=dtype)
+        return out[:, :channels, ...]
+
+    use_cfg = (not is_flux1) and uncond_tensor is not None and cfg > 1.0
+
+    def denoise_fn(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+        model_input = prediction.calculate_input(sigma, x)
+        timestep = prediction.sigma_to_timestep(sigma)
+        inp = model_input.to(dtype=model_dtype)
+
+        if flux_condition_tokens is not None:
+            inp_for_model = torch.cat([inp, flux_condition_tokens.to(dtype=inp.dtype)], dim=1)
+        elif qwen_condition_tokens is not None:
+            inp_for_model = torch.cat([inp, qwen_condition_tokens.to(dtype=inp.dtype)], dim=1)
+        else:
+            inp_for_model = inp
+
+        cond_kwargs = build_model_kwargs(cond_tensor, pooled_cond, cond_mask)
+        with torch.no_grad():
+            raw_out = call_model(inp_for_model, timestep, **cond_kwargs)
+            cond_out = prepare_model_output(raw_out, x.dtype, x.shape[1])
+
+        if not use_cfg:
+            return prediction.calculate_denoised(sigma, cond_out, x)
+
+        cond_denoised = prediction.calculate_denoised(sigma, cond_out, x)
+        uncond_kwargs = build_model_kwargs(uncond_tensor, pooled_uncond, uncond_mask)
+        with torch.no_grad():
+            raw_out = call_model(inp_for_model, timestep, **uncond_kwargs)
+            uncond_out = prepare_model_output(raw_out, x.dtype, x.shape[1])
+        uncond_denoised = prediction.calculate_denoised(sigma, uncond_out, x)
+        return s["apply_cfg"](cond_denoised, uncond_denoised, cfg)
+
+    step_callback = _make_step_callback(preview_interval=3)
+    result = s["sample"](
+        model_fn=denoise_fn,
+        noise=noisy_latent,
+        sigmas=sigmas,
+        sampler_type=sampler_name,
+        callback=step_callback,
+    )
+
+    if is_flux and result.ndim == 3 and flux_h is not None and flux_w is not None:
+        if is_flux2 and flux_patch_h is not None and flux_patch_w is not None:
+            result = _unpack_flux2_latents(result, flux_patch_h, flux_patch_w)
+            bn_mean = getattr(model, "_serenity_flux2_bn_mean", None)
+            bn_var = getattr(model, "_serenity_flux2_bn_var", None)
+            bn_eps = float(getattr(model, "_serenity_flux2_bn_eps", 1e-4))
+            if isinstance(bn_mean, torch.Tensor) and isinstance(bn_var, torch.Tensor):
+                mean = bn_mean.view(1, -1, 1, 1).to(device=result.device, dtype=result.dtype)
+                std = torch.sqrt(
+                    bn_var.view(1, -1, 1, 1).to(device=result.device, dtype=result.dtype) + bn_eps
+                )
+                if mean.shape[1] == result.shape[1]:
+                    result = result * std + mean
+            result = _unpatchify_flux2_latents(result)
+        else:
+            result = _unpack_flux_latents(result, flux_h, flux_w)
+            result = result + 0.1159
+    elif is_zimage and result.ndim == 4:
+        result = result + 0.1159
+    elif is_qwen and result.ndim == 3 and qwen_h is not None and qwen_w is not None:
+        result = _unpack_qwen_latents(result, qwen_h, qwen_w)
+        if qwen_input_was_4d:
+            result = result.squeeze(2)
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return result.cpu()
+
+
 def sample(
     model: nn.Module,
     latent: torch.Tensor,
@@ -873,75 +2074,18 @@ def sample(
 ) -> torch.Tensor:
     """Run sampling. Returns denoised latent tensor."""
     s = _get()
-    device = latent.device if latent.is_cuda else (
-        torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    )
-
-    # Extract conditioning tensors
-    cond_tensor = positive[0].get("cross_attn") if positive else None
-    uncond_tensor = negative[0].get("cross_attn") if negative else None
-    pooled_cond = positive[0].get("pooled_output") if positive else None
-    pooled_uncond = negative[0].get("pooled_output") if negative else None
-
-    if cond_tensor is not None:
-        cond_tensor = cond_tensor.to(device)
-    if uncond_tensor is not None:
-        uncond_tensor = uncond_tensor.to(device)
-    if pooled_cond is not None:
-        pooled_cond = pooled_cond.to(device)
-    if pooled_uncond is not None:
-        pooled_uncond = pooled_uncond.to(device)
-
-    logger.info("Conditioning shapes: cond=%s, uncond=%s, pooled_cond=%s, pooled_uncond=%s",
-                 cond_tensor.shape if cond_tensor is not None else None,
-                 uncond_tensor.shape if uncond_tensor is not None else None,
-                 pooled_cond.shape if pooled_cond is not None else None,
-                 pooled_uncond.shape if pooled_uncond is not None else None)
-
-    # Determine prediction type from model
-    prediction_type = "eps"
-    prediction_kwargs = {}
-    if hasattr(model, "_serenity_prediction_type"):
-        prediction_type = model._serenity_prediction_type
-    if hasattr(model, "_serenity_model_config"):
-        from serenity.inference.models.loader import _get_adapter
-        adapter = _get_adapter(model._serenity_model_config)
-        if adapter:
-            prediction_kwargs = adapter.get_prediction_kwargs()
-
-    # For Flux, override seq_len based on actual latent dimensions
-    if prediction_type == "flow_flux" and latent.ndim == 4:
-        _, _, lat_h, lat_w = latent.shape
-        actual_seq_len = (lat_h // 2) * (lat_w // 2)  # packed patch count
-        prediction_kwargs = dict(prediction_kwargs)  # copy to avoid mutating
-        prediction_kwargs["seq_len"] = actual_seq_len
-        logger.info("Flux seq_len=%d (from %dx%d latent)", actual_seq_len, lat_h, lat_w)
-
-    prediction = s["get_prediction"](prediction_type, **prediction_kwargs)
-    _is_flux_model = hasattr(model, "config") and hasattr(model.config, "joint_attention_dim")
-    logger.info("Sample: prediction=%s, is_flux=%s, latent=%s, steps=%d, cfg=%.1f, scheduler=%s",
-                prediction_type, _is_flux_model, latent.shape, steps, cfg, scheduler)
-
-    # Determine sigma range
-    if prediction_type in ("flow", "flow_flux"):
+    prediction_type = getattr(model, "_serenity_prediction_type", None)
+    if prediction_type in ("flow", "flow_flux") or _is_qwen_transformer(model):
         sigma_min, sigma_max = 1e-4, 1.0
     else:
         sigma_min, sigma_max = 0.0292, 14.6146
 
-    # Compute sigmas
     sigmas = s["compute_sigmas"](
         scheduler=scheduler,
         num_steps=steps,
         sigma_min=sigma_min,
         sigma_max=sigma_max,
-    ).to(device)
-
-    # Flux: apply exponential time shift to sigmas
-    if prediction_type == "flow_flux" and hasattr(prediction, "apply_sigma_shift"):
-        # apply_sigma_shift expects sigmas without terminal 0
-        sigma_body = sigmas[:-1]
-        sigma_body = prediction.apply_sigma_shift(sigma_body)
-        sigmas = torch.cat([sigma_body, sigmas[-1:]])
+    )
 
     # Handle denoise < 1.0 (img2img): skip early sigmas
     if denoise < 1.0:
@@ -956,192 +2100,48 @@ def sample(
         s_end = end_step or total
         sigmas = sigmas[s_start:s_end + 1]
 
-    # Create noise on CPU then move — avoids VRAM pressure during allocation
-    noise = s["create_noise"](seed=seed, shape=latent.shape, device="cpu", dtype=torch.float32)
-
-    # Initialize noisy latent
-    if add_noise:
-        if prediction_type in ("flow", "flow_flux"):
-            # Flow matching: sigma * noise + (1 - sigma) * latent
-            # For full denoise (latent=zeros), this is just noise
-            noisy_latent = prediction.noise_scaling(
-                sigmas[0].cpu(), noise, latent, max_denoise=(denoise >= 1.0)
-            ).to(device)
-        else:
-            # Diffusion: noise * sigma_max
-            noisy_latent = (noise * sigmas[0].cpu()).to(device)
-    else:
-        noisy_latent = latent.to(device).float()
-
-    # Build denoise function — use diffusers-compatible wrapper
-    model_dtype = next(model.parameters()).dtype
-
-    # Detect if model is a Flux DiT (uses keyword-only args) vs UNet (positional timestep)
-    _is_flux = hasattr(model, "config") and hasattr(model.config, "joint_attention_dim")
-
-    # Build sigma→timestep lookup for diffusers UNet models (SD1.5, SDXL)
-    # These models expect discrete timesteps (0-999), not continuous sigmas.
-    _log_sigmas = None
-    if not _is_flux:
-        # Standard diffusion schedule: beta_start=0.00085, beta_end=0.012, 1000 steps
-        betas = torch.linspace(0.00085 ** 0.5, 0.012 ** 0.5, 1000) ** 2
-        alphas = 1.0 - betas
-        alphas_cumprod = torch.cumprod(alphas, dim=0)
-        _log_sigmas = ((1 - alphas_cumprod) / alphas_cumprod).sqrt().log().to(device)
-
-    # Flux latent packing: (B, C, H, W) → (B, H/2*W/2, C*4) and position IDs
-    _flux_img_ids = None
-    _flux_txt_ids = None
-    _flux_h = None
-    _flux_w = None
-    if _is_flux:
-        _flux_h = latent.shape[2] if latent.ndim == 4 else latent.shape[-2]
-        _flux_w = latent.shape[3] if latent.ndim == 4 else latent.shape[-1]
-        txt_len = cond_tensor.shape[1] if cond_tensor is not None else 512
-
-        # img_ids: (H/2 * W/2, 3) — packed patch coordinates
-        ph, pw = _flux_h // 2, _flux_w // 2
-        img_ids_list = []
-        for y in range(ph):
-            for x in range(pw):
-                img_ids_list.append([0, y, x])
-        _flux_img_ids = torch.tensor(img_ids_list, device=device, dtype=model_dtype)
-
-        # txt_ids: (txt_len, 3) — zeros for text positions
-        _flux_txt_ids = torch.zeros(txt_len, 3, device=device, dtype=model_dtype)
-
-    # SDXL time_ids: [orig_h, orig_w, crop_top, crop_left, target_h, target_w]
-    _sdxl_time_ids = None
-    if not _is_flux and latent.ndim == 4:
-        _, _, lh, lw = latent.shape
-        # VAE scale factor is 8 for SDXL
-        target_h, target_w = lh * 8, lw * 8
-        _sdxl_time_ids = torch.tensor(
-            [[target_h, target_w, 0, 0, target_h, target_w]],
-            device=device, dtype=model_dtype,
-        )
-
-    def _build_model_kwargs(enc_hidden, pooled):
-        """Build model forward kwargs for this model type."""
-        kwargs: dict[str, Any] = {}
-        if enc_hidden is not None:
-            kwargs["encoder_hidden_states"] = enc_hidden.to(dtype=model_dtype, device=device)
-        if _is_flux:
-            # Flux requires pooled_projections — provide zeros if missing
-            if pooled is not None:
-                kwargs["pooled_projections"] = pooled.to(dtype=model_dtype, device=device)
-            else:
-                kwargs["pooled_projections"] = torch.zeros(1, 768, device=device, dtype=model_dtype)
-            # Flux Dev guidance embedding (separate from CFG — CFG should be 1.0).
-            # Default 3.5 for Dev, 0.0 for Schnell.
-            _flux_guidance = 3.5
-            if hasattr(model, "config") and getattr(model.config, "guidance_embeds", True) is False:
-                _flux_guidance = 0.0
-            kwargs["guidance"] = torch.tensor([_flux_guidance], device=device, dtype=model_dtype)
-            # Position IDs for RoPE
-            kwargs["img_ids"] = _flux_img_ids
-            kwargs["txt_ids"] = _flux_txt_ids
-        elif pooled is not None:
-            # UNet2DConditionModel expects pooled in added_cond_kwargs, not as direct kwarg
-            pooled_t = pooled.to(dtype=model_dtype, device=device)
-            # SDXL needs text_embeds + time_ids in added_cond_kwargs
-            kwargs["added_cond_kwargs"] = {
-                "text_embeds": pooled_t,
-                "time_ids": _sdxl_time_ids,
-            }
-        return kwargs
-
-    def _sigma_to_discrete_timestep(sigma):
-        """Convert continuous sigma to discrete diffusers timestep (0-999)."""
-        log_sigma = sigma.log()
-        # Find closest index in the log_sigmas table
-        dists = log_sigma - _log_sigmas
-        low_idx = dists.ge(0).cumsum(dim=0).argmax().clamp(max=_log_sigmas.shape[0] - 2)
-        high_idx = low_idx + 1
-        low = _log_sigmas[low_idx]
-        high = _log_sigmas[high_idx]
-        # Interpolate between discrete timesteps
-        w = (low - log_sigma) / (low - high)
-        w = w.clamp(0, 1)
-        t = (1 - w) * low_idx + w * high_idx
-        return t.view(sigma.shape)
-
-    def _call_model(inp, timestep, **kwargs):
-        """Call model with the right arg convention."""
-        if _is_flux:
-            # FluxTransformer2DModel: forward(hidden_states, encoder_hidden_states, ..., timestep=, ...)
-            return model(inp, timestep=timestep, **kwargs)
-        else:
-            # UNet2DConditionModel: forward(sample, timestep, encoder_hidden_states=, ...)
-            # Convert continuous sigma to discrete timestep (0-999)
-            discrete_t = _sigma_to_discrete_timestep(timestep) if _log_sigmas is not None else timestep
-            return model(inp, discrete_t, **kwargs)
-
-    # Flux Dev: guidance is an embedding, NOT CFG. Never run uncond pass.
-    _use_cfg = not _is_flux and uncond_tensor is not None and cfg > 1.0
-
-    def denoise_fn(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
-        model_input = prediction.calculate_input(sigma, x)
-        timestep = prediction.sigma_to_timestep(sigma)
-        inp = model_input.to(dtype=model_dtype)
-
-        cond_kwargs = _build_model_kwargs(cond_tensor, pooled_cond)
-
-        with torch.no_grad():
-            raw_out = _call_model(inp, timestep, **cond_kwargs)
-            cond_out = _extract_model_output(raw_out).to(x.dtype)
-
-        if not _use_cfg:
-            return prediction.calculate_denoised(sigma, cond_out, x)
-
-        # CFG path: run uncond pass (non-Flux models only)
-        cond_denoised = prediction.calculate_denoised(sigma, cond_out, x)
-
-        uncond_kwargs = _build_model_kwargs(uncond_tensor, pooled_uncond)
-        with torch.no_grad():
-            raw_out = _call_model(inp, timestep, **uncond_kwargs)
-            uncond_out = _extract_model_output(raw_out).to(x.dtype)
-        uncond_denoised = prediction.calculate_denoised(sigma, uncond_out, x)
-
-        return s["apply_cfg"](cond_denoised, uncond_denoised, cfg)
-
-    # Pack latent for Flux (B, C, H, W) → (B, H/2*W/2, C*4)
-    if _is_flux and noisy_latent.ndim == 4:
-        B, C, H, W = noisy_latent.shape
-        noisy_latent = noisy_latent.view(B, C, H // 2, 2, W // 2, 2)
-        noisy_latent = noisy_latent.permute(0, 2, 4, 1, 3, 5)
-        noisy_latent = noisy_latent.reshape(B, (H // 2) * (W // 2), C * 4)
-
-    # Sample (with optional live preview callback)
-    step_callback = _make_step_callback(preview_interval=3)
-    result = s["sample"](
-        model_fn=denoise_fn,
-        noise=noisy_latent,
+    return _run_sampling(
+        model=model,
+        latent=latent,
+        positive=positive,
+        negative=negative,
+        cfg=cfg,
+        sampler_name=sampler_name,
         sigmas=sigmas,
-        sampler_type=sampler_name,
-        callback=step_callback,
+        seed=seed,
+        add_noise=add_noise,
+        denoise=denoise,
     )
 
-    # Unpack Flux result (B, seq, C*4) → (B, C, H, W)
-    if _is_flux and result.ndim == 3 and _flux_h is not None:
-        B, seq, channels = result.shape
-        C = channels // 4
-        H, W = _flux_h, _flux_w
-        result = result.view(B, H // 2, W // 2, C, 2, 2)
-        result = result.permute(0, 3, 1, 4, 2, 5)
-        result = result.reshape(B, C, H, W)
 
-    # Flux: apply shift factor (VAE decoder only divides by scale, doesn't add shift)
-    if _is_flux:
-        FLUX1_SHIFT_FACTOR = 0.1159
-        result = result + FLUX1_SHIFT_FACTOR
-
-    # Free GPU for VAE decode. Don't model.to("cpu") — that breaks
-    # block offload hooks on subsequent runs. Just clear the cache.
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    return result.cpu()
+def sample_custom(
+    model: nn.Module,
+    latent: torch.Tensor,
+    positive: list[dict],
+    negative: list[dict],
+    cfg: float,
+    sampler_name: str,
+    sigmas: torch.Tensor,
+    *,
+    seed: int = 0,
+    add_noise: bool = True,
+    noise: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Run sampling with an explicit sigma schedule and optional custom noise."""
+    if not isinstance(sigmas, torch.Tensor):
+        sigmas = torch.tensor(sigmas, dtype=torch.float32)
+    return _run_sampling(
+        model=model,
+        latent=latent,
+        positive=positive,
+        negative=negative,
+        cfg=cfg,
+        sampler_name=sampler_name,
+        sigmas=sigmas,
+        seed=seed,
+        add_noise=add_noise,
+        noise=noise,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1286,15 +2286,47 @@ class LTXVModelWrapper:
     Uses ltx_pipelines ModelLedger directly (same path as LTX2-Desktop app).
     No diffusers — loads ComfyUI-format single-file safetensors via ltx_core.
     """
-    __slots__ = ("model_ledger", "device", "dtype", "_arch", "checkpoint_path")
+    __slots__ = (
+        "model_ledger",
+        "device",
+        "dtype",
+        "_arch",
+        "checkpoint_path",
+        "gemma_root_path",
+        "spatial_upsampler_path",
+        "distilled_lora_path",
+        "lora_paths",
+        "lora_strengths",
+        "quantization",
+        "backend",
+    )
 
-    def __init__(self, model_ledger: Any, device: torch.device, dtype: torch.dtype,
-                 checkpoint_path: str = ""):
+    def __init__(
+        self,
+        model_ledger: Any,
+        device: torch.device,
+        dtype: torch.dtype,
+        checkpoint_path: str = "",
+        gemma_root_path: str = "",
+        spatial_upsampler_path: str | None = None,
+        distilled_lora_path: str | None = None,
+        lora_paths: tuple[str, ...] = (),
+        lora_strengths: tuple[float, ...] = (),
+        quantization: str = "auto",
+        backend: str = "auto",
+    ):
         self.model_ledger = model_ledger
         self.device = device
         self.dtype = dtype
         self._arch = "ltxv"
         self.checkpoint_path = checkpoint_path
+        self.gemma_root_path = gemma_root_path
+        self.spatial_upsampler_path = spatial_upsampler_path
+        self.distilled_lora_path = distilled_lora_path
+        self.lora_paths = lora_paths
+        self.lora_strengths = lora_strengths
+        self.quantization = quantization
+        self.backend = backend
 
     def vae_decode(self, latent: torch.Tensor) -> torch.Tensor:
         """Decode 5D video latent [B,C,T,H,W] to pixel frames."""
@@ -1312,10 +2344,829 @@ class LTXVModelWrapper:
         return decoded.cpu()
 
 
+def _ltx_checkpoint_looks_23(checkpoint_path: str) -> bool:
+    name = Path(checkpoint_path).name.lower()
+    return "2.3" in name or "22b" in name
+
+
+def _ltx_gemma_rope_profiles(config: Any) -> tuple[int, dict[str, Any], int]:
+    """Normalize Gemma 3 rope settings across older and newer transformers configs."""
+    rope_config = getattr(config, "rope_parameters", None)
+    if not isinstance(rope_config, dict) or not rope_config:
+        rope_config = getattr(config, "rope_scaling", None)
+
+    local_cfg: dict[str, Any] | None = None
+    full_cfg: dict[str, Any] | None = None
+    if isinstance(rope_config, dict):
+        if "rope_type" in rope_config:
+            local_cfg = rope_config
+            full_cfg = rope_config
+        else:
+            maybe_local = rope_config.get("sliding_attention")
+            if isinstance(maybe_local, dict):
+                local_cfg = maybe_local
+            maybe_full = rope_config.get("full_attention")
+            if isinstance(maybe_full, dict):
+                full_cfg = maybe_full
+            if full_cfg is None:
+                for value in rope_config.values():
+                    if isinstance(value, dict) and "rope_type" in value:
+                        full_cfg = value
+                        break
+
+    local_base = int(
+        (local_cfg or {}).get("rope_theta")
+        or getattr(config, "rope_local_base_freq", 0)
+        or getattr(config, "rope_theta", 0)
+        or 10000
+    )
+    normalized_full = dict(full_cfg or {})
+    if "rope_type" not in normalized_full:
+        normalized_full["rope_type"] = "default"
+    full_theta = int(normalized_full.get("rope_theta") or getattr(config, "rope_theta", 0) or local_base)
+    normalized_full.setdefault("rope_theta", full_theta)
+    return local_base, normalized_full, full_theta
+
+
+def _ltx_gemma_rope_parameters(config: Any) -> dict[str, dict[str, Any]]:
+    """Return Gemma rope parameters in the modern per-layer format."""
+    rope_parameters = getattr(config, "rope_parameters", None)
+    if isinstance(rope_parameters, dict) and rope_parameters:
+        normalized = {
+            key: dict(value) for key, value in rope_parameters.items() if isinstance(value, dict)
+        }
+    else:
+        normalized = {}
+
+    local_base, full_cfg, _ = _ltx_gemma_rope_profiles(config)
+    normalized.setdefault("sliding_attention", {"rope_type": "default", "rope_theta": local_base})
+    normalized.setdefault("full_attention", dict(full_cfg))
+    return normalized
+
+
+def _ltx_call_rope_init(fn, config: Any, layer_type: str | None = None) -> tuple[torch.Tensor, float]:
+    """Call rope init helpers across transformers API variants."""
+    try:
+        return fn(config, device="cpu", layer_type=layer_type)
+    except TypeError:
+        try:
+            return fn(config, "cpu", layer_type=layer_type)
+        except TypeError:
+            return fn(config)
+
+
+def _patch_ltx_gemma_transformers_compat() -> None:
+    """Adapt LTX Gemma setup to modern transformers Gemma3 rope config layout."""
+    global _LTX_GEMMA_TRANSFORMERS_COMPAT_PATCHED
+    if _LTX_GEMMA_TRANSFORMERS_COMPAT_PATCHED:
+        return
+
+    try:
+        import ltx_core.text_encoders.gemma as gemma_mod
+        from ltx_core.loader.module_ops import ModuleOps
+        from ltx_core.text_encoders.gemma.encoders import base_encoder as base_encoder_mod
+        from ltx_core.text_encoders.gemma.encoders import encoder_configurator as cfg_mod
+    except Exception:
+        return
+
+    original_op = cfg_mod.GEMMA_MODEL_OPS
+    original_precompute = base_encoder_mod.GemmaTextEncoder.precompute
+
+    def patched_create_and_populate(module):
+        model = module.model
+        v_model = model.model.vision_tower.vision_model
+        l_model = model.model.language_model
+
+        config = model.config.text_config
+        rope_parameters = _ltx_gemma_rope_parameters(config)
+        config.rope_parameters = rope_parameters
+
+        positions_length = len(v_model.embeddings.position_ids[0])
+        position_ids = torch.arange(positions_length, dtype=torch.long, device="cpu").unsqueeze(0)
+        v_model.embeddings.register_buffer("position_ids", position_ids)
+        embed_scale = torch.tensor(model.config.text_config.hidden_size**0.5, device="cpu")
+        l_model.embed_tokens.register_buffer("embed_scale", embed_scale)
+
+        rotary_emb_local = getattr(l_model, "rotary_emb_local", None)
+        if rotary_emb_local is not None:
+            dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+            local_base, full_rope_cfg, full_rope_theta = _ltx_gemma_rope_profiles(config)
+            local_rope_freqs = 1.0 / (
+                local_base ** (torch.arange(0, dim, 2, dtype=torch.int64).to(dtype=torch.float) / dim)
+            )
+
+            original_rope_scaling = getattr(config, "rope_scaling", None)
+            had_rope_theta = hasattr(config, "rope_theta")
+            original_rope_theta = getattr(config, "rope_theta", None)
+            try:
+                config.rope_scaling = full_rope_cfg
+                config.rope_theta = full_rope_theta
+                inv_freqs, _ = _ltx_call_rope_init(
+                    cfg_mod.ROPE_INIT_FUNCTIONS[full_rope_cfg["rope_type"]],
+                    config,
+                )
+            finally:
+                config.rope_scaling = original_rope_scaling
+                if had_rope_theta:
+                    config.rope_theta = original_rope_theta
+                else:
+                    try:
+                        delattr(config, "rope_theta")
+                    except Exception:
+                        pass
+
+            rotary_emb_local.register_buffer("inv_freq", local_rope_freqs)
+            l_model.rotary_emb.register_buffer("inv_freq", inv_freqs)
+            return module
+
+        sliding_cfg = rope_parameters["sliding_attention"]
+        full_cfg = rope_parameters["full_attention"]
+        sliding_fn = getattr(l_model.rotary_emb, "compute_default_rope_parameters")
+        full_fn = sliding_fn if full_cfg.get("rope_type") == "default" else cfg_mod.ROPE_INIT_FUNCTIONS[full_cfg["rope_type"]]
+        if sliding_cfg.get("rope_type") != "default":
+            sliding_fn = cfg_mod.ROPE_INIT_FUNCTIONS[sliding_cfg["rope_type"]]
+
+        sliding_inv_freq, _ = _ltx_call_rope_init(sliding_fn, config, layer_type="sliding_attention")
+        full_inv_freq, _ = _ltx_call_rope_init(full_fn, config, layer_type="full_attention")
+        l_model.rotary_emb.register_buffer("sliding_attention_inv_freq", sliding_inv_freq)
+        l_model.rotary_emb.register_buffer("sliding_attention_original_inv_freq", sliding_inv_freq.clone())
+        l_model.rotary_emb.register_buffer("full_attention_inv_freq", full_inv_freq)
+        l_model.rotary_emb.register_buffer("full_attention_original_inv_freq", full_inv_freq.clone())
+
+        return module
+
+    def patched_precompute(self, text: str, padding_side: str = "left"):
+        token_pairs = self.tokenizer.tokenize_with_weights(text)["gemma"]
+        input_ids = torch.tensor([[t[0] for t in token_pairs]], device=self.model.device)
+        attention_mask = torch.tensor([[w[1] for w in token_pairs]], device=self.model.device)
+
+        language_model = getattr(getattr(self.model, "model", None), "language_model", None)
+        if language_model is None:
+            return original_precompute(self, text, padding_side)
+
+        outputs = language_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+        video_feats, audio_feats = self.feature_extractor(outputs.hidden_states, attention_mask, padding_side)
+        return video_feats, audio_feats, attention_mask
+
+    patched_op = ModuleOps(
+        name=original_op.name,
+        matcher=original_op.matcher,
+        mutator=patched_create_and_populate,
+    )
+    cfg_mod.create_and_populate = patched_create_and_populate
+    cfg_mod.GEMMA_MODEL_OPS = patched_op
+    gemma_mod.GEMMA_MODEL_OPS = patched_op
+    base_encoder_mod.GemmaTextEncoder.precompute = patched_precompute
+
+    ledger_mod = sys.modules.get("ltx_pipelines.utils.model_ledger")
+    if ledger_mod is not None:
+        ledger_mod.GEMMA_MODEL_OPS = patched_op
+
+    _LTX_GEMMA_TRANSFORMERS_COMPAT_PATCHED = True
+    logger.info("Applied LTX Gemma transformers compatibility patch")
+
+
+def _default_ltxv_spatial_upsampler_candidates(checkpoint_path: str) -> tuple[str, ...]:
+    if _ltx_checkpoint_looks_23(checkpoint_path):
+        return (
+            "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+            "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+            "ltx-2-spatial-upscaler-x2-1.0.safetensors",
+        )
+    return ("ltx-2-spatial-upscaler-x2-1.0.safetensors",)
+
+
+def _default_ltxv_distilled_lora_candidates(checkpoint_path: str) -> tuple[str, ...]:
+    if _ltx_checkpoint_looks_23(checkpoint_path):
+        return (
+            "ltx-2.3-22b-distilled-lora-384.safetensors",
+            "ltx-2-19b-distilled-lora-384.safetensors",
+        )
+    return ("ltx-2-19b-distilled-lora-384.safetensors",)
+
+
+def _resolve_ltxv_asset(path: str | None, folder: str, *fallback_names: str) -> str | None:
+    requested = (path or "").strip()
+    search_names: list[str] = []
+    if requested:
+        search_names.append(requested)
+    for candidate in fallback_names:
+        if candidate and candidate not in search_names:
+            search_names.append(candidate)
+
+    try:
+        from serenityflow.bridge.model_paths import get_model_paths
+
+        paths = get_model_paths()
+        for name in search_names:
+            try:
+                return paths.find(name, folder)
+            except FileNotFoundError:
+                continue
+    except Exception:
+        pass
+
+    if requested:
+        candidate = Path(requested).expanduser()
+        if candidate.exists():
+            return str(candidate)
+        if "/" in requested:
+            return requested
+    return None
+
+
+def _resolve_ltxv_gemma_root(gemma_root_path: str | None) -> str:
+    requested = (gemma_root_path or "").strip()
+    fallback_names: list[str] = []
+    if requested and "gemma-3-12b-it" not in requested:
+        fallback_names.append(requested)
+    if not requested or "gemma-3-12b-it" in requested:
+        for candidate in (
+            "gemma-3-12b-it-standalone",
+            "gemma-3-12b-it-qat-q4_0-unquantized",
+            "gemma-3-12b-it",
+            "gemma-3-12b-it-GPTQ-4b",
+        ):
+            if candidate not in fallback_names:
+                fallback_names.append(candidate)
+    if requested and requested not in fallback_names:
+        fallback_names.append(requested)
+
+    try:
+        from serenityflow.bridge.model_paths import get_model_paths
+
+        paths = get_model_paths()
+        for candidate_name in fallback_names:
+            candidate_path = Path(candidate_name).expanduser()
+            if candidate_path.is_dir() and (candidate_path / "tokenizer.model").is_file():
+                return str(candidate_path)
+            for base_dir in paths.dirs.get("clip", []):
+                candidate_dir = Path(base_dir) / candidate_name
+                if candidate_dir.is_dir() and (candidate_dir / "tokenizer.model").is_file():
+                    return str(candidate_dir)
+    except Exception:
+        pass
+
+    resolved = _resolve_ltxv_asset(None, "clip", *fallback_names)
+    if resolved is None:
+        raise FileNotFoundError(
+            "Unable to resolve a Gemma root for LTX. Provide gemma_path or install "
+            "gemma-3-12b-it-GPTQ-4b / gemma-3-12b-it-standalone."
+        )
+
+    path = Path(resolved).expanduser()
+    if path.is_dir():
+        direct_tokenizer = path / "tokenizer.model"
+        if not direct_tokenizer.is_file():
+            for candidate_name in fallback_names:
+                child = path / candidate_name
+                if child.is_dir() and (child / "tokenizer.model").is_file():
+                    return str(child)
+            for child in sorted(path.iterdir()):
+                if child.is_dir() and child.name in fallback_names and (child / "tokenizer.model").is_file():
+                    return str(child)
+    if path.is_file():
+        for candidate in (path.parent, path.parent.parent):
+            if candidate.is_dir() and list(candidate.rglob("tokenizer.model")):
+                return str(candidate)
+    return str(path)
+
+
+def _patch_ltx_gemma_transformers_compat() -> None:
+    """Normalize newer transformers Gemma configs for the LTX builder."""
+    global _LTX_GEMMA_TRANSFORMERS_COMPAT_PATCHED
+    if _LTX_GEMMA_TRANSFORMERS_COMPAT_PATCHED:
+        return
+
+    from ltx_core.loader.module_ops import ModuleOps
+    from ltx_core.text_encoders.gemma.encoders import encoder_configurator as gemma_encoder_configurator
+    from ltx_pipelines.utils import model_ledger as ltx_model_ledger
+
+    if getattr(gemma_encoder_configurator.create_and_populate, "_serenity_compat_patch", False):
+        _LTX_GEMMA_TRANSFORMERS_COMPAT_PATCHED = True
+        return
+
+    def _build_global_inv_freqs(config) -> torch.Tensor:
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if not isinstance(rope_parameters, dict):
+            rope_parameters = {}
+        full_attention = dict(rope_parameters.get("full_attention") or {})
+        rope_type = str(full_attention.get("rope_type") or "linear")
+        rope_theta = float(
+            full_attention.get("rope_theta")
+            or getattr(config, "rope_theta", None)
+            or 1_000_000.0
+        )
+        partial_rotary_factor = float(full_attention.get("partial_rotary_factor", 1.0))
+        head_dim = getattr(config, "head_dim", None) or (config.hidden_size // config.num_attention_heads)
+        dim = int(head_dim * partial_rotary_factor)
+
+        if rope_type == "default":
+            return 1.0 / (
+                rope_theta
+                ** (torch.arange(0, dim, 2, dtype=torch.int64).to(dtype=torch.float) / dim)
+            )
+
+        rope_fn = gemma_encoder_configurator.ROPE_INIT_FUNCTIONS.get(rope_type)
+        if rope_fn is None:
+            rope_type = "linear"
+            rope_fn = gemma_encoder_configurator.ROPE_INIT_FUNCTIONS[rope_type]
+            full_attention.setdefault("factor", 1.0)
+        full_attention.setdefault("rope_theta", rope_theta)
+
+        rope_config = type(
+            "_SerenityLTXGemmaRopeConfig",
+            (),
+            {
+                "hidden_size": config.hidden_size,
+                "num_attention_heads": config.num_attention_heads,
+                "head_dim": getattr(config, "head_dim", None),
+                "rope_theta": rope_theta,
+                "rope_parameters": full_attention,
+                "standardize_rope_params": lambda self: None,
+            },
+        )()
+
+        inv_freqs, _ = rope_fn(rope_config)
+        return inv_freqs
+
+    def _patched_create_and_populate(module):
+        model = module.model
+        v_model = model.model.vision_tower.vision_model
+        l_model = model.model.language_model
+
+        positions_length = len(v_model.embeddings.position_ids[0])
+        position_ids = torch.arange(positions_length, dtype=torch.long, device="cpu").unsqueeze(0)
+        v_model.embeddings.register_buffer("position_ids", position_ids)
+        embed_scale = torch.tensor(model.config.text_config.hidden_size**0.5, device="cpu")
+        l_model.embed_tokens.register_buffer("embed_scale", embed_scale)
+
+        if hasattr(l_model, "rotary_emb_local"):
+            config = model.config.text_config
+            dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+            rope_parameters = getattr(config, "rope_parameters", None)
+            if not isinstance(rope_parameters, dict):
+                rope_parameters = {}
+            sliding_attention = dict(rope_parameters.get("sliding_attention") or {})
+            local_base = float(
+                getattr(config, "rope_local_base_freq", None)
+                or sliding_attention.get("rope_theta")
+                or 10_000.0
+            )
+            local_rope_freqs = 1.0 / (
+                local_base
+                ** (torch.arange(0, dim, 2, dtype=torch.int64).to(dtype=torch.float) / dim)
+            )
+            inv_freqs = _build_global_inv_freqs(config)
+            l_model.rotary_emb_local.register_buffer("inv_freq", local_rope_freqs)
+            l_model.rotary_emb.register_buffer("inv_freq", inv_freqs)
+        elif hasattr(l_model, "rotary_emb"):
+            config = model.config.text_config
+            dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+            rope_parameters = getattr(config, "rope_parameters", None)
+            if not isinstance(rope_parameters, dict):
+                rope_parameters = {}
+            sliding_attention = dict(rope_parameters.get("sliding_attention") or {})
+            local_base = float(
+                getattr(config, "rope_local_base_freq", None)
+                or sliding_attention.get("rope_theta")
+                or 10_000.0
+            )
+            local_rope_freqs = 1.0 / (
+                local_base
+                ** (torch.arange(0, dim, 2, dtype=torch.int64).to(dtype=torch.float) / dim)
+            )
+            inv_freqs = _build_global_inv_freqs(config)
+            l_model.rotary_emb.register_buffer("sliding_attention_inv_freq", local_rope_freqs)
+            l_model.rotary_emb.register_buffer(
+                "sliding_attention_original_inv_freq",
+                local_rope_freqs.clone(),
+            )
+            l_model.rotary_emb.register_buffer("full_attention_inv_freq", inv_freqs)
+            l_model.rotary_emb.register_buffer(
+                "full_attention_original_inv_freq",
+                inv_freqs.clone(),
+            )
+        else:
+            raise AttributeError(
+                f"Unsupported Gemma language model layout: missing rotary embedding modules on {type(l_model).__name__}"
+            )
+        return module
+
+    _patched_create_and_populate._serenity_compat_patch = True
+
+    patched_module_ops = ModuleOps(
+        name=gemma_encoder_configurator.GEMMA_MODEL_OPS.name,
+        matcher=gemma_encoder_configurator.GEMMA_MODEL_OPS.matcher,
+        mutator=_patched_create_and_populate,
+    )
+    gemma_encoder_configurator.create_and_populate = _patched_create_and_populate
+    gemma_encoder_configurator.GEMMA_MODEL_OPS = patched_module_ops
+    ltx_model_ledger.GEMMA_MODEL_OPS = patched_module_ops
+    _LTX_GEMMA_TRANSFORMERS_COMPAT_PATCHED = True
+
+
+def _coerce_ltxv_quantization_policy(checkpoint_path: str, quantization: str = "auto"):
+    quantization_name = (quantization or "auto").strip().lower()
+    if quantization_name in {"", "auto"}:
+        quantization_name = "fp8-cast" if "fp8" in checkpoint_path.lower() else "none"
+    if quantization_name in {"none", "off"}:
+        return None
+
+    from ltx_core.quantization.policy import QuantizationPolicy
+
+    if quantization_name == "fp8-cast":
+        return QuantizationPolicy.fp8_cast()
+    if quantization_name == "fp8-scaled-mm":
+        return QuantizationPolicy.fp8_scaled_mm()
+    raise ValueError(f"Unsupported LTX quantization mode: {quantization}")
+
+
+def _build_ltxv_loras(paths: tuple[str, ...], strengths: tuple[float, ...]) -> list[Any]:
+    if not paths:
+        return []
+
+    from ltx_core.loader import LoraPathStrengthAndSDOps
+    from ltx_core.model import transformer as ltx_transformer
+
+    renaming_map = getattr(
+        ltx_transformer,
+        "LTXV_LORA_COMFY_RENAMING_MAP",
+        getattr(ltx_transformer, "LTXV_MODEL_COMFY_RENAMING_MAP"),
+    )
+
+    loras = []
+    for idx, path in enumerate(paths):
+        if not path:
+            continue
+        strength = strengths[idx] if idx < len(strengths) else 1.0
+        loras.append(LoraPathStrengthAndSDOps(path, float(strength), renaming_map))
+    return loras
+
+
+def _save_ltx_conditioning_image(guide_image: torch.Tensor) -> str:
+    import tempfile
+    import numpy as np
+    from PIL import Image
+
+    frame = guide_image
+    if frame.ndim == 4:
+        frame = frame[0]
+    if frame.ndim != 3:
+        raise ValueError(f"Expected IMAGE tensor with 3 or 4 dims, got {list(guide_image.shape)}")
+
+    image_np = frame.detach().cpu().float().clamp(0, 1).mul(255).to(torch.uint8).numpy()
+    temp_dir = Path(os.path.realpath("temp"))
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(prefix="ltxv_conditioning_", suffix=".png", dir=temp_dir, delete=False) as handle:
+        Image.fromarray(np.ascontiguousarray(image_np)).save(handle.name)
+        return handle.name
+
+
+def _materialize_ltxv_image_conditionings(
+    guide_image: torch.Tensor | None,
+    guide_frame_idx: int,
+    guide_strength: float,
+) -> list[Any]:
+    if guide_image is None:
+        return []
+
+    from ltx_pipelines.utils.args import ImageConditioningInput
+
+    return [
+        ImageConditioningInput(
+            path=_save_ltx_conditioning_image(guide_image),
+            frame_idx=max(int(guide_frame_idx), 0),
+            strength=float(guide_strength),
+        )
+    ]
+
+
+def _write_audio_waveform_to_wav(waveform: torch.Tensor, sample_rate: int) -> str:
+    import tempfile
+    import wave
+
+    samples = waveform.detach().cpu().float()
+    if samples.ndim == 1:
+        samples = samples.unsqueeze(0)
+    if samples.ndim == 2 and samples.shape[0] > samples.shape[1]:
+        samples = samples.transpose(0, 1)
+    if samples.ndim != 2:
+        raise ValueError(f"Unsupported audio waveform shape: {list(samples.shape)}")
+    if samples.shape[0] > 8:
+        samples = samples.transpose(0, 1)
+
+    interleaved = samples.transpose(0, 1).contiguous()
+    pcm16 = interleaved.clamp(-1.0, 1.0).mul(32767.0).to(torch.int16).numpy()
+
+    temp_dir = Path(os.path.realpath("temp"))
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(prefix="ltxv_audio_", suffix=".wav", dir=temp_dir, delete=False) as handle:
+        with wave.open(handle.name, "wb") as wav_file:
+            wav_file.setnchannels(int(interleaved.shape[1]))
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(int(sample_rate))
+            wav_file.writeframes(pcm16.tobytes())
+        return handle.name
+
+
+def _materialize_ltxv_audio_path(audio: Any) -> str | None:
+    if audio is None:
+        return None
+
+    if isinstance(audio, dict):
+        path = audio.get("path")
+        if path and os.path.exists(path):
+            return str(path)
+        waveform = audio.get("waveform")
+        sample_rate = audio.get("sampling_rate") or audio.get("sample_rate")
+    else:
+        path = getattr(audio, "path", None)
+        if path and os.path.exists(path):
+            return str(path)
+        waveform = getattr(audio, "waveform", None)
+        sample_rate = getattr(audio, "sampling_rate", None) or getattr(audio, "sample_rate", None)
+
+    if waveform is None or sample_rate is None:
+        return None
+    return _write_audio_waveform_to_wav(waveform, int(sample_rate))
+
+
+def _serialize_ltxv_audio(audio: Any) -> dict[str, Any] | None:
+    if audio is None:
+        return None
+    if isinstance(audio, dict):
+        return audio
+
+    waveform = getattr(audio, "waveform", None)
+    sample_rate = getattr(audio, "sampling_rate", None) or getattr(audio, "sample_rate", None)
+    if waveform is None or sample_rate is None:
+        return None
+    return {
+        "path": None,
+        "waveform": waveform.detach().cpu(),
+        "sample_rate": int(sample_rate),
+        "sampling_rate": int(sample_rate),
+    }
+
+
+def _decode_ltxv_video_iterator(video_iter: Any) -> torch.Tensor:
+    chunks: list[torch.Tensor] = []
+    for chunk in video_iter:
+        tensor = chunk if torch.is_tensor(chunk) else torch.as_tensor(chunk)
+        tensor = tensor.detach().cpu()
+        if tensor.dtype == torch.uint8 or tensor.float().max().item() > 1.5:
+            tensor = tensor.float() / 255.0
+        else:
+            tensor = tensor.float()
+        chunks.append(tensor)
+
+    if not chunks:
+        raise RuntimeError("LTX pipeline returned no decoded video frames")
+    return torch.cat(chunks, dim=0).clamp(0, 1)
+
+
+def _wrap_ltx_ledger_text_encoder_cpu(ledger: Any) -> None:
+    """Force official LTX pipelines to build/text-encode Gemma on CPU."""
+    if ledger is None or getattr(ledger, "_serenity_text_encoder_cpu_wrap", False):
+        return
+
+    original_text_encoder = ledger.text_encoder
+
+    def _text_encoder_on_cpu():
+        previous_device = ledger.device
+        ledger.device = torch.device("cpu")
+        try:
+            return original_text_encoder()
+        finally:
+            ledger.device = previous_device
+
+    ledger.text_encoder = _text_encoder_on_cpu
+    ledger._serenity_text_encoder_cpu_wrap = True
+
+
+def _patch_official_ltx_pipeline_text_encoder_cpu(pipeline: Any) -> None:
+    for attr in ("model_ledger", "stage_1_model_ledger", "stage_2_model_ledger"):
+        _wrap_ltx_ledger_text_encoder_cpu(getattr(pipeline, attr, None))
+
+
+def _should_use_official_ltx_backend(
+    model: LTXVModelWrapper,
+    *,
+    guide_image: torch.Tensor | None = None,
+    audio: Any = None,
+) -> bool:
+    del guide_image, audio
+
+    if model.backend == "official":
+        return True
+    if model.backend in {"legacy_stagehand", "stagehand", "auto"}:
+        return False
+    return False
+
+
+def _build_ltxv_stage2_ledger(model: LTXVModelWrapper) -> Any:
+    """Build a stage-2 ledger that adds the distilled LoRA when available."""
+    if not model.distilled_lora_path:
+        return model.model_ledger
+
+    distilled_loras = tuple(_build_ltxv_loras((model.distilled_lora_path,), (1.0,)))
+    if not distilled_loras:
+        return model.model_ledger
+    return model.model_ledger.with_loras(distilled_loras)
+
+
+def _sample_ltxv_official(
+    model: LTXVModelWrapper,
+    prompt: str,
+    *,
+    negative_prompt: str = "",
+    width: int = 768,
+    height: int = 512,
+    num_frames: int = 25,
+    steps: int = 8,
+    guidance_scale: float = 3.0,
+    stg_scale: float = 1.0,
+    stg_blocks: list[int] | None = None,
+    stg_rescale: float = 0.7,
+    seed: int = 42,
+    frame_rate: float = 25.0,
+    mode: str = "auto",
+    guide_image: torch.Tensor | None = None,
+    guide_strength: float = 1.0,
+    guide_frame_idx: int = 0,
+    audio: Any = None,
+    audio_start_time: float = 0.0,
+    audio_duration: float | None = None,
+) -> dict[str, torch.Tensor | dict[str, Any] | None]:
+    from ltx_core.components.guiders import MultiModalGuiderParams
+    from ltx_pipelines import (
+        A2VidPipelineTwoStage,
+        DistilledPipeline,
+        TI2VidOneStagePipeline,
+        TI2VidTwoStagesPipeline,
+    )
+
+    checkpoint_path = model.checkpoint_path
+    resolved_mode = _detect_ltxv_mode(checkpoint_path, mode)
+    gemma_root = _resolve_ltxv_gemma_root(model.gemma_root_path)
+    spatial_upsampler_path = (
+        model.spatial_upsampler_path
+        or _resolve_ltxv_asset(None, "upscale_models", *_default_ltxv_spatial_upsampler_candidates(checkpoint_path))
+    )
+    distilled_lora_path = (
+        model.distilled_lora_path
+        or _resolve_ltxv_asset(None, "loras", *_default_ltxv_distilled_lora_candidates(checkpoint_path))
+    )
+    quantization_policy = _coerce_ltxv_quantization_policy(checkpoint_path, model.quantization)
+    user_loras = _build_ltxv_loras(model.lora_paths, model.lora_strengths)
+    distilled_loras = _build_ltxv_loras(
+        (distilled_lora_path,) if distilled_lora_path else (),
+        (1.0,) if distilled_lora_path else (),
+    )
+    conditioning_images = _materialize_ltxv_image_conditionings(
+        guide_image=guide_image,
+        guide_frame_idx=guide_frame_idx,
+        guide_strength=guide_strength,
+    )
+
+    if stg_blocks is None:
+        stg_blocks = [28] if _ltx_checkpoint_looks_23(checkpoint_path) else [29]
+
+    video_guider_params = MultiModalGuiderParams(
+        cfg_scale=float(guidance_scale),
+        stg_scale=float(stg_scale),
+        stg_blocks=stg_blocks,
+        rescale_scale=float(stg_rescale),
+        modality_scale=3.0,
+        skip_step=0,
+    )
+    audio_guider_params = MultiModalGuiderParams(
+        cfg_scale=float(guidance_scale),
+        stg_scale=float(stg_scale),
+        stg_blocks=stg_blocks,
+        rescale_scale=float(stg_rescale),
+        modality_scale=3.0,
+        skip_step=0,
+    )
+
+    audio_path = _materialize_ltxv_audio_path(audio)
+
+    if audio_path:
+        if spatial_upsampler_path is None or not distilled_loras:
+            raise RuntimeError(
+                "LTX image+audio-to-video requires both a spatial upscaler and distilled LoRA. "
+                "Install the 2.3 x2 upscaler and distilled lora, or provide their paths explicitly."
+            )
+        pipeline = A2VidPipelineTwoStage(
+            checkpoint_path=checkpoint_path,
+            distilled_lora=distilled_loras,
+            spatial_upsampler_path=spatial_upsampler_path,
+            gemma_root=gemma_root,
+            loras=user_loras,
+            device=model.device,
+            quantization=quantization_policy,
+        )
+        _patch_official_ltx_pipeline_text_encoder_cpu(pipeline)
+        video_iter, decoded_audio = pipeline(
+            prompt=prompt,
+            negative_prompt=negative_prompt or _DEFAULT_NEGATIVE_PROMPT,
+            seed=seed,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            frame_rate=frame_rate,
+            num_inference_steps=max(int(steps), 1),
+            video_guider_params=video_guider_params,
+            images=conditioning_images,
+            audio_path=audio_path,
+            audio_start_time=float(audio_start_time),
+            audio_max_duration=audio_duration,
+        )
+    elif resolved_mode == "distilled":
+        if spatial_upsampler_path is None:
+            raise RuntimeError("Distilled LTX generation requires a spatial upscaler model")
+        pipeline = DistilledPipeline(
+            distilled_checkpoint_path=checkpoint_path,
+            gemma_root=gemma_root,
+            spatial_upsampler_path=spatial_upsampler_path,
+            loras=user_loras,
+            device=model.device,
+            quantization=quantization_policy,
+        )
+        _patch_official_ltx_pipeline_text_encoder_cpu(pipeline)
+        video_iter, decoded_audio = pipeline(
+            prompt=prompt,
+            seed=seed,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            frame_rate=frame_rate,
+            images=conditioning_images,
+        )
+    elif spatial_upsampler_path and distilled_loras:
+        pipeline = TI2VidTwoStagesPipeline(
+            checkpoint_path=checkpoint_path,
+            distilled_lora=distilled_loras,
+            spatial_upsampler_path=spatial_upsampler_path,
+            gemma_root=gemma_root,
+            loras=user_loras,
+            device=model.device,
+            quantization=quantization_policy,
+        )
+        _patch_official_ltx_pipeline_text_encoder_cpu(pipeline)
+        video_iter, decoded_audio = pipeline(
+            prompt=prompt,
+            negative_prompt=negative_prompt or _DEFAULT_NEGATIVE_PROMPT,
+            seed=seed,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            frame_rate=frame_rate,
+            num_inference_steps=max(int(steps), 1),
+            video_guider_params=video_guider_params,
+            audio_guider_params=audio_guider_params,
+            images=conditioning_images,
+        )
+    else:
+        pipeline = TI2VidOneStagePipeline(
+            checkpoint_path=checkpoint_path,
+            gemma_root=gemma_root,
+            loras=user_loras,
+            device=model.device,
+            quantization=quantization_policy,
+        )
+        _patch_official_ltx_pipeline_text_encoder_cpu(pipeline)
+        video_iter, decoded_audio = pipeline(
+            prompt=prompt,
+            negative_prompt=negative_prompt or _DEFAULT_NEGATIVE_PROMPT,
+            seed=seed,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            frame_rate=frame_rate,
+            num_inference_steps=max(int(steps), 1),
+            video_guider_params=video_guider_params,
+            audio_guider_params=audio_guider_params,
+            images=conditioning_images,
+        )
+
+    return {
+        "video": _decode_ltxv_video_iterator(video_iter),
+        "audio": _serialize_ltxv_audio(decoded_audio),
+    }
+
+
 def load_ltxv_model(
     checkpoint_path: str,
     gemma_path: str,
     dtype: str = "bfloat16",
+    spatial_upsampler_path: str | None = None,
+    distilled_lora_path: str | None = None,
+    lora_paths: tuple[str, ...] = (),
+    lora_strengths: tuple[float, ...] = (),
+    quantization: str = "auto",
+    backend: str = "auto",
 ) -> LTXVModelWrapper:
     """Load LTX-V model using ltx_pipelines ModelLedger.
 
@@ -1328,46 +3179,63 @@ def load_ltxv_model(
         gemma_path: Path to Gemma 3 12B text encoder directory.
         dtype: Weight dtype (bfloat16, float16, float32).
     """
+    _patch_ltx_gemma_transformers_compat()
     from ltx_pipelines.utils import ModelLedger
 
     torch_dtype = _parse_dtype(dtype)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Auto-detect FP8 checkpoint for quantization policy
-    quantization = None
-    if "fp8" in checkpoint_path.lower():
-        from ltx_core.quantization import QuantizationPolicy
-        quantization = QuantizationPolicy.fp8_cast()
-        logger.info("FP8 checkpoint detected — using fp8_cast quantization policy")
+    resolved_checkpoint = _resolve_ltxv_asset(checkpoint_path, "diffusion_models") or checkpoint_path
+    resolved_gemma = _resolve_ltxv_gemma_root(gemma_path)
+    resolved_spatial_upsampler = (
+        _resolve_ltxv_asset(spatial_upsampler_path, "upscale_models", *_default_ltxv_spatial_upsampler_candidates(resolved_checkpoint))
+        if spatial_upsampler_path or checkpoint_path
+        else None
+    )
+    resolved_distilled_lora = (
+        _resolve_ltxv_asset(distilled_lora_path, "loras", *_default_ltxv_distilled_lora_candidates(resolved_checkpoint))
+        if distilled_lora_path or checkpoint_path
+        else None
+    )
+    resolved_lora_paths = tuple(
+        _resolve_ltxv_asset(path, "loras") or path for path in lora_paths if path
+    )
+    resolved_quantization = quantization or "auto"
+    quantization_policy = _coerce_ltxv_quantization_policy(resolved_checkpoint, resolved_quantization)
+    user_loras = tuple(_build_ltxv_loras(resolved_lora_paths, lora_strengths))
 
-    # Auto-find spatial upsampler (needed for two-stage pipeline)
-    import os
-    spatial_upsampler_path = None
-    for base in [
-        os.path.dirname(checkpoint_path),
-        os.path.expanduser("~/SwarmUI/Models/ltx2"),
-        os.path.expanduser("~/models/LTX-2"),
-    ]:
-        candidate = os.path.join(base, "ltx-2.3-spatial-upscaler-x2-1.0.safetensors")
-        if os.path.exists(candidate):
-            spatial_upsampler_path = candidate
-            break
-    if spatial_upsampler_path:
-        logger.info("Spatial upsampler found: %s", spatial_upsampler_path)
+    if quantization_policy is not None:
+        logger.info("LTX quantization enabled: %s", resolved_quantization)
+    if resolved_spatial_upsampler:
+        logger.info("LTX spatial upsampler: %s", resolved_spatial_upsampler)
+    if resolved_distilled_lora:
+        logger.info("LTX distilled lora: %s", resolved_distilled_lora)
 
-    logger.info("Creating ModelLedger: ckpt=%s, gemma=%s", checkpoint_path, gemma_path)
+    logger.info("Creating ModelLedger: ckpt=%s, gemma=%s", resolved_checkpoint, resolved_gemma)
     ledger = ModelLedger(
         dtype=torch_dtype,
         device=device,
-        checkpoint_path=checkpoint_path,
-        gemma_root_path=gemma_path,
-        spatial_upsampler_path=spatial_upsampler_path,
-        loras=(),
-        quantization=quantization,
+        checkpoint_path=resolved_checkpoint,
+        gemma_root_path=resolved_gemma,
+        spatial_upsampler_path=resolved_spatial_upsampler,
+        loras=user_loras,
+        quantization=quantization_policy,
     )
 
     logger.info("LTX-V ModelLedger created (components load on demand)")
-    return LTXVModelWrapper(ledger, device, torch_dtype, checkpoint_path=checkpoint_path)
+    return LTXVModelWrapper(
+        ledger,
+        device,
+        torch_dtype,
+        checkpoint_path=resolved_checkpoint,
+        gemma_root_path=resolved_gemma,
+        spatial_upsampler_path=resolved_spatial_upsampler,
+        distilled_lora_path=resolved_distilled_lora,
+        lora_paths=resolved_lora_paths,
+        lora_strengths=tuple(float(x) for x in lora_strengths),
+        quantization=resolved_quantization,
+        backend=backend,
+    )
 
 
 def _stagehand_config_te(gemma_root: str = ""):
@@ -1375,12 +3243,13 @@ def _stagehand_config_te(gemma_root: str = ""):
     from stagehand import StagehandConfig
     is_fp4 = "fp4" in gemma_root.lower()
     return StagehandConfig(
-        pinned_pool_mb=4096 if is_fp4 else 6144,
+        pinned_pool_mb=3072 if is_fp4 else 4096,
         pinned_slab_mb=256 if is_fp4 else 512,
-        vram_high_watermark_mb=18000,
-        vram_low_watermark_mb=14000,
-        prefetch_window_blocks=2,
-        max_inflight_transfers=2,
+        vram_high_watermark_mb=3400,
+        vram_low_watermark_mb=2600,
+        prefetch_window_blocks=0,
+        eviction_cooldown_steps=0,
+        max_inflight_transfers=1,
         telemetry_enabled=False,
     )
 
@@ -1457,6 +3326,161 @@ def _move_non_blocks_to_device(root_module, block_container, device):
                     root_module._buffers[name] = buf.to(device, non_blocking=True)
 
 
+def _move_module_to_device(module, device, dtype=torch.bfloat16):
+    """Move a single module subtree to device without touching unrelated model branches."""
+    with torch.no_grad():
+        for p in module.parameters(recurse=True):
+            if p.device != device or (torch.is_floating_point(p) and p.dtype != dtype):
+                target_dtype = dtype if torch.is_floating_point(p) else None
+                p.data = p.data.to(device=device, dtype=target_dtype, non_blocking=True)
+        for name, buf in module.named_buffers(recurse=True):
+            if buf.device == device and (not torch.is_floating_point(buf) or buf.dtype == dtype):
+                continue
+            target_dtype = dtype if torch.is_floating_point(buf) else None
+            converted = buf.to(device=device, dtype=target_dtype, non_blocking=True)
+            parts = name.rsplit(".", 1)
+            if len(parts) == 2:
+                parent = module.get_submodule(parts[0])
+                parent._buffers[parts[1]] = converted
+            else:
+                module._buffers[name] = converted
+
+
+def _move_gemma_text_encoder_non_blocks_to_device(text_encoder, block_container, device):
+    """Move only the text-only Gemma components required for prompt encoding."""
+    modules = [
+        getattr(block_container, "embed_tokens", None),
+        getattr(block_container, "norm", None),
+        getattr(block_container, "rotary_emb", None),
+        getattr(block_container, "rotary_emb_local", None),
+    ]
+    for module in modules:
+        if module is not None:
+            _move_module_to_device(module, device)
+
+
+def _ltx_trim_gemma_token_pairs(token_pairs):
+    active_pairs = [(token_id, weight) for token_id, weight in token_pairs if int(weight) != 0]
+    return active_pairs or token_pairs[:1]
+
+
+def _ltx_prepare_gemma_token_pairs(text_encoder, text: str):
+    token_pairs = _ltx_trim_gemma_token_pairs(text_encoder.tokenizer.tokenize_with_weights(text)["gemma"])
+    register_multiple = getattr(
+        getattr(text_encoder.embeddings_processor, "video_connector", None),
+        "num_learnable_registers",
+        None,
+    )
+    if register_multiple:
+        target_len = ((len(token_pairs) + register_multiple - 1) // register_multiple) * register_multiple
+        pad_len = target_len - len(token_pairs)
+        if pad_len > 0:
+            pad_token_id = getattr(text_encoder.tokenizer.tokenizer, "pad_token_id", 0) or 0
+            token_pairs = [(pad_token_id, 0)] * pad_len + token_pairs
+    return token_pairs
+
+
+def _bind_gemma_text_encoder_text_only_precompute(text_encoder) -> None:
+    """Override Gemma precompute on this instance to use the text LM directly."""
+    original_precompute = getattr(text_encoder, "precompute")
+
+    def patched_precompute(self, text: str, padding_side: str = "left"):
+        language_model = getattr(getattr(self.model, "model", None), "language_model", None)
+        if language_model is None:
+            return original_precompute(text, padding_side)
+
+        embed_tokens = getattr(language_model, "embed_tokens", None)
+        device = embed_tokens.weight.device if embed_tokens is not None else self.model.device
+        hf_tokenizer = getattr(getattr(self, "tokenizer", None), "tokenizer", None)
+        if hf_tokenizer is not None:
+            encoded = hf_tokenizer(
+                text.strip(),
+                padding=False,
+                truncation=True,
+                max_length=getattr(self.tokenizer, "max_length", None),
+                return_tensors="pt",
+            )
+            input_ids = encoded.input_ids
+            attention_mask = encoded.attention_mask
+            register_multiple = getattr(
+                getattr(self.embeddings_processor, "video_connector", None),
+                "num_learnable_registers",
+                None,
+            )
+            if register_multiple:
+                seq_len = input_ids.shape[1]
+                target_len = ((seq_len + register_multiple - 1) // register_multiple) * register_multiple
+                pad_len = target_len - seq_len
+                if pad_len > 0:
+                    pad_token_id = getattr(hf_tokenizer, "pad_token_id", 0) or 0
+                    input_ids = torch.nn.functional.pad(input_ids, (pad_len, 0), value=pad_token_id)
+                    attention_mask = torch.nn.functional.pad(attention_mask, (pad_len, 0), value=0)
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+        else:
+            token_pairs = _ltx_prepare_gemma_token_pairs(self, text)
+            input_ids = torch.tensor([[t[0] for t in token_pairs]], device=device)
+            attention_mask = torch.tensor([[w[1] for w in token_pairs]], device=device)
+        logger.info("LTX Gemma precompute: LM forward start (tokens=%d)", input_ids.shape[1])
+        outputs = language_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+        logger.info("LTX Gemma precompute: LM forward complete")
+        hidden_states = outputs.hidden_states
+        if isinstance(hidden_states, (list, tuple)):
+            logger.info("LTX Gemma precompute: moving %d hidden states to CPU", len(hidden_states))
+            hidden_states = tuple(state.to("cpu") for state in hidden_states)
+        else:
+            logger.info("LTX Gemma precompute: moving hidden states to CPU")
+            hidden_states = hidden_states.to("cpu")
+        attention_mask_cpu = attention_mask.to("cpu")
+        logger.info("LTX Gemma precompute: feature extraction start")
+        video_feats, audio_feats = self.feature_extractor(hidden_states, attention_mask_cpu, padding_side)
+        logger.info("LTX Gemma precompute: feature extraction complete")
+        return video_feats, audio_feats, attention_mask_cpu
+
+    text_encoder.precompute = MethodType(patched_precompute, text_encoder)
+
+
+def _ltx_gemma_text_encoder_lm_forward(text_encoder, text: str):
+    token_pairs = _ltx_prepare_gemma_token_pairs(text_encoder, text)
+    language_model = getattr(getattr(text_encoder.model, "model", None), "language_model", None)
+    if language_model is None:
+        raise AttributeError("Gemma language model is missing from the LTX text encoder")
+
+    embed_tokens = getattr(language_model, "embed_tokens", None)
+    device = embed_tokens.weight.device if embed_tokens is not None else text_encoder.model.device
+    input_ids = torch.tensor([[token_id for token_id, _ in token_pairs]], device=device)
+    attention_mask = torch.tensor([[weight for _, weight in token_pairs]], device=device)
+    logger.info("LTX Gemma LM forward start (tokens=%d)", input_ids.shape[1])
+    outputs = language_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+    logger.info("LTX Gemma LM forward complete")
+    return outputs.hidden_states, attention_mask
+
+
+def _ltx_move_gemma_hidden_states_to_cpu(hidden_states, attention_mask):
+    if isinstance(hidden_states, (list, tuple)):
+        logger.info("LTX Gemma TE: moving %d hidden states to CPU", len(hidden_states))
+        hidden_states = tuple(state.to("cpu") for state in hidden_states)
+    else:
+        logger.info("LTX Gemma TE: moving hidden states to CPU")
+        hidden_states = hidden_states.to("cpu")
+    return hidden_states, attention_mask.to("cpu")
+
+
+def _ltx_finalize_gemma_text_encoder_output(text_encoder, hidden_states, attention_mask, padding_side: str = "left"):
+    logger.info("LTX Gemma TE: feature extraction start")
+    video_feats, audio_feats = text_encoder.feature_extractor(hidden_states, attention_mask, padding_side)
+    logger.info("LTX Gemma TE: feature extraction complete")
+    additive_mask = text_encoder._convert_to_additive_mask(attention_mask, video_feats.dtype)
+    logger.info("LTX Gemma TE: embeddings projection start")
+    video_enc, audio_enc, binary_mask = text_encoder.embeddings_processor.create_embeddings(
+        video_feats,
+        audio_feats,
+        additive_mask,
+    )
+    logger.info("LTX Gemma TE: embeddings projection complete")
+    return video_enc, audio_enc, binary_mask
+
+
 def _detect_ltxv_mode(checkpoint_path: str, mode: str) -> str:
     """Resolve 'auto' mode to 'distilled' or 'dev' based on checkpoint filename."""
     if mode != "auto":
@@ -1497,7 +3521,13 @@ def sample_ltxv(
     frame_rate: float = 25.0,
     dtype: str = "bfloat16",
     mode: str = "auto",
-) -> dict[str, torch.Tensor | None]:
+    guide_image: torch.Tensor | None = None,
+    guide_strength: float = 1.0,
+    guide_frame_idx: int = 0,
+    audio: Any = None,
+    audio_start_time: float = 0.0,
+    audio_duration: float | None = None,
+) -> dict[str, torch.Tensor | dict[str, Any] | None]:
     """Generate video using LTX-V via ltx_pipelines + Stagehand block-swap.
 
     Same pipeline as LTX2-Desktop: load each component to CPU, use Stagehand
@@ -1514,105 +3544,160 @@ def sample_ltxv(
     from stagehand import StagehandRuntime
     from ltx_core.components.diffusion_steps import EulerDiffusionStep
     from ltx_core.components.noisers import GaussianNoiser
-    from ltx_core.model.audio_vae import decode_audio as vae_decode_audio
+    from ltx_core.model.audio_vae import decode_audio as vae_decode_audio, encode_audio as vae_encode_audio
     from ltx_core.model.video_vae import decode_video as vae_decode_video
-    from ltx_core.types import VideoPixelShape
+    from ltx_core.types import Audio, AudioLatentShape, VideoPixelShape
     from ltx_pipelines.utils.constants import DISTILLED_SIGMA_VALUES
+    from ltx_pipelines.utils import image_conditionings_by_replacing_latent
     from ltx_pipelines.utils.helpers import (
         cleanup_memory,
         denoise_audio_video,
+        denoise_video_only,
         simple_denoising_func,
     )
+    from ltx_pipelines.utils.media_io import decode_audio_from_file
     from ltx_pipelines.utils.samplers import euler_denoising_loop
     from ltx_pipelines.utils.types import PipelineComponents
 
     ledger = model.model_ledger
+    stage_2_ledger = _build_ltxv_stage2_ledger(model)
     device = model.device
+
+    should_use_official = _should_use_official_ltx_backend(
+        model,
+        guide_image=guide_image,
+        audio=audio,
+    )
+    if should_use_official:
+        return _sample_ltxv_official(
+            model,
+            prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            steps=steps,
+            guidance_scale=guidance_scale,
+            stg_scale=stg_scale,
+            stg_blocks=stg_blocks,
+            stg_rescale=stg_rescale,
+            seed=seed,
+            frame_rate=frame_rate,
+            mode=mode,
+            guide_image=guide_image,
+            guide_strength=guide_strength,
+            guide_frame_idx=guide_frame_idx,
+            audio=audio,
+            audio_start_time=audio_start_time,
+            audio_duration=audio_duration,
+        )
 
     # Resolve mode from checkpoint name
     resolved_mode = _detect_ltxv_mode(model.checkpoint_path, mode)
     is_dev = resolved_mode == "dev"
 
     if is_dev:
-        # Dev mode: use configured steps (default 30), need negative prompt for CFG
-        if steps <= 8:
-            steps = 30  # override low step counts that were meant for distilled
+        # Dev mode: honor the requested step count; higher counts remain user-controlled.
         if not negative_prompt:
             negative_prompt = _DEFAULT_NEGATIVE_PROMPT
         logger.info("LTX-V dev mode: %d steps, cfg=%.1f, stg=%.1f", steps, guidance_scale, stg_scale)
     else:
         logger.info("LTX-V distilled mode: 8 steps (fixed sigma schedule)")
 
+    conditioning_images = _materialize_ltxv_image_conditionings(
+        guide_image=guide_image,
+        guide_frame_idx=guide_frame_idx,
+        guide_strength=guide_strength,
+    )
+    audio_path = _materialize_ltxv_audio_path(audio)
+
     # ---------------------------------------------------------------
-    # 1. Text encoding with Stagehand (Gemma 3 12B)
+    # 1. Text encoding on CPU (Gemma 3 12B)
     # ---------------------------------------------------------------
-    logger.info("Loading Gemma 3 text encoder to CPU...")
+    logger.info("Loading Gemma 3 text encoder on CPU...")
     ledger.device = torch.device("cpu")
     text_encoder = ledger.text_encoder()
     ledger.device = device
-
-    block_module = _get_gemma_block_module(text_encoder)
-    _move_non_blocks_to_device(text_encoder, block_module, device)
-
-    te_runtime = StagehandRuntime(
-        model=block_module,
-        config=_stagehand_config_te(),
-        block_pattern=r"^layers\.\d+$",
-        group="text_encoder",
-        dtype=model.dtype,
-        inference_mode=True,
-    )
-    logger.info("Stagehand TE ready (%d blocks)", len(te_runtime._registry))
+    _bind_gemma_text_encoder_text_only_precompute(text_encoder)
 
     # Encode positive prompt
-    te_runtime.begin_step(0)
-    with te_runtime.managed_forward():
-        raw_hs, raw_mask = text_encoder.encode(prompt)
-    te_runtime.end_step()
+    context_p = text_encoder(prompt)
 
     # Encode negative prompt for dev mode (CFG requires it)
-    neg_raw_hs = None
-    neg_raw_mask = None
+    neg_context_p = None
     if is_dev and negative_prompt:
-        te_runtime.begin_step(1)
-        with te_runtime.managed_forward():
-            neg_raw_hs, neg_raw_mask = text_encoder.encode(negative_prompt)
-        te_runtime.end_step()
+        neg_context_p = text_encoder(negative_prompt)
 
-    # Shut down TE Stagehand, free text encoder
-    te_runtime.shutdown()
-    del te_runtime, text_encoder, block_module
+    video_context = context_p.video_encoding.to(device=device).clone()
+    audio_context = context_p.audio_encoding
+    if audio_context is not None:
+        audio_context = audio_context.to(device=device).clone()
+
+    neg_video_context = None
+    neg_audio_context = None
+    if neg_context_p is not None:
+        neg_video_context = neg_context_p.video_encoding.to(device=device).clone()
+        neg_audio_context = neg_context_p.audio_encoding
+        if neg_audio_context is not None:
+            neg_audio_context = neg_audio_context.to(device=device).clone()
+
+    del text_encoder
     gc.collect()
     cleanup_memory()
     logger.info("Text encoder freed")
-
-    # Process hidden states through embeddings processor (small, fits on GPU)
-    raw_hs = tuple(h.to(device=device) for h in raw_hs)
-    raw_mask = raw_mask.to(device=device)
-    emb_proc = ledger.gemma_embeddings_processor()
-    context_p = emb_proc.process_hidden_states(raw_hs, raw_mask)
-    video_context = context_p.video_encoding.clone()
-    audio_context = context_p.audio_encoding
-    if audio_context is not None:
-        audio_context = audio_context.clone()
-
-    # Process negative embeddings for dev mode
-    neg_video_context = None
-    neg_audio_context = None
-    if neg_raw_hs is not None:
-        neg_raw_hs = tuple(h.to(device=device) for h in neg_raw_hs)
-        neg_raw_mask = neg_raw_mask.to(device=device)
-        neg_context_p = emb_proc.process_hidden_states(neg_raw_hs, neg_raw_mask)
-        neg_video_context = neg_context_p.video_encoding.clone()
-        neg_audio_context = neg_context_p.audio_encoding
-        if neg_audio_context is not None:
-            neg_audio_context = neg_audio_context.clone()
-        del neg_context_p, neg_raw_hs, neg_raw_mask
-
-    del emb_proc, raw_hs, raw_mask, context_p
+    del context_p
+    if neg_context_p is not None:
+        del neg_context_p
     gc.collect()
     cleanup_memory()
     logger.info("Text encoding complete")
+
+    # ---------------------------------------------------------------
+    # 1b. Encode image/audio conditionings before loading transformer
+    # ---------------------------------------------------------------
+    stage_1_conditionings = []
+    encoded_audio_latent = None
+    preserved_audio = None
+
+    if conditioning_images:
+        logger.info("Preparing %d image conditioning input(s) for stage 1...", len(conditioning_images))
+        video_encoder = ledger.video_encoder()
+        stage_1_conditionings = image_conditionings_by_replacing_latent(
+            images=conditioning_images,
+            height=height // 2,
+            width=width // 2,
+            video_encoder=video_encoder,
+            dtype=model.dtype,
+            device=device,
+        )
+        del video_encoder
+        gc.collect()
+        cleanup_memory()
+        logger.info("Stage 1 image conditioning ready")
+
+    if audio_path:
+        logger.info("Preparing audio conditioning from %s...", audio_path)
+        decoded_input_audio = decode_audio_from_file(audio_path, device, audio_start_time, audio_duration)
+        if decoded_input_audio is None:
+            raise RuntimeError(f"LTX audio conditioning could not decode audio from {audio_path}")
+
+        audio_encoder = ledger.audio_encoder()
+        encoded_audio_latent = vae_encode_audio(decoded_input_audio, audio_encoder)
+        audio_shape = AudioLatentShape.from_duration(
+            batch=1,
+            duration=num_frames / frame_rate,
+            channels=8,
+            mel_bins=16,
+        )
+        encoded_audio_latent = encoded_audio_latent[:, :, : audio_shape.frames]
+        preserved_audio = Audio(
+            waveform=decoded_input_audio.waveform.squeeze(0).detach().cpu(),
+            sampling_rate=decoded_input_audio.sampling_rate,
+        )
+        del audio_encoder, decoded_input_audio
+        gc.collect()
+        cleanup_memory()
+        logger.info("Audio conditioning ready: %s", list(encoded_audio_latent.shape))
 
     # ---------------------------------------------------------------
     # 2. Denoise with Stagehand (22B transformer)
@@ -1748,23 +3833,41 @@ def sample_ltxv(
         "Stage 1: Denoising %d steps at %dx%d, %d frames (mode=%s)...",
         n_steps, s1_w, s1_h, num_frames, resolved_mode,
     )
-    video_state, audio_state = denoise_audio_video(
-        output_shape=s1_shape,
-        conditionings=[],
-        noiser=noiser,
-        sigmas=sigmas,
-        stepper=stepper,
-        denoising_loop_fn=denoising_loop,
-        components=components,
-        dtype=model.dtype,
-        device=device,
-    )
+    if encoded_audio_latent is not None:
+        video_state = denoise_video_only(
+            output_shape=s1_shape,
+            conditionings=stage_1_conditionings,
+            noiser=noiser,
+            sigmas=sigmas,
+            stepper=stepper,
+            denoising_loop_fn=denoising_loop,
+            components=components,
+            dtype=model.dtype,
+            device=device,
+            initial_audio_latent=encoded_audio_latent,
+        )
+        audio_state = None
+    else:
+        video_state, audio_state = denoise_audio_video(
+            output_shape=s1_shape,
+            conditionings=stage_1_conditionings,
+            noiser=noiser,
+            sigmas=sigmas,
+            stepper=stepper,
+            denoising_loop_fn=denoising_loop,
+            components=components,
+            dtype=model.dtype,
+            device=device,
+        )
     logger.info("Stage 1 complete")
 
     s1_video_latent = video_state.latent.cpu()
-    s1_audio_latent = audio_state.latent.cpu() if audio_state.latent is not None else None
+    if encoded_audio_latent is not None:
+        s1_audio_latent = encoded_audio_latent.detach().cpu()
+    else:
+        s1_audio_latent = audio_state.latent.cpu() if audio_state is not None and audio_state.latent is not None else None
     xfm_runtime.shutdown()
-    del xfm_runtime, transformer, xfm_inner, base_fn
+    del xfm_runtime, transformer, xfm_inner, base_fn, encoded_audio_latent
     gc.collect()
     cleanup_memory()
     logger.info("Stage 1 transformer freed")
@@ -1777,8 +3880,16 @@ def sample_ltxv(
 
     logger.info("Stage 2: Spatial upsampling...")
     video_encoder = ledger.video_encoder()
+    stage2_conditionings = image_conditionings_by_replacing_latent(
+        images=conditioning_images,
+        height=height,
+        width=width,
+        video_encoder=video_encoder,
+        dtype=model.dtype,
+        device=device,
+    ) if conditioning_images else []
     try:
-        upsampler = ledger.spatial_upsampler()
+        upsampler = stage_2_ledger.spatial_upsampler()
     except Exception:
         logger.warning("No spatial upsampler available — skipping stage 2, using stage 1 output directly")
         upsampler = None
@@ -1796,9 +3907,9 @@ def sample_ltxv(
 
         # Reload transformer for stage 2 refinement
         logger.info("Stage 2: Loading transformer for refinement...")
-        ledger.device = torch.device("cpu")
-        transformer2 = ledger.transformer()
-        ledger.device = device
+        stage_2_ledger.device = torch.device("cpu")
+        transformer2 = stage_2_ledger.transformer()
+        stage_2_ledger.device = device
 
         xfm_inner2 = _unwrap_to_blocks(transformer2)
         _move_non_blocks_to_device(transformer2, xfm_inner2, device)
@@ -1858,20 +3969,37 @@ def sample_ltxv(
         )
 
         logger.info("Stage 2: Refining %d steps at %dx%d...", s2_n_steps, width, height)
-        video_state, audio_state = denoise_audio_video(
-            output_shape=s2_shape,
-            conditionings=[],
-            noiser=noiser,
-            sigmas=s2_sigmas,
-            stepper=EulerDiffusionStep(),
-            denoising_loop_fn=s2_loop,
-            components=components,
-            dtype=model.dtype,
-            device=device,
-            noise_scale=s2_sigmas[0].item(),
-            initial_video_latent=upscaled,
-            initial_audio_latent=s1_audio_latent.to(device) if s1_audio_latent is not None else None,
-        )
+        if preserved_audio is not None:
+            video_state = denoise_video_only(
+                output_shape=s2_shape,
+                conditionings=stage2_conditionings,
+                noiser=noiser,
+                sigmas=s2_sigmas,
+                stepper=EulerDiffusionStep(),
+                denoising_loop_fn=s2_loop,
+                components=components,
+                dtype=model.dtype,
+                device=device,
+                noise_scale=s2_sigmas[0].item(),
+                initial_video_latent=upscaled,
+                initial_audio_latent=s1_audio_latent.to(device) if s1_audio_latent is not None else None,
+            )
+            audio_state = None
+        else:
+            video_state, audio_state = denoise_audio_video(
+                output_shape=s2_shape,
+                conditionings=stage2_conditionings,
+                noiser=noiser,
+                sigmas=s2_sigmas,
+                stepper=EulerDiffusionStep(),
+                denoising_loop_fn=s2_loop,
+                components=components,
+                dtype=model.dtype,
+                device=device,
+                noise_scale=s2_sigmas[0].item(),
+                initial_video_latent=upscaled,
+                initial_audio_latent=s1_audio_latent.to(device) if s1_audio_latent is not None else None,
+            )
         logger.info("Stage 2 complete")
 
         xfm_runtime2.shutdown()
@@ -1889,7 +4017,7 @@ def sample_ltxv(
     # 3. Decode video
     # ---------------------------------------------------------------
     logger.info("Decoding video...")
-    video_decoder = ledger.video_decoder()
+    video_decoder = stage_2_ledger.video_decoder()
     decoded_video = vae_decode_video(video_state.latent, video_decoder)
     if not isinstance(decoded_video, torch.Tensor):
         decoded_video = torch.cat(list(decoded_video), dim=0)
@@ -1898,13 +4026,16 @@ def sample_ltxv(
     # 4. Decode audio (optional)
     # ---------------------------------------------------------------
     decoded_audio = None
-    try:
-        audio_decoder = ledger.audio_decoder()
-        vocoder = ledger.vocoder()
-        decoded_audio = vae_decode_audio(audio_state.latent, audio_decoder, vocoder)
-        del audio_decoder, vocoder
-    except Exception:
-        logger.debug("Audio decode skipped (no audio components)")
+    if preserved_audio is not None:
+        decoded_audio = preserved_audio
+    elif audio_state is not None:
+        try:
+            audio_decoder = stage_2_ledger.audio_decoder()
+            vocoder = stage_2_ledger.vocoder()
+            decoded_audio = vae_decode_audio(audio_state.latent, audio_decoder, vocoder)
+            del audio_decoder, vocoder
+        except Exception:
+            logger.debug("Audio decode skipped (no audio components)")
 
     del video_decoder
     gc.collect()
@@ -1932,6 +4063,7 @@ __all__ = [
     "load_ltxv_model",
     "load_vae",
     "sample",
+    "sample_custom",
     "sample_ltxv",
     "vae_decode",
     "vae_decode_tiled",

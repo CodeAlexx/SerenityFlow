@@ -2584,7 +2584,7 @@ var CanvasTab = (function() {
             var maskLayerInfo = getMaskLayer();
             var hasMask = maskLayerInfo && maskLayerInfo.konvaLayer.getChildren().length > 0;
 
-            if (!hasContent || isVideo) {
+            if (!hasContent) {
                 queueWorkflow(WorkflowBuilder.build({
                     model: genState.model || '', prompt: genState.prompt,
                     width: bw, height: bh,
@@ -2592,6 +2592,22 @@ var CanvasTab = (function() {
                     guidance: genState.guidance, seed: seed,
                     frames: genState.frames, fps: genState.fps
                 }));
+            } else if (isVideo) {
+                exportBoundingBoxRegion().then(function(base64) {
+                    return uploadInitImage(base64 as string);
+                }).then(function(imageName) {
+                    queueWorkflow(WorkflowBuilder.build({
+                        model: genState.model || '', prompt: genState.prompt,
+                        initImageName: imageName,
+                        width: bw, height: bh,
+                        steps: genState.steps, cfg: genState.cfg,
+                        guidance: genState.guidance, seed: seed,
+                        frames: genState.frames, fps: genState.fps
+                    }));
+                }).catch(function(err) {
+                    showError('Video init upload failed: ' + err.message);
+                    setCanvasGenerating(false);
+                });
             } else if (hasMask && !isVideo) {
                 // Inpaint: export both init image and mask
                 exportBoundingBoxRegion().then(function(initBase64) {

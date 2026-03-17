@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import logging
+import re
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -61,6 +62,45 @@ _DIR_ALIASES: dict[str, str] = {
     "ltx2": "diffusion_models",
 }
 
+_LOOKUP_VARIANT_TOKENS = {
+    "base",
+    "fp4",
+    "fp8",
+    "fp16",
+    "bf16",
+    "nf4",
+    "scaled",
+    "e4m3fn",
+    "e5m2",
+    "low",
+    "high",
+    "noise",
+}
+
+
+def _lookup_tokens(name: str) -> list[str]:
+    """Tokenize model names for relaxed matching across common filename variants."""
+    stem = Path(name).stem.lower()
+    raw_tokens = [tok for tok in re.split(r"[^a-z0-9]+", stem) if tok]
+    tokens: list[str] = []
+    for tok in raw_tokens:
+        if tok in _LOOKUP_VARIANT_TOKENS:
+            continue
+        # Split tokens like `flux2` or `wan2`, but keep forms such as `t2v`
+        # and `14b` intact because those carry semantic meaning.
+        if re.fullmatch(r"[a-z]+\d+", tok) and not re.fullmatch(r"t\d+[a-z]+", tok):
+            match = re.fullmatch(r"([a-z]+)(\d+)", tok)
+            if match:
+                tokens.extend([match.group(1), match.group(2)])
+                continue
+        tokens.append(tok)
+    return tokens
+
+
+def _lookup_key(name: str) -> str:
+    """Canonical key used for relaxed model lookup."""
+    return "|".join(sorted(_lookup_tokens(name)))
+
 
 class ModelPaths:
     def __init__(self, base_dir: str, extra_paths_yaml: str | None = None):
@@ -112,13 +152,8 @@ class ModelPaths:
         if extra_paths_yaml and os.path.exists(extra_paths_yaml):
             self._load_extra_paths(extra_paths_yaml)
 
-    def find(self, filename: str, folder: str = "checkpoints") -> str:
-        """Find model file by name in the given folder's search paths.
-
-        Checks the unified Stagehand resolver first (fast index lookup),
-        then falls back to the legacy directory walk.
-        Returns full path. Raises FileNotFoundError if not found.
-        """
+    def _find_exact(self, filename: str, folder: str = "checkpoints") -> str | None:
+        """Find an exact filename match in the given folder's search paths."""
         # 1. Try unified resolver first (fast index lookup)
         if _HAS_UNIFIED:
             unified_type = _UNIFIED_TYPE_MAP.get(folder)
@@ -155,6 +190,50 @@ class ModelPaths:
                 except OSError:
                     pass
 
+        return None
+
+    def _find_relaxed_candidates(self, filename: str, folder: str) -> list[str]:
+        """Return exact paths whose normalized names match the requested filename."""
+        wanted_ext = Path(filename).suffix.lower()
+        wanted_key = _lookup_key(filename)
+        matches: list[str] = []
+        seen: set[str] = set()
+
+        for candidate in self.list_models(folder):
+            if wanted_ext and Path(candidate).suffix.lower() != wanted_ext:
+                continue
+            if _lookup_key(candidate) != wanted_key:
+                continue
+            exact_path = self._find_exact(candidate, folder)
+            if exact_path is not None and exact_path not in seen:
+                seen.add(exact_path)
+                matches.append(exact_path)
+
+        return matches
+
+    def find(self, filename: str, folder: str = "checkpoints") -> str:
+        """Find model file by name in the given folder's search paths.
+
+        Checks the unified Stagehand resolver first (fast index lookup),
+        then falls back to the legacy directory walk. If no exact match is
+        found, performs a relaxed lookup across common filename variants
+        (precision suffixes, `base`, etc.).
+        """
+        exact = self._find_exact(filename, folder)
+        if exact is not None:
+            return exact
+
+        relaxed_matches = self._find_relaxed_candidates(filename, folder)
+        if len(relaxed_matches) == 1:
+            log.info("Resolved model alias '%s' -> '%s'", filename, relaxed_matches[0])
+            return relaxed_matches[0]
+        if len(relaxed_matches) > 1:
+            raise FileNotFoundError(
+                f"Model '{filename}' did not match a unique file in {folder}. "
+                f"Candidates: {relaxed_matches}"
+            )
+
+        search_dirs = self.dirs.get(folder, [])
         raise FileNotFoundError(
             f"Model '{filename}' not found in {folder} paths: {search_dirs}"
         )

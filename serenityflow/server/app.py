@@ -30,10 +30,34 @@ class ServerState:
 state = ServerState()
 
 
+def _build_runner_cache():
+    """Create the runner cache, enabling residency tracking when CUDA is available."""
+    from serenityflow.core.budget import MemoryBudget
+    from serenityflow.executor.cache import CacheStore
+
+    sh_cfg = getattr(state, "stagehand_config", {})
+    budget = None
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            budget_mb = sh_cfg.get("vram_budget_mb")
+            if budget_mb is None:
+                props = torch.cuda.get_device_properties(0)
+                budget_mb = int(props.total_memory * 0.9 / (1024 * 1024))
+            if budget_mb and budget_mb > 0:
+                budget = MemoryBudget(budget_mb * 1024 * 1024)
+                log.info("Cache residency budget enabled: %d MB", budget_mb)
+    except Exception as e:
+        log.warning("Cache residency budget init failed: %s", e)
+
+    return CacheStore(budget=budget)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
-    from serenityflow.executor.cache import CacheStore
     from serenityflow.executor.runner import WorkflowRunner
     from serenityflow.nodes.registry import registry
 
@@ -60,7 +84,7 @@ async def lifespan(app: FastAPI):
 
     state.runner = WorkflowRunner(
         node_registry=registry,
-        cache=CacheStore(),
+        cache=_build_runner_cache(),
         coordinator=coordinator,
     )
 

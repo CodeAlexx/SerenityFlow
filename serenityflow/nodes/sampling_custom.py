@@ -8,6 +8,51 @@ import torch
 from serenityflow.nodes.registry import registry
 
 
+def _resolve_custom_latent(latent_image):
+    """Resolve LATENT inputs, including miswired edit workflows that pass conditioning."""
+    from serenityflow.bridge.types import unwrap_latent
+
+    if isinstance(latent_image, dict) and "samples" in latent_image:
+        return unwrap_latent(latent_image)
+    if isinstance(latent_image, torch.Tensor):
+        return latent_image
+    if isinstance(latent_image, list):
+        for cond in latent_image:
+            if isinstance(cond, dict) and isinstance(cond.get("reference_latent"), torch.Tensor):
+                return cond["reference_latent"]
+    raise TypeError(f"Unsupported latent input for custom sampler: {type(latent_image)!r}")
+
+
+def _guider_to_sampling_args(guider):
+    """Translate a guider dict into the bridge's sampling inputs."""
+    guider_type = guider.get("type")
+    if guider_type == "cfg":
+        return (
+            guider["model"],
+            guider["positive"],
+            guider["negative"],
+            float(guider.get("cfg", 1.0)),
+        )
+    if guider_type == "basic":
+        return (
+            guider["model"],
+            guider["positive"],
+            [],
+            1.0,
+        )
+    raise NotImplementedError(f"Custom sampler guider '{guider_type}' is not supported yet")
+
+
+def _noise_spec_to_args(noise_spec, latent):
+    """Resolve a NOISE input into bridge sampling arguments."""
+    noise_type = noise_spec.get("type", "random")
+    if noise_type == "empty":
+        return 0, False, torch.zeros_like(latent)
+    if noise_type == "random":
+        return int(noise_spec.get("seed", 0)), True, None
+    raise NotImplementedError(f"Custom sampler noise type '{noise_type}' is not supported yet")
+
+
 # ---------------------------------------------------------------------------
 # Noise generators
 # ---------------------------------------------------------------------------
@@ -561,8 +606,22 @@ def sampler_dpm_adaptive(order=3, rtol=0.05, atol=0.0078, h_init=0.05):
 )
 def sampler_custom(model, add_noise, noise_seed, cfg, positive, negative,
                    sampler, sigmas, latent_image):
-    # TODO: bridge.sample_custom()
-    raise NotImplementedError("SamplerCustom requires bridge.sample_custom()")
+    from serenityflow.bridge.serenity_api import sample_custom
+    from serenityflow.bridge.types import wrap_latent
+
+    latent = _resolve_custom_latent(latent_image)
+    result = sample_custom(
+        model=model,
+        latent=latent,
+        positive=positive,
+        negative=negative,
+        cfg=cfg,
+        sampler_name=sampler.get("type", "euler"),
+        sigmas=sigmas,
+        seed=noise_seed,
+        add_noise=add_noise,
+    )
+    return (wrap_latent(result), wrap_latent(result))
 
 
 @registry.register(
@@ -579,8 +638,25 @@ def sampler_custom(model, add_noise, noise_seed, cfg, positive, negative,
     }},
 )
 def sampler_custom_advanced(noise, guider, sampler, sigmas, latent_image):
-    # TODO: bridge.sample_custom()
-    raise NotImplementedError("SamplerCustomAdvanced requires bridge.sample_custom()")
+    from serenityflow.bridge.serenity_api import sample_custom
+    from serenityflow.bridge.types import wrap_latent
+
+    latent = _resolve_custom_latent(latent_image)
+    model, positive, negative, cfg = _guider_to_sampling_args(guider)
+    noise_seed, add_noise, noise_tensor = _noise_spec_to_args(noise, latent)
+    result = sample_custom(
+        model=model,
+        latent=latent,
+        positive=positive,
+        negative=negative,
+        cfg=cfg,
+        sampler_name=sampler.get("type", "euler"),
+        sigmas=sigmas,
+        seed=noise_seed,
+        add_noise=add_noise,
+        noise=noise_tensor,
+    )
+    return (wrap_latent(result), wrap_latent(result))
 
 
 # ---------------------------------------------------------------------------

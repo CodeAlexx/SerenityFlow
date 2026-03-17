@@ -16,8 +16,9 @@ from serenityflow.bridge.types import wrap_latent
     }},
 )
 def empty_flux2_latent(width, height, batch_size=1):
-    # FLUX uses 16-channel latent at 1/8 resolution
-    latent = torch.zeros(batch_size, 16, height // 8, width // 8)
+    # FLUX.2 VAE latents are 32 channels at 1/8 resolution. The sampler
+    # patchifies them internally to the transformer's 128-channel grid.
+    latent = torch.zeros(batch_size, 32, height // 8, width // 8)
     return (wrap_latent(latent),)
 
 
@@ -42,11 +43,13 @@ def flux_disable_guidance(conditioning):
     category="sampling/custom_sampling/schedulers",
     input_types={"required": {
         "steps": ("INT",),
+    }, "optional": {
+        "model": ("MODEL",),
         "shift": ("FLOAT",),
         "denoise": ("FLOAT",),
     }},
 )
-def flux2_scheduler(steps, shift=1.0, denoise=1.0):
+def flux2_scheduler(steps, shift=1.0, denoise=1.0, model=None):
     # Flux uses shifted linear sigmas in flow-matching space
     total_steps = steps
     if denoise < 1.0:

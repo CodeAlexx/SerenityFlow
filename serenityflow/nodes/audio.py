@@ -1,7 +1,69 @@
 """Audio nodes -- load, save, encode, crop."""
 from __future__ import annotations
 
+import os
+
+import torch
+
 from serenityflow.nodes.registry import registry
+
+
+def materialize_audio_path(audio) -> str:
+    """Return a filesystem path for an AUDIO value, writing a temp WAV if needed."""
+    import tempfile
+    import wave
+
+    if isinstance(audio, dict):
+        path = audio.get("path")
+        if path and os.path.exists(path):
+            return str(path)
+        waveform = audio.get("waveform")
+        sample_rate = audio.get("sampling_rate") or audio.get("sample_rate")
+    else:
+        path = getattr(audio, "path", None)
+        if path and os.path.exists(path):
+            return str(path)
+        waveform = getattr(audio, "waveform", None)
+        sample_rate = getattr(audio, "sampling_rate", None) or getattr(audio, "sample_rate", None)
+
+    if waveform is None or sample_rate is None:
+        raise ValueError("AUDIO value does not contain a valid path or waveform")
+
+    samples = waveform.detach().cpu().float()
+    if samples.ndim == 1:
+        samples = samples.unsqueeze(0)
+    if samples.ndim == 2 and samples.shape[0] > samples.shape[1]:
+        samples = samples.transpose(0, 1)
+    if samples.ndim != 2:
+        raise ValueError(f"Unsupported audio waveform shape: {list(samples.shape)}")
+    if samples.shape[0] > 8:
+        samples = samples.transpose(0, 1)
+
+    interleaved = samples.transpose(0, 1).contiguous()
+    pcm16 = interleaved.clamp(-1.0, 1.0).mul(32767.0).to(torch.int16).numpy()
+
+    temp_dir = os.path.realpath("temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    with tempfile.NamedTemporaryFile(prefix="sf_audio_", suffix=".wav", dir=temp_dir, delete=False) as handle:
+        with wave.open(handle.name, "wb") as wav_file:
+            wav_file.setnchannels(int(interleaved.shape[1]))
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(int(sample_rate))
+            wav_file.writeframes(pcm16.tobytes())
+        return handle.name
+
+
+def _save_audio_encoded(audio, filename_prefix: str, extension: str, codec: str):
+    import subprocess
+
+    source_path = materialize_audio_path(audio)
+    output_dir = os.path.realpath("output")
+    os.makedirs(output_dir, exist_ok=True)
+    output_name = f"{filename_prefix}.{extension}"
+    output_path = os.path.join(output_dir, output_name)
+    cmd = ["ffmpeg", "-y", "-i", source_path, "-vn", "-c:a", codec, output_path]
+    subprocess.run(cmd, capture_output=True, check=True)
+    return {"ui": {"audio": [{"filename": output_name, "type": "output"}]}}
 
 
 @registry.register(
@@ -11,7 +73,25 @@ from serenityflow.nodes.registry import registry
     input_types={"required": {"audio": ("STRING",)}},
 )
 def load_audio(audio):
-    return ({"path": audio, "waveform": None, "sample_rate": None},)
+    from serenityflow.bridge.model_paths import get_model_paths
+
+    if os.path.isabs(audio):
+        filepath = audio
+    else:
+        paths = get_model_paths()
+        input_dir = os.path.join(paths.base_dir, "input")
+        candidate = os.path.join(input_dir, audio)
+        if os.path.exists(candidate):
+            filepath = candidate
+        elif os.path.exists(audio):
+            filepath = os.path.realpath(audio)
+        else:
+            filepath = candidate
+
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Audio not found: {filepath}")
+
+    return ({"path": filepath, "waveform": None, "sample_rate": None},)
 
 
 @registry.register(
@@ -22,7 +102,7 @@ def load_audio(audio):
     input_types={"required": {"audio": ("AUDIO",), "filename_prefix": ("STRING",)}},
 )
 def save_audio_mp3(audio, filename_prefix="serenityflow"):
-    raise NotImplementedError("SaveAudioMP3 requires audio encoding backend")
+    return _save_audio_encoded(audio, filename_prefix, "mp3", "libmp3lame")
 
 
 @registry.register(
@@ -33,7 +113,7 @@ def save_audio_mp3(audio, filename_prefix="serenityflow"):
     input_types={"required": {"audio": ("AUDIO",), "filename_prefix": ("STRING",)}},
 )
 def save_audio_opus(audio, filename_prefix="serenityflow"):
-    raise NotImplementedError("SaveAudioOpus requires audio encoding backend")
+    return _save_audio_encoded(audio, filename_prefix, "opus", "libopus")
 
 
 @registry.register(

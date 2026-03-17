@@ -75,13 +75,16 @@ def empty_hunyuan_latent(width, height, length=25, batch_size=1):
         "filename_prefix": ("STRING",),
         "fps": ("FLOAT",),
         "format": ("STRING",),
+    }, "optional": {
+        "audio": ("AUDIO",),
     }},
 )
-def video_save(images, filename_prefix="SerenityFlow", fps=24.0, format="mp4"):
+def video_save(images, filename_prefix="SerenityFlow", fps=24.0, format="mp4", audio=None):
     import subprocess
     import tempfile
     import numpy as np
     from PIL import Image
+    from serenityflow.nodes.audio import materialize_audio_path
 
     # Use the server's output directory (CWD-relative "output") so /view can serve it
     output_dir = os.path.realpath("output")
@@ -97,9 +100,15 @@ def video_save(images, filename_prefix="SerenityFlow", fps=24.0, format="mp4"):
         cmd = [
             "ffmpeg", "-y", "-framerate", str(fps),
             "-i", os.path.join(tmpdir, "frame_%06d.png"),
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            output_path,
         ]
+        if audio is not None:
+            audio_path = materialize_audio_path(audio)
+            cmd.extend(["-i", audio_path, "-shortest"])
+        cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+        if audio is not None:
+            audio_codec = "libopus" if format.lower() == "webm" else "aac"
+            cmd.extend(["-c:a", audio_codec])
+        cmd.append(output_path)
         subprocess.run(cmd, capture_output=True, check=True)
         log.info("Saved video: %s", output_path)
 
@@ -239,16 +248,22 @@ def video_to_frames(images, start_frame=0, end_frame=-1):
     category="video",
     is_output=True,
     input_types={"required": {
-        "video": ("IMAGE",),
+        "video": ("VIDEO,IMAGE",),
         "filename_prefix": ("STRING",),
         "fps": ("FLOAT",),
         "format": ("STRING",),
+    }, "optional": {
+        "audio": ("AUDIO",),
     }},
 )
-def save_video(video, filename_prefix="SerenityFlow", fps=24.0, format="mp4"):
+def save_video(video, filename_prefix="SerenityFlow", fps=24.0, format="mp4", audio=None):
     # Accept VIDEO dict (from CreateVideo) or raw IMAGE tensor (frames)
     images = video["frames"] if isinstance(video, dict) else video
-    return video_save(images, filename_prefix=filename_prefix, fps=fps, format=format)
+    merged_audio = audio
+    if merged_audio is None and isinstance(video, dict):
+        merged_audio = video.get("audio")
+        fps = float(video.get("fps", fps))
+    return video_save(images, filename_prefix=filename_prefix, fps=fps, format=format, audio=merged_audio)
 
 
 @registry.register(
@@ -258,10 +273,12 @@ def save_video(video, filename_prefix="SerenityFlow", fps=24.0, format="mp4"):
     input_types={"required": {
         "images": ("IMAGE",),
         "fps": ("FLOAT",),
+    }, "optional": {
+        "audio": ("AUDIO",),
     }},
 )
-def create_video(images, fps=24.0):
-    return ({"frames": images, "fps": fps},)
+def create_video(images, fps=24.0, audio=None):
+    return ({"frames": images, "fps": fps, "audio": audio},)
 
 
 @registry.register(

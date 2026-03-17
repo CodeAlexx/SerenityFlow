@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from serenityflow.nodes.registry import registry
 
@@ -15,6 +16,36 @@ def _list_models(folder: str) -> list[str]:
         return folder_paths.get_filename_list(folder)
     except (ImportError, Exception):
         return []
+
+
+def _resolve_clip_path(clip_name: str, clip_type: str) -> str:
+    """Resolve clip assets, allowing repo/path passthrough for newer families."""
+    from serenityflow.bridge.model_paths import get_model_paths
+
+    try:
+        return get_model_paths().find(clip_name, "clip")
+    except FileNotFoundError:
+        candidate = Path(clip_name).expanduser()
+        if (
+            "/" in clip_name
+            or candidate.exists()
+            or clip_type in {"flux2", "klein", "qwen", "zimage"}
+        ):
+            return str(candidate) if candidate.exists() else clip_name
+        raise
+
+
+def _resolve_model_path(model_name: str, folder: str) -> str:
+    """Resolve a model asset, allowing explicit filesystem paths."""
+    from serenityflow.bridge.model_paths import get_model_paths
+
+    try:
+        return get_model_paths().find(model_name, folder)
+    except FileNotFoundError:
+        candidate = Path(model_name).expanduser()
+        if candidate.exists() or "/" in model_name:
+            return str(candidate) if candidate.exists() else model_name
+        raise
 
 
 @registry.register(
@@ -44,9 +75,8 @@ def checkpoint_loader_simple(ckpt_name):
 )
 def unet_loader(unet_name, weight_dtype="default"):
     from serenityflow.bridge.serenity_api import load_diffusion_model
-    from serenityflow.bridge.model_paths import get_model_paths
 
-    path = get_model_paths().find(unet_name, "diffusion_models")
+    path = _resolve_model_path(unet_name, "diffusion_models")
     model = load_diffusion_model(path, dtype=weight_dtype)
     return (model,)
 
@@ -57,14 +87,19 @@ def unet_loader(unet_name, weight_dtype="default"):
     category="loaders",
     input_types=lambda: {"required": {
         "clip_name": (_list_models("clip") or _list_models("text_encoders") or ["(no models found)"],),
-        "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart"],),
+        "type": ([
+            "stable_diffusion", "stable_cascade", "sd3", "stable_audio",
+            "mochi", "ltxv", "pixart", "flux", "flux2", "klein", "wan", "qwen",
+            "lumina", "lumina2", "zimage",
+        ],),
+    }, "optional": {
+        "device": (["default", "cpu", "cuda"],),
     }},
 )
-def clip_loader(clip_name, type="stable_diffusion"):
+def clip_loader(clip_name, type="stable_diffusion", device="default"):
     from serenityflow.bridge.serenity_api import load_clip
-    from serenityflow.bridge.model_paths import get_model_paths
 
-    path = get_model_paths().find(clip_name, "clip")
+    path = _resolve_clip_path(clip_name, type)
     clip = load_clip(path, clip_type=type)
     return (clip,)
 
@@ -77,9 +112,11 @@ def clip_loader(clip_name, type="stable_diffusion"):
         "clip_name1": (_list_models("clip") or _list_models("text_encoders") or ["(no models found)"],),
         "clip_name2": (_list_models("clip") or _list_models("text_encoders") or ["(no models found)"],),
         "type": (["sdxl", "sd3", "flux", "hunyuan_video"],),
+    }, "optional": {
+        "device": (["default", "cpu", "cuda"],),
     }},
 )
-def dual_clip_loader(clip_name1, clip_name2, type="flux"):
+def dual_clip_loader(clip_name1, clip_name2, type="flux", device="default"):
     from serenityflow.bridge.serenity_api import load_dual_clip
     from serenityflow.bridge.model_paths import get_model_paths
 

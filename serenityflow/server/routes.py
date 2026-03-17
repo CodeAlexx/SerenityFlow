@@ -15,6 +15,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 log = logging.getLogger(__name__)
 
+_CANVAS_WORKFLOWS_DIR = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "canvas", "workflows"))
+_WORKFLOW_TEMPLATES_REPO_DIR = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "tests", "workflow_templates", "templates"))
+_TEMPLATE_AUDIT_REPORT_PATH = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "tests", "template_audit_report.json"))
+
 
 class _StripApiPrefixMiddleware(BaseHTTPMiddleware):
     """Strip /api/ prefix from request paths.
@@ -47,6 +51,31 @@ def register_routes(app: FastAPI):
     def _state():
         from serenityflow.server.app import state
         return state
+
+    def _load_template_runnability() -> dict[str, bool]:
+        if not os.path.isfile(_TEMPLATE_AUDIT_REPORT_PATH):
+            return {}
+        try:
+            with open(_TEMPLATE_AUDIT_REPORT_PATH, "r", encoding="utf-8") as handle:
+                report = json.load(handle)
+        except Exception:
+            return {}
+
+        template_status = report.get("template_status")
+        if not isinstance(template_status, dict):
+            return {}
+
+        result: dict[str, bool] = {}
+        for rel_path, status in template_status.items():
+            if not isinstance(rel_path, str) or not isinstance(status, dict):
+                continue
+            runnable = bool(status.get("runnable", True))
+            if rel_path.startswith("templates/"):
+                rel_path = rel_path[len("templates/"):]
+            result[rel_path.replace("\\", "/")] = runnable
+        return result
+
+    template_runnability = _load_template_runnability()
 
     # Add /api/ prefix middleware BEFORE routes
     app.add_middleware(_StripApiPrefixMiddleware)
@@ -612,18 +641,42 @@ def register_routes(app: FastAPI):
 
     @app.get("/templates")
     async def list_templates():
-        templates_dir = os.path.join(os.path.dirname(__file__), "..", "canvas", "workflows")
-        templates_dir = os.path.realpath(templates_dir)
-        if not os.path.isdir(templates_dir):
-            return JSONResponse([])
-        files = sorted(
-            f for f in os.listdir(templates_dir)
-            if f.endswith(".json") and os.path.isfile(os.path.join(templates_dir, f))
-        )
         result = []
-        for f in files:
-            name = os.path.splitext(f)[0].replace("_", " ").title()
-            result.append({"name": name, "file": f})
+        seen_urls = set()
+
+        def _collect(dir_path: str, url_prefix: str) -> None:
+            if not os.path.isdir(dir_path):
+                return
+            for root, dirs, files in os.walk(dir_path):
+                dirs[:] = sorted(d for d in dirs if d and not d.startswith("."))
+                files.sort()
+                for filename in files:
+                    if filename.startswith(".") or not filename.lower().endswith(".json"):
+                        continue
+                    full_path = os.path.join(root, filename)
+                    rel_path = os.path.relpath(full_path, dir_path)
+                    rel_url = rel_path.replace(os.sep, "/")
+                    if url_prefix == "workflow_templates" and template_runnability.get(rel_url) is False:
+                        continue
+                    url = f"{url_prefix}/{rel_url}"
+                    if url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    base_name = os.path.splitext(rel_url)[0]
+                    display_name = base_name.replace("/", " ").replace("_", " ")
+                    display_name = " ".join(display_name.split())
+                    if display_name:
+                        display_name = display_name.title()
+                    else:
+                        display_name = os.path.splitext(filename)[0]
+                    result.append({
+                        "name": display_name,
+                        "file": rel_url,
+                        "url": url,
+                    })
+
+        _collect(_CANVAS_WORKFLOWS_DIR, "workflows")
+        _collect(_WORKFLOW_TEMPLATES_REPO_DIR, "workflow_templates")
         return JSONResponse(result)
 
     # === SerenityFlow extensions ===
@@ -766,6 +819,13 @@ def register_routes(app: FastAPI):
                     StaticFiles(directory=subpath),
                     name=f"canvas_{subdir}",
                 )
+
+        if os.path.isdir(_WORKFLOW_TEMPLATES_REPO_DIR):
+            app.mount(
+                "/workflow_templates",
+                StaticFiles(directory=_WORKFLOW_TEMPLATES_REPO_DIR),
+                name="workflow_templates",
+            )
 
         # Serve loose files from canvas root
         @app.get("/{filename:path}")

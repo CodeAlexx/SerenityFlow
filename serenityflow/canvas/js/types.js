@@ -54,6 +54,14 @@ function getCategoryColor(category) {
     return SF_CATEGORY_COLORS[base] || SF_CATEGORY_COLORS._default;
 }
 function typesCompatible(outputType, inputType) {
+    const outputTypes = String(outputType || '').split(',').map(function (t) { return t.trim(); }).filter(Boolean);
+    const inputTypes = String(inputType || '').split(',').map(function (t) { return t.trim(); }).filter(Boolean);
+    if (outputTypes.length === 0 || inputTypes.length === 0)
+        return false;
+    if (outputTypes.includes('*') || inputTypes.includes('*'))
+        return true;
+    if (outputTypes.some(function (outType) { return inputTypes.includes(outType); }))
+        return true;
     if (outputType === '*' || inputType === '*')
         return true;
     if (outputType === inputType)
@@ -62,6 +70,10 @@ function typesCompatible(outputType, inputType) {
         'INT': ['FLOAT'],
         'FLOAT': ['INT'],
     };
-    return (compatible[outputType] || []).includes(inputType);
+    return outputTypes.some(function (outType) {
+        return inputTypes.some(function (inType) {
+            return (compatible[outType] || []).includes(inType);
+        });
+    });
 }
 //# sourceMappingURL=types.js.map

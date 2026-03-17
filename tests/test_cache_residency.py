@@ -74,6 +74,22 @@ class TestCacheOffload:
         assert cached is not None
         assert cached.signature == "sig1"
 
+    def test_offload_updates_tuple_and_dict_outputs(self, monkeypatch):
+        """Offload must replace tensors inside tuple/dict-backed outputs."""
+        budget = _budget(100)
+        cache = CacheStore(budget=budget)
+        cache.set("node1", ({"samples": torch.randn(2, 2)},), {}, "sig1")
+
+        def fake_transform(outputs, *, to_cpu):
+            assert to_cpu is True
+            return (({"samples": "cpu-copy"},), 16)
+
+        monkeypatch.setattr(CacheStore, "_transform_tensors", staticmethod(fake_transform))
+
+        freed = cache.offload_to_cpu("node1")
+        assert freed == 16
+        assert cache.get("node1").outputs == ({"samples": "cpu-copy"},)
+
 
 class TestCacheRestore:
     def test_ensure_gpu_reallocates(self):
@@ -96,6 +112,23 @@ class TestCacheRestore:
         allocated = budget.current_allocated
         cache.ensure_gpu("node1")  # Should be no-op
         assert budget.current_allocated == allocated
+
+    def test_ensure_gpu_restores_tuple_and_dict_outputs(self, monkeypatch):
+        """Restore must replace tensors inside tuple/dict-backed outputs."""
+        budget = _budget(100)
+        cache = CacheStore(budget=budget)
+        cache.set("node1", ({"samples": torch.randn(2, 2)},), {}, "sig1")
+        cache._tensor_locations["node1"] = "cpu_pinned"
+
+        def fake_transform(outputs, *, to_cpu):
+            assert to_cpu is False
+            return (({"samples": "gpu-copy"},), 0)
+
+        monkeypatch.setattr(CacheStore, "_transform_tensors", staticmethod(fake_transform))
+
+        cache.ensure_gpu("node1")
+        assert cache.get("node1").outputs == ({"samples": "gpu-copy"},)
+        assert cache.get_location("node1") == "gpu"
 
 
 class TestPressureEvict:

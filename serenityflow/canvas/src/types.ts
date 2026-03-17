@@ -61,11 +61,21 @@ function getCategoryColor(category: string | null | undefined): string {
 }
 
 function typesCompatible(outputType: string, inputType: string): boolean {
+    const outputTypes = String(outputType || '').split(',').map(function(t) { return t.trim(); }).filter(Boolean);
+    const inputTypes = String(inputType || '').split(',').map(function(t) { return t.trim(); }).filter(Boolean);
+    if (outputTypes.length === 0 || inputTypes.length === 0) return false;
+    if (outputTypes.includes('*') || inputTypes.includes('*')) return true;
+    if (outputTypes.some(function(outType) { return inputTypes.includes(outType); })) return true;
+
     if (outputType === '*' || inputType === '*') return true;
     if (outputType === inputType) return true;
     const compatible: Record<string, string[]> = {
         'INT': ['FLOAT'],
         'FLOAT': ['INT'],
     };
-    return (compatible[outputType] || []).includes(inputType);
+    return outputTypes.some(function(outType) {
+        return inputTypes.some(function(inType) {
+            return (compatible[outType] || []).includes(inType);
+        });
+    });
 }

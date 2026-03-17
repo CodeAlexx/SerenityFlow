@@ -56,9 +56,19 @@
         {
           "name": "frames",
           "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "video",
+          "type": "VIDEO",
           "links": [
             2
           ]
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": null
         }
       ],
       "properties": {},
@@ -93,7 +103,7 @@
       "inputs": [
         {
           "name": "video",
-          "type": "IMAGE",
+          "type": "VIDEO",
           "link": 2
         }
       ],
@@ -118,10 +128,10 @@
     {
       "id": 2,
       "origin_id": 2,
-      "origin_slot": 0,
+      "origin_slot": 1,
       "target_id": 3,
       "target_slot": 0,
-      "type": "IMAGE"
+      "type": "VIDEO"
     }
   ],
   "groups": [],

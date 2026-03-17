@@ -181,6 +181,34 @@ class TestStandaloneWithoutStagehand:
             mp.find("nonexistent.safetensors", "checkpoints")
 
 
+class TestRelaxedLookup:
+    def test_relaxed_lookup_resolves_flux_variant_name(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("serenityflow.bridge.model_paths._HAS_UNIFIED", False)
+        unified_base = str(tmp_path / "unified")
+        ckpt_dir = Path(unified_base) / "checkpoints"
+        ckpt_dir.mkdir(parents=True)
+        model_file = ckpt_dir / "flux-2-klein-base-4b.safetensors"
+        model_file.touch()
+
+        mp = _make_model_paths(tmp_path, monkeypatch, unified_base=unified_base)
+        result = mp.find("flux2-klein-4b.safetensors", "diffusion_models")
+        assert result == str(model_file)
+
+    def test_relaxed_lookup_reports_ambiguous_wan_variants(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("serenityflow.bridge.model_paths._HAS_UNIFIED", False)
+        unified_base = str(tmp_path / "unified")
+        ckpt_dir = Path(unified_base) / "checkpoints"
+        ckpt_dir.mkdir(parents=True)
+        low = ckpt_dir / "wan2.2_t2v_low_noise_14b_fp16.safetensors"
+        high = ckpt_dir / "wan2.2_t2v_high_noise_14b_fp16.safetensors"
+        low.touch()
+        high.touch()
+
+        mp = _make_model_paths(tmp_path, monkeypatch, unified_base=unified_base)
+        with pytest.raises(FileNotFoundError, match="Candidates"):
+            mp.find("wan2.2_14B_t2v.safetensors", "diffusion_models")
+
+
 class TestResolverCheckedFirst:
     """Unified resolver is checked BEFORE legacy dir walk."""
 

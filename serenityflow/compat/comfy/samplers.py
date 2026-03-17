@@ -17,7 +17,7 @@ SAMPLER_NAMES = [
     "dpmpp_sde", "dpmpp_sde_gpu",
     "dpmpp_2m", "dpmpp_2m_cfg_pp", "dpmpp_2m_sde", "dpmpp_2m_sde_gpu",
     "dpmpp_3m_sde", "dpmpp_3m_sde_gpu",
-    "ddpm", "lcm", "ipndm", "ipndm_v", "deis", "res_momentumized",
+    "ddpm", "lcm", "ipndm", "ipndm_v", "deis", "res_momentumized", "res_multistep",
     "ddim", "uni_pc", "uni_pc_bh2",
 ]
 

@@ -377,3 +377,59 @@ def clip_save(clip, filename_prefix="clip"):
 def vae_save(vae, filename_prefix="vae"):
     # TODO: bridge.save_vae()
     raise NotImplementedError("VAESave requires bridge.save_vae()")
+
+
+@registry.register(
+    "ReferenceLatent",
+    return_types=("CONDITIONING",),
+    category="conditioning",
+    input_types={"required": {
+        "conditioning": ("CONDITIONING",),
+        "latent": ("LATENT",),
+    }},
+)
+def reference_latent(conditioning, latent):
+    """Attach a reference latent to conditioning for Flux2/Klein image editing.
+
+    The model reads the reference through attention — the latent is packed
+    into the conditioning dict so the sampler can concatenate reference tokens
+    with noise tokens during each forward pass.
+    """
+    from serenityflow.bridge.types import unwrap_latent
+    ref = unwrap_latent(latent)
+    out = []
+    for c in conditioning:
+        n = dict(c)
+        n["reference_latent"] = ref
+        out.append(n)
+    return (out,)
+
+
+@registry.register(
+    "TextEncodeQwenImageEditPlus",
+    return_types=("CONDITIONING",),
+    category="conditioning",
+    input_types={"required": {
+        "clip": ("CLIP",),
+        "text": ("STRING", {"multiline": True}),
+        "image": ("IMAGE",),
+    }},
+)
+def text_encode_qwen_image_edit_plus(clip, text, image):
+    """Encode text + image together for Qwen image edit models.
+
+    Qwen edit models expect the source image context alongside the edit
+    instruction for conditional generation.
+    """
+    from serenityflow.bridge.serenity_api import encode_text
+    from serenityflow.bridge.types import bhwc_to_bchw
+
+    conditioning = encode_text(clip, text)
+    # Attach the source image to conditioning for the edit model
+    image_bchw = bhwc_to_bchw(image) if image.ndim == 4 and image.shape[-1] in (1, 3, 4) else image
+    out = []
+    for c in conditioning:
+        n = dict(c)
+        n["edit_image"] = image_bchw
+        out.append(n)
+    return (out,)

@@ -20,7 +20,7 @@ from serenityflow.core.budget import MemoryBudget, ResidencyClass
 @dataclass
 class CachedOutput:
     """Cached result from a node execution."""
-    outputs: tuple
+    outputs: Any
     ui: dict
     signature: str
 
@@ -48,7 +48,7 @@ class CacheStore:
             self._access_order.append(node_id)
         return cached
 
-    def set(self, node_id: str, outputs: tuple, ui: dict, signature: str) -> None:
+    def set(self, node_id: str, outputs: Any, ui: dict, signature: str) -> None:
         """Store node output with its cache signature."""
         # Release old budget allocation if overwriting
         if node_id in self._tensor_locations and self.budget is not None:
@@ -113,7 +113,7 @@ class CacheStore:
         if cached is None or self._tensor_locations.get(node_id) != "gpu":
             return 0
 
-        freed = self._move_tensors_to_cpu(cached.outputs)
+        cached.outputs, freed = self._move_tensors_to_cpu(cached.outputs)
         if self.budget is not None:
             self.budget.release(f"cache:{node_id}")
         self._tensor_locations[node_id] = "cpu_pinned"
@@ -127,7 +127,7 @@ class CacheStore:
         loc = self._tensor_locations.get(node_id, "cpu")
         if loc == "gpu":
             return
-        self._move_tensors_to_gpu(cached.outputs)
+        cached.outputs = self._move_tensors_to_gpu(cached.outputs)
         tensor_bytes = self._tensor_bytes(cached.outputs)
         if self.budget is not None and tensor_bytes > 0:
             self.budget.allocate(
@@ -165,79 +165,97 @@ class CacheStore:
     @staticmethod
     def _has_tensors(outputs) -> bool:
         """Check if outputs contain any tensors."""
-        if isinstance(outputs, torch.Tensor):
-            return True
-        if isinstance(outputs, (list, tuple)):
-            for item in outputs:
-                if isinstance(item, torch.Tensor):
-                    return True
-                if isinstance(item, (list, tuple)):
-                    for sub in item:
-                        if isinstance(sub, torch.Tensor):
-                            return True
-        return False
+        found = False
+
+        def visit(value):
+            nonlocal found
+            if found:
+                return
+            if isinstance(value, torch.Tensor):
+                found = True
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    visit(item)
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+
+        visit(outputs)
+        return found
 
     @staticmethod
     def _tensor_bytes(outputs) -> int:
         """Sum bytes of all tensors in outputs."""
         total = 0
-        if isinstance(outputs, torch.Tensor):
-            return outputs.nelement() * outputs.element_size()
-        if isinstance(outputs, (list, tuple)):
-            for item in outputs:
-                if isinstance(item, torch.Tensor):
-                    total += item.nelement() * item.element_size()
-                elif isinstance(item, (list, tuple)):
-                    for sub in item:
-                        if isinstance(sub, torch.Tensor):
-                            total += sub.nelement() * sub.element_size()
+
+        def visit(value):
+            nonlocal total
+            if isinstance(value, torch.Tensor):
+                total += value.nelement() * value.element_size()
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    visit(item)
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+
+        visit(outputs)
         return total
 
     @staticmethod
-    def _move_tensors_to_cpu(outputs) -> int:
+    def _move_tensors_to_cpu(outputs) -> tuple[Any, int]:
         """Walk output structure, move GPU tensors to CPU pinned. Returns bytes freed."""
-        freed = 0
-        if isinstance(outputs, (list, tuple)):
-            for i, item in enumerate(outputs):
-                if isinstance(item, torch.Tensor) and item.is_cuda:
-                    nbytes = item.nelement() * item.element_size()
-                    cpu_tensor = torch.empty(
-                        item.shape, dtype=item.dtype, pin_memory=True,
-                    )
-                    cpu_tensor.copy_(item)
-                    # Replace in-place (requires mutable container)
-                    if isinstance(outputs, list):
-                        outputs[i] = cpu_tensor
-                    freed += nbytes
-                elif isinstance(item, (list, tuple)):
-                    for j, sub in enumerate(item):
-                        if isinstance(sub, torch.Tensor) and sub.is_cuda:
-                            nbytes = sub.nelement() * sub.element_size()
-                            cpu_tensor = torch.empty(
-                                sub.shape, dtype=sub.dtype, pin_memory=True,
-                            )
-                            cpu_tensor.copy_(sub)
-                            if isinstance(item, list):
-                                item[j] = cpu_tensor
-                            freed += nbytes
-        return freed
+        moved, freed = CacheStore._transform_tensors(outputs, to_cpu=True)
+        return moved, freed
 
     @staticmethod
-    def _move_tensors_to_gpu(outputs) -> None:
+    def _move_tensors_to_gpu(outputs) -> Any:
         """Walk output structure, move CPU tensors to GPU."""
+        moved, _ = CacheStore._transform_tensors(outputs, to_cpu=False)
+        return moved
+
+    @staticmethod
+    def _transform_tensors(outputs, *, to_cpu: bool):
+        """Recursively transform tensors while preserving container types."""
+        freed = 0
         device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        if isinstance(outputs, (list, tuple)):
-            for i, item in enumerate(outputs):
-                if isinstance(item, torch.Tensor) and not item.is_cuda:
-                    gpu_tensor = item.to(device, non_blocking=True)
-                    if isinstance(outputs, list):
-                        outputs[i] = gpu_tensor
-                elif isinstance(item, (list, tuple)):
-                    for j, sub in enumerate(item):
-                        if isinstance(sub, torch.Tensor) and not sub.is_cuda:
-                            gpu_tensor = sub.to(device, non_blocking=True)
-                            if isinstance(item, list):
-                                item[j] = gpu_tensor
+
+        def transform(value):
+            nonlocal freed
+            if isinstance(value, torch.Tensor):
+                if to_cpu:
+                    if not value.is_cuda:
+                        return value
+                    nbytes = value.nelement() * value.element_size()
+                    cpu_tensor = torch.empty(
+                        value.shape,
+                        dtype=value.dtype,
+                        pin_memory=True,
+                    )
+                    cpu_tensor.copy_(value)
+                    freed += nbytes
+                    return cpu_tensor
+
+                if value.is_cuda:
+                    return value
+                return value.to(device, non_blocking=True)
+
+            if isinstance(value, dict):
+                return {k: transform(v) for k, v in value.items()}
+
+            if isinstance(value, list):
+                return [transform(item) for item in value]
+
+            if isinstance(value, tuple):
+                return tuple(transform(item) for item in value)
+
+            return value
+
+        return transform(outputs), freed
 
 
 def compute_signature(
