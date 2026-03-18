@@ -2601,6 +2601,77 @@ def _default_ltxv_distilled_lora_candidates(checkpoint_path: str) -> tuple[str, 
     return ("ltx-2-19b-distilled-lora-384.safetensors",)
 
 
+def _desktop_fast_ltx_checkpoint_candidates(checkpoint_path: str) -> tuple[str, ...]:
+    """Map experimental scaled-FP8 requests to the desktop-style 22B checkpoints."""
+    name = Path(checkpoint_path).name.lower()
+    if not _ltx_checkpoint_looks_23(name) or "fp8" not in name:
+        return ()
+    return ("ltx-2.3-22b-distilled.safetensors",)
+
+
+def _should_prefer_desktop_fast_ltx_checkpoint(checkpoint_path: str, backend: str) -> bool:
+    if backend == "official":
+        return False
+    if os.environ.get("SERENITY_LTX_SCALED_FP8_EXPERIMENTAL", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    if not _desktop_fast_ltx_checkpoint_candidates(checkpoint_path):
+        return False
+    if not _checkpoint_has_weight_scales(checkpoint_path):
+        return False
+    if not torch.cuda.is_available():
+        return False
+    try:
+        total_memory = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
+    except Exception:
+        return False
+    return total_memory <= 26 * (1024**3)
+
+
+def _maybe_prefer_desktop_fast_ltx_checkpoint(checkpoint_path: str, backend: str) -> str:
+    """Prefer the desktop-style 22B non-FP8 path on 24GB-class GPUs."""
+    if not _should_prefer_desktop_fast_ltx_checkpoint(checkpoint_path, backend):
+        return checkpoint_path
+
+    candidates = _desktop_fast_ltx_checkpoint_candidates(checkpoint_path)
+    sibling_root = Path(checkpoint_path).expanduser().resolve().parent
+
+    def _exact_named_candidate(candidate_name: str) -> str | None:
+        sibling = sibling_root / candidate_name
+        if sibling.is_file():
+            return str(sibling)
+
+        try:
+            from serenityflow.bridge.model_paths import get_model_paths
+
+            paths = get_model_paths()
+            for base_dir in paths.dirs.get("diffusion_models", []):
+                candidate = Path(base_dir) / candidate_name
+                if candidate.is_file():
+                    return str(candidate)
+        except Exception:
+            pass
+
+        return _resolve_ltxv_asset_from_hf_cache(candidate_name)
+
+    for candidate_name in candidates:
+        resolved = _exact_named_candidate(candidate_name)
+        if resolved is None or _checkpoint_has_weight_scales(resolved):
+            continue
+        logger.info(
+            "24GB fast path: rerouting experimental scaled-FP8 checkpoint %s -> %s",
+            Path(checkpoint_path).name,
+            Path(resolved).name,
+        )
+        logger.info("Set SERENITY_LTX_SCALED_FP8_EXPERIMENTAL=1 to force the scaled-FP8 runtime")
+        return resolved
+
+    logger.warning(
+        "24GB fast path wanted to reroute %s, but no non-FP8 22B checkpoint was found; keeping the scaled-FP8 path",
+        Path(checkpoint_path).name,
+    )
+    return checkpoint_path
+
+
 def _hf_hub_root() -> Path:
     hub_cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
     if hub_cache:
@@ -2944,11 +3015,12 @@ def _inject_fp8_weight_scales(model: torch.nn.Module, checkpoint_path: str) -> i
 
 
 def _dequant_scaled_fp8_weights(model: torch.nn.Module, checkpoint_path: str) -> int:
-    """Dequantize scaled FP8 weights in-place: weight.data = fp8_raw * weight_scale.
+    """Dequantize scaled FP8 weights in-place from the raw checkpoint tensors.
 
     Re-reads the original FP8 values and scale factors from the safetensors file
     and writes correctly dequantized bf16 values into the model parameters.
     """
+    from serenityflow.bridge.fp8_dequant import dequantize_fp8
     from safetensors import safe_open
 
     try:
@@ -2986,7 +3058,7 @@ def _dequant_scaled_fp8_weights(model: torch.nn.Module, checkpoint_path: str) ->
 
             fp8_weight = f.get_tensor(weight_key)
             scale = f.get_tensor(key)
-            dequanted = fp8_weight.to(torch.bfloat16) * scale.to(torch.bfloat16)
+            dequanted = dequantize_fp8(fp8_weight, scale, out_dtype=torch.bfloat16)
             param.data = dequanted
             fixed += 1
 
@@ -3018,13 +3090,26 @@ _LTX_ERIQUANT_FP8_EXCLUDES = (
 
 def _ltx_scaled_fp8_runtime_backend() -> str:
     """Choose the runtime path for scaled FP8 LTX checkpoints."""
+    requested = (os.getenv("SERENITY_LTX_SCALED_FP8_BACKEND") or "").strip().lower()
+    if requested in {"dequant_bf16", "bf16", "dequant"}:
+        return "dequant_bf16"
+    if requested == "eriquant_fp8":
+        return "eriquant_fp8"
+    if requested:
+        logger.warning(
+            "Unknown SERENITY_LTX_SCALED_FP8_BACKEND=%r; falling back to dequant_bf16",
+            requested,
+        )
+
     try:
         from serenity.inference.quantization.eriquant_backend import is_available as eriquant_available
     except Exception:
         eriquant_available = None
 
+    # Default to plain bf16 runtime for scaled checkpoints. It is the most
+    # faithful fallback on current hardware, and eriquant remains opt-in.
     if eriquant_available is not None and eriquant_available():
-        return "eriquant_fp8"
+        logger.info("Scaled FP8 runtime defaulting to dequant_bf16; set SERENITY_LTX_SCALED_FP8_BACKEND=eriquant_fp8 to opt in")
     return "dequant_bf16"
 
 
@@ -3687,6 +3772,7 @@ def load_ltxv_model(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     resolved_checkpoint = _resolve_ltxv_asset(checkpoint_path, "diffusion_models") or checkpoint_path
+    resolved_checkpoint = _maybe_prefer_desktop_fast_ltx_checkpoint(resolved_checkpoint, backend)
     resolved_gemma = _resolve_ltxv_gemma_root(gemma_path)
     resolved_spatial_upsampler = (
         _resolve_ltxv_asset(spatial_upsampler_path, "upscale_models", *_default_ltxv_spatial_upsampler_candidates(resolved_checkpoint))
@@ -3843,6 +3929,17 @@ def _move_non_blocks_to_device(root_module, block_container, device, *, preserve
                     parent._buffers[parts[1]] = buf.to(device, non_blocking=True)
                 else:
                     root_module._buffers[name] = buf.to(device, non_blocking=True)
+
+
+def _module_has_fp8_params(module: torch.nn.Module) -> bool:
+    """Return True when a module still carries raw FP8 parameters."""
+    fp8_dtypes = set()
+    try:
+        fp8_dtypes.add(torch.float8_e4m3fn)
+        fp8_dtypes.add(torch.float8_e5m2)
+    except AttributeError:
+        pass
+    return any(param.dtype in fp8_dtypes for param in module.parameters())
 
 
 def _move_module_to_device(module, device, dtype=torch.bfloat16):
@@ -4373,7 +4470,8 @@ def sample_ltxv(
 
     xfm_inner = _unwrap_to_blocks(transformer)
 
-    _move_non_blocks_to_device(transformer, xfm_inner, device, preserve_fp8=model.is_scaled_fp8)
+    preserve_fp8_non_blocks = _module_has_fp8_params(transformer)
+    _move_non_blocks_to_device(transformer, xfm_inner, device, preserve_fp8=preserve_fp8_non_blocks)
     transformer.requires_grad_(False)
 
     # Decide: direct GPU load vs Stagehand.
@@ -4390,6 +4488,7 @@ def sample_ltxv(
     )
 
     if not use_direct_gpu:
+        _move_non_blocks_to_device(transformer, xfm_inner, device, preserve_fp8=preserve_fp8_non_blocks)
         xfm_runtime = StagehandRuntime(
             model=xfm_inner,
             config=_stagehand_config_xfm(),
@@ -4627,7 +4726,8 @@ def sample_ltxv(
             )
 
         xfm_inner2 = _unwrap_to_blocks(transformer2)
-        _move_non_blocks_to_device(transformer2, xfm_inner2, device, preserve_fp8=model.is_scaled_fp8)
+        preserve_fp8_non_blocks2 = _module_has_fp8_params(transformer2)
+        _move_non_blocks_to_device(transformer2, xfm_inner2, device, preserve_fp8=preserve_fp8_non_blocks2)
         transformer2.requires_grad_(False)
 
         # Direct GPU vs Stagehand for stage 2
@@ -4641,6 +4741,7 @@ def sample_ltxv(
             stage_label="Stage 2",
         )
         if not use_direct_gpu2:
+            _move_non_blocks_to_device(transformer2, xfm_inner2, device, preserve_fp8=preserve_fp8_non_blocks2)
             xfm_runtime2 = StagehandRuntime(
                 model=xfm_inner2,
                 config=_stagehand_config_xfm(),

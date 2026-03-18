@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from collections import namedtuple
+from types import ModuleType
 
 import torch
 from transformers import Gemma3Config
@@ -11,10 +13,13 @@ from ltx_core.text_encoders.gemma.config import GEMMA3_CONFIG_FOR_LTX
 from serenityflow.bridge import model_paths
 from serenityflow.bridge.serenity_api import (
     _build_ltxv_stage2_ledger,
+    _desktop_fast_ltx_checkpoint_candidates,
     _default_ltxv_distilled_lora_candidates,
     _ltx_gemma_weight_bytes,
     _ltx_gemma_rope_profiles,
+    _maybe_prefer_desktop_fast_ltx_checkpoint,
     _prepare_ltx_scaled_fp8_transformer_for_runtime,
+    _ltx_scaled_fp8_runtime_backend,
     _ltx_text_encoder_device_candidates,
     _ltx_prepare_gemma_token_pairs,
     _materialize_ltxv_audio_path,
@@ -27,6 +32,32 @@ from serenityflow.bridge.serenity_api import (
     _should_try_cuda_for_full_ltx_text_encoder,
     _should_use_official_ltx_backend,
 )
+
+
+def _install_fake_eriquant_backend(
+    monkeypatch,
+    *,
+    is_available=lambda: True,
+    quantize_model_eriquant=None,
+):
+    serenity_mod = ModuleType("serenity")
+    inference_mod = ModuleType("serenity.inference")
+    quantization_mod = ModuleType("serenity.inference.quantization")
+    eriquant_mod = ModuleType("serenity.inference.quantization.eriquant_backend")
+
+    eriquant_mod.is_available = is_available
+    eriquant_mod.quantize_model_eriquant = quantize_model_eriquant or (lambda model, **kwargs: None)
+
+    serenity_mod.inference = inference_mod
+    inference_mod.quantization = quantization_mod
+    quantization_mod.eriquant_backend = eriquant_mod
+
+    monkeypatch.setitem(sys.modules, "serenity", serenity_mod)
+    monkeypatch.setitem(sys.modules, "serenity.inference", inference_mod)
+    monkeypatch.setitem(sys.modules, "serenity.inference.quantization", quantization_mod)
+    monkeypatch.setitem(sys.modules, "serenity.inference.quantization.eriquant_backend", eriquant_mod)
+
+    return eriquant_mod
 
 
 def test_ltx_gemma_rope_profiles_handle_nested_transformers_config():
@@ -248,9 +279,9 @@ def test_prepare_ltx_scaled_fp8_transformer_for_runtime_uses_eriquant(monkeypatc
         "serenityflow.bridge.serenity_api._ltx_scaled_fp8_runtime_backend",
         lambda: "eriquant_fp8",
     )
-    monkeypatch.setattr(
-        "serenity.inference.quantization.eriquant_backend.quantize_model_eriquant",
-        lambda model, **kwargs: calls.append(("eriquant", type(model).__name__, kwargs)),
+    _install_fake_eriquant_backend(
+        monkeypatch,
+        quantize_model_eriquant=lambda model, **kwargs: calls.append(("eriquant", type(model).__name__, kwargs)),
     )
 
     backend = _prepare_ltx_scaled_fp8_transformer_for_runtime(
@@ -264,6 +295,20 @@ def test_prepare_ltx_scaled_fp8_transformer_for_runtime_uses_eriquant(monkeypatc
     assert calls[0] == ("dequant", "Linear", "/tmp/fake.safetensors")
     assert calls[1][0] == "eriquant"
     assert calls[1][2]["mode"] == "eriquant_fp8"
+
+
+def test_ltx_scaled_fp8_runtime_backend_defaults_to_dequant_bf16(monkeypatch):
+    monkeypatch.delenv("SERENITY_LTX_SCALED_FP8_BACKEND", raising=False)
+    _install_fake_eriquant_backend(monkeypatch, is_available=lambda: True)
+
+    assert _ltx_scaled_fp8_runtime_backend() == "dequant_bf16"
+
+
+def test_ltx_scaled_fp8_runtime_backend_honors_eriquant_override(monkeypatch):
+    monkeypatch.setenv("SERENITY_LTX_SCALED_FP8_BACKEND", "eriquant_fp8")
+    _install_fake_eriquant_backend(monkeypatch, is_available=lambda: False)
+
+    assert _ltx_scaled_fp8_runtime_backend() == "eriquant_fp8"
 
 
 def test_wrap_official_ltx_ledger_transformer_cpu_stage_cpu_stages_and_prepares_runtime(monkeypatch):
@@ -433,3 +478,80 @@ def test_materialize_ltxv_audio_path_passthrough_for_loadaudio_dict(tmp_path, mo
             "sample_rate": None,
         }
     ) == str(clip)
+
+
+def test_desktop_fast_ltx_checkpoint_candidates_match_23_fp8_names():
+    assert _desktop_fast_ltx_checkpoint_candidates("/tmp/ltx-2.3-22b-dev-fp8.safetensors") == (
+        "ltx-2.3-22b-distilled.safetensors",
+    )
+    assert _desktop_fast_ltx_checkpoint_candidates("/tmp/ltx-2.3-22b-distilled-fp8.safetensors") == (
+        "ltx-2.3-22b-distilled.safetensors",
+    )
+    assert _desktop_fast_ltx_checkpoint_candidates("/tmp/ltx-2-19b-dev-fp8.safetensors") == ()
+
+
+def test_maybe_prefer_desktop_fast_ltx_checkpoint_uses_sibling_checkpoint(tmp_path, monkeypatch):
+    requested = tmp_path / "ltx-2.3-22b-dev-fp8.safetensors"
+    sibling = tmp_path / "ltx-2.3-22b-distilled.safetensors"
+    requested.write_bytes(b"fp8")
+    sibling.write_bytes(b"bf16")
+
+    monkeypatch.delenv("SERENITY_LTX_SCALED_FP8_EXPERIMENTAL", raising=False)
+    monkeypatch.setattr(
+        "serenityflow.bridge.serenity_api._checkpoint_has_weight_scales",
+        lambda path: path.endswith("-fp8.safetensors"),
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _device: SimpleNamespace(total_memory=24 * 1024**3),
+    )
+
+    assert _maybe_prefer_desktop_fast_ltx_checkpoint(str(requested), "auto") == str(sibling)
+
+
+def test_maybe_prefer_desktop_fast_ltx_checkpoint_honors_experimental_env(tmp_path, monkeypatch):
+    requested = tmp_path / "ltx-2.3-22b-dev-fp8.safetensors"
+    requested.write_bytes(b"fp8")
+
+    monkeypatch.setenv("SERENITY_LTX_SCALED_FP8_EXPERIMENTAL", "1")
+    monkeypatch.setattr("serenityflow.bridge.serenity_api._checkpoint_has_weight_scales", lambda _path: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _device: SimpleNamespace(total_memory=24 * 1024**3),
+    )
+
+    assert _maybe_prefer_desktop_fast_ltx_checkpoint(str(requested), "auto") == str(requested)
+
+
+def test_maybe_prefer_desktop_fast_ltx_checkpoint_uses_exact_non_fp8_fallback(tmp_path, monkeypatch):
+    requested = tmp_path / "ltx-2.3-22b-dev-fp8.safetensors"
+    requested.write_bytes(b"fp8")
+    distilled = tmp_path / "ltx-2.3-22b-distilled.safetensors"
+    distilled.write_bytes(b"bf16")
+
+    monkeypatch.delenv("SERENITY_LTX_SCALED_FP8_EXPERIMENTAL", raising=False)
+    monkeypatch.setattr("serenityflow.bridge.serenity_api._checkpoint_has_weight_scales", lambda path: path.endswith("-fp8.safetensors"))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _device: SimpleNamespace(total_memory=24 * 1024**3),
+    )
+    monkeypatch.setattr(
+        "serenityflow.bridge.serenity_api._resolve_ltxv_asset_from_hf_cache",
+        lambda name: str(distilled) if name == "ltx-2.3-22b-distilled.safetensors" else None,
+    )
+
+    class FakePaths:
+        dirs = {"diffusion_models": []}
+
+    monkeypatch.setattr("serenityflow.bridge.model_paths.get_model_paths", lambda: FakePaths())
+
+    assert _maybe_prefer_desktop_fast_ltx_checkpoint(str(requested), "auto") == str(distilled)

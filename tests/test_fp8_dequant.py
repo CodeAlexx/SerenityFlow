@@ -5,6 +5,7 @@ import torch
 import pytest
 
 from serenityflow.bridge.fp8_dequant import (
+    dequantize_fp8,
     dequant_scaled_fp8,
     dequant_scaled_fp8_in_model,
     has_fp8_scales,
@@ -99,8 +100,7 @@ class TestDequantScaledFp8:
         assert result["blocks.0.weight"].dtype == torch.bfloat16
         # Bias unchanged
         assert result["blocks.0.bias"].dtype == torch.bfloat16
-        # Dequanted values should be approximately fp8 * scale
-        expected = fp8_w.to(torch.bfloat16) * scale.to(torch.bfloat16)
+        expected = dequantize_fp8(fp8_w, scale)
         assert torch.allclose(result["blocks.0.weight"], expected)
 
     def test_flux_dequant(self):
@@ -113,8 +113,33 @@ class TestDequantScaledFp8:
 
         assert "blocks.0.attn.to_q.scale_weight" not in result
         assert result["blocks.0.attn.to_q.weight"].dtype == torch.bfloat16
-        expected = fp8_w.to(torch.bfloat16) * scale.to(torch.bfloat16)
+        expected = dequantize_fp8(fp8_w, scale)
         assert torch.allclose(result["blocks.0.attn.to_q.weight"], expected)
+
+    def test_dequantize_fp8_handles_rowwise_scale(self):
+        fp8_w, _ = _make_fp8_weight((8, 4), scale_value=1.0)
+        row_scale = torch.linspace(0.1, 0.8, 8, dtype=torch.float32).unsqueeze(-1)
+
+        expected = (fp8_w.to(torch.float32) * row_scale).to(torch.bfloat16)
+
+        assert torch.allclose(dequantize_fp8(fp8_w, row_scale), expected)
+
+    def test_dequantize_fp8_repairs_flat_row_scale(self):
+        fp8_w, _ = _make_fp8_weight((8, 4), scale_value=1.0)
+        row_scale = torch.linspace(0.1, 0.8, 8, dtype=torch.float32)
+
+        expected = (fp8_w.to(torch.float32) * row_scale.unsqueeze(-1)).to(torch.bfloat16)
+
+        assert torch.allclose(dequantize_fp8(fp8_w, row_scale), expected)
+
+    def test_dequantize_fp8_expands_blockwise_scale(self):
+        fp8_w, _ = _make_fp8_weight((4, 4), scale_value=1.0)
+        block_scale = torch.tensor([[0.5, 1.0], [1.5, 2.0]], dtype=torch.float32)
+        expanded = block_scale.repeat_interleave(2, dim=0).repeat_interleave(2, dim=1)
+
+        expected = (fp8_w.to(torch.float32) * expanded).to(torch.bfloat16)
+
+        assert torch.allclose(dequantize_fp8(fp8_w, block_scale), expected)
 
     def test_removes_input_scale_keys(self):
         fp8_w, scale = _make_fp8_weight()
@@ -159,7 +184,7 @@ class TestDequantScaledFp8InModel:
         from safetensors.torch import save_file
 
         fp8_w, scale = _make_fp8_weight((16, 16), scale_value=0.25)
-        expected = fp8_w.to(torch.bfloat16) * scale.to(torch.bfloat16)
+        expected = dequantize_fp8(fp8_w, scale)
 
         # Save FP8 checkpoint
         checkpoint = {

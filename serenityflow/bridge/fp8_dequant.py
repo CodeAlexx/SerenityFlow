@@ -18,6 +18,7 @@ import torch
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "dequantize_fp8",
     "dequant_scaled_fp8",
     "dequant_scaled_fp8_in_model",
     "has_fp8_scales",
@@ -34,6 +35,49 @@ except AttributeError:
 
 def _is_fp8(tensor: torch.Tensor) -> bool:
     return tensor.dtype in _FP8_DTYPES
+
+
+def _maybe_expand_scale_to_tensor_shape(scale: torch.Tensor, target_shape: torch.Size | tuple[int, ...]) -> torch.Tensor:
+    """Expand per-tensor / per-row / blockwise scales to match a weight tensor."""
+    target_shape = tuple(target_shape)
+    if scale.shape == target_shape or scale.numel() == 1:
+        return scale
+
+    # Common weight-only layouts: [out] -> [out, 1], [in] -> [1, in]
+    if scale.dim() == 1 and len(target_shape) == 2:
+        if scale.shape[0] == target_shape[0]:
+            return scale.unsqueeze(-1)
+        if scale.shape[0] == target_shape[1]:
+            return scale.unsqueeze(0)
+
+    expanded = scale
+    while expanded.dim() < len(target_shape):
+        expanded = expanded.unsqueeze(-1)
+
+    if all(src == dst or src == 1 for src, dst in zip(expanded.shape, target_shape, strict=True)):
+        return expanded
+
+    for dim, (src, dst) in enumerate(zip(expanded.shape, target_shape, strict=True)):
+        if src == dst:
+            continue
+        if src <= 0 or dst % src != 0:
+            raise ValueError(f"Cannot expand FP8 scale shape {tuple(scale.shape)} to {target_shape}")
+        expanded = expanded.repeat_interleave(dst // src, dim=dim)
+    return expanded
+
+
+def dequantize_fp8(
+    fp8_weight: torch.Tensor,
+    scale: torch.Tensor,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Dequantize an FP8 weight tensor following torchao's weight-only contract."""
+    weight_f32 = fp8_weight.to(torch.float32)
+    scale_f32 = _maybe_expand_scale_to_tensor_shape(scale, weight_f32.shape).to(
+        device=weight_f32.device,
+        dtype=torch.float32,
+    )
+    return (weight_f32 * scale_f32).to(out_dtype)
 
 
 def _find_scale_pairs(keys: list[str]) -> dict[str, str]:
@@ -75,7 +119,7 @@ def dequant_scaled_fp8(state_dict: dict[str, Any], target_dtype: torch.dtype = t
     """Dequant scaled FP8 weights in a state dict, in-place.
 
     For each weight+scale pair:
-      dequanted = fp8_weight.to(target_dtype) * scale.to(target_dtype)
+      dequanted = (fp8_weight.to(float32) * expanded_scale.to(float32)).to(target_dtype)
 
     Removes scale keys and input_scale/scale_input keys from the dict.
     Returns the same dict (modified in-place) for convenience.
@@ -92,7 +136,7 @@ def dequant_scaled_fp8(state_dict: dict[str, Any], target_dtype: torch.dtype = t
         scale = state_dict[scale_key]
 
         if _is_fp8(weight):
-            state_dict[weight_key] = weight.to(target_dtype) * scale.to(target_dtype)
+            state_dict[weight_key] = dequantize_fp8(weight, scale, out_dtype=target_dtype)
             dequanted_count += 1
         elif weight.dtype in (torch.float16, torch.bfloat16, torch.float32):
             # Already cast (e.g. by diffusers from_single_file) — but values are wrong.
@@ -179,7 +223,7 @@ def dequant_scaled_fp8_in_model(
             if not _is_fp8(fp8_weight):
                 continue
 
-            dequanted = fp8_weight.to(target_dtype) * scale.to(target_dtype)
+            dequanted = dequantize_fp8(fp8_weight, scale, out_dtype=target_dtype)
             param.data = dequanted.to(device=param.device)
             fixed += 1
 
