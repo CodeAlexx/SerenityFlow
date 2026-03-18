@@ -13,12 +13,19 @@ class SFCanvas {
         this._mmSize = 0;
         this._mmMoveHandler = null;
         this._mmUpHandler = null;
+        // DOM-level panning. Stage stays draggable:false so it can't
+        // conflict with Konva node drag.
+        this._isPanning = false;
+        this._panStartX = 0;
+        this._panStartY = 0;
+        this._stageStartX = 0;
+        this._stageStartY = 0;
         this.container = document.getElementById(containerId);
         this.stage = new Konva.Stage({
             container: containerId,
             width: this.container.offsetWidth,
             height: this.container.offsetHeight,
-            draggable: true,
+            draggable: false,
         });
         // Layers (order matters: grid behind connections behind nodes)
         this.gridLayer = new Konva.Layer({ listening: false });
@@ -95,55 +102,70 @@ class SFCanvas {
         ro.observe(this.container);
     }
     _setupStageDrag() {
-        // Redraw grid on pan
-        this.stage.on('dragmove', () => {
-            this._drawGrid();
-        });
-        // Prevent stage drag when dragging a node
-        this.stage.on('mousedown', (e) => {
-            // Space-pan overrides: always allow drag when space is held
-            if (this._spaceDown) {
-                this.stage.draggable(true);
+        const container = this.stage.container();
+        container.addEventListener('mousedown', (e) => {
+            // Middle mouse always pans
+            if (e.button === 1) {
+                this._startPan(e);
+                e.preventDefault();
                 return;
             }
-            // Only allow stage drag if clicking on empty space or grid
-            const clickedOnEmpty = e.target === this.stage || e.target.getLayer() === this.gridLayer;
-            this.stage.draggable(clickedOnEmpty);
+            // Space+left-click pans
+            if (e.button === 0 && this._spaceDown) {
+                this._startPan(e);
+                return;
+            }
+        });
+        // Left-click on empty space pans (Konva event — fires after node handlers)
+        this.stage.on('mousedown', (e) => {
+            if (e.evt.button !== 0 || this._spaceDown)
+                return;
+            // Only pan if click hit the stage itself (empty space)
+            if (e.target === this.stage) {
+                this._startPan(e.evt);
+            }
+        });
+        container.addEventListener('mousemove', (e) => {
+            if (!this._isPanning)
+                return;
+            this.stage.position({
+                x: this._stageStartX + (e.clientX - this._panStartX),
+                y: this._stageStartY + (e.clientY - this._panStartY),
+            });
+            this._drawGrid();
+            this.stage.batchDraw();
+        });
+        container.addEventListener('mouseup', () => {
+            if (this._isPanning) {
+                this._isPanning = false;
+                this.stage.container().style.cursor = '';
+                this._updateMinimap();
+            }
         });
     }
-    // Middle mouse button panning (InvokeAI pattern)
+    _startPan(e) {
+        this._isPanning = true;
+        this._panStartX = e.clientX;
+        this._panStartY = e.clientY;
+        this._stageStartX = this.stage.x();
+        this._stageStartY = this.stage.y();
+        this.stage.container().style.cursor = 'grabbing';
+    }
     _setupMiddleMousePan() {
-        this.stage.on('mousedown', (e) => {
-            if (e.evt.button === 1) { // middle click
-                e.evt.preventDefault();
-                this.stage.draggable(true);
-                this.stage.container().style.cursor = 'grabbing';
-            }
-        });
-        this.stage.on('mouseup', (e) => {
-            if (e.evt.button === 1) {
-                this.stage.container().style.cursor = '';
-            }
-        });
-        this.stage.on('dragend', () => {
-            this.stage.container().style.cursor = '';
-            this._updateMinimap();
-        });
+        // consolidated into _setupStageDrag
     }
     // Space-to-pan: enable temporary pan mode
     startSpacePan() {
         if (this._spaceDown)
             return;
         this._spaceDown = true;
-        this._prePanDraggable = this.stage.draggable();
-        this.stage.draggable(true);
+        this._prePanDraggable = false;
         this.stage.container().style.cursor = 'grab';
     }
     endSpacePan() {
         if (!this._spaceDown)
             return;
         this._spaceDown = false;
-        this.stage.draggable(this._prePanDraggable);
         this.stage.container().style.cursor = '';
     }
     _drawGrid() {

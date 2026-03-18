@@ -76,11 +76,11 @@ class SFNode {
         this.width = this._calcWidth();
         this.height = 0; // calculated during build
 
-        // Konva group — NOT draggable (manual drag to avoid stealing port events)
+        // Konva group — draggable. Port clicks are filtered in dragstart.
         this.group = new Konva.Group({
             x: x,
             y: y,
-            draggable: false,
+            draggable: true,
         });
 
         this._selected = false;
@@ -99,77 +99,21 @@ class SFNode {
     }
 
     _setupManualDrag(): void {
-        // Listen on the group for mousedown, but only drag if the click target
-        // is a direct child (body/header rect), NOT a port sub-group child
-        this.group.on('mousedown', (e: Konva.KonvaEventObject<MouseEvent>) => {
-            // If a connection drag is active, don't start node drag
-            if (this.canvas.draggingConnection) return;
+        this.group.on('dragstart', () => {
+            this.canvas.selectNode(this.id, false);
+        });
 
-            // Check if the click target belongs to a port sub-group
-            // Port groups are nested: group -> portGroup -> hitCircle/circle/text
-            // Direct children of this.group that are Konva.Group are port groups
-            const target = e.target;
-            let parent = target.getParent();
+        this.group.on('dragmove', () => {
+            this.x = this.group.x();
+            this.y = this.group.y();
+            this.canvas.connectionLayer.batchDraw();
+        });
 
-            // Walk up to see if any ancestor (before this.group) is a port/widget sub-group
-            while (parent && parent !== this.group) {
-                // If parent is a sub-group inside our node group, this click is on a port/widget
-                if (parent.getParent() === this.group && parent instanceof Konva.Group) {
-                    return; // Don't drag — let the port handle it
-                }
-                parent = parent.getParent();
-            }
-
-            // This click is on the body/header — start manual drag
-            e.cancelBubble = true;
-            this.canvas.stage.draggable(false);
-            this.canvas.selectNode(this.id, e.evt.ctrlKey || e.evt.metaKey);
-
-            const stage = this.canvas.stage;
-            const pointer = stage.getPointerPosition();
-            if (!pointer) return;
-
-            const stagePos = stage.position();
-            const scale = stage.scaleX();
-            const startWorldX = (pointer.x - stagePos.x) / scale;
-            const startWorldY = (pointer.y - stagePos.y) / scale;
-            const startNodeX = this.group.x();
-            const startNodeY = this.group.y();
-
-            this._isDragging = true;
-
-            const onMouseMove = (evt: MouseEvent): void => {
-                if (!this._isDragging) return;
-                const p = stage.getPointerPosition();
-                if (!p) return;
-                const sp = stage.position();
-                const sc = stage.scaleX();
-                const worldX = (p.x - sp.x) / sc;
-                const worldY = (p.y - sp.y) / sc;
-
-                const newX = startNodeX + (worldX - startWorldX);
-                const newY = startNodeY + (worldY - startWorldY);
-
-                this.group.x(newX);
-                this.group.y(newY);
-                this.x = newX;
-                this.y = newY;
-                this.canvas.nodeLayer.batchDraw();
-                // Update connections
-                this.canvas.connectionLayer.batchDraw();
-            };
-
-            const onMouseUp = (): void => {
-                this._isDragging = false;
-                window.removeEventListener('mousemove', onMouseMove);
-                window.removeEventListener('mouseup', onMouseUp);
-                // Snap to grid on drop
-                this.canvas.snapNodeToGrid(this);
-                this.canvas._updateMinimap();
-            };
-
-            window.addEventListener('mousemove', onMouseMove);
-            window.addEventListener('mouseup', onMouseUp);
+        this.group.on('dragend', () => {
+            this.x = this.group.x();
+            this.y = this.group.y();
+            this.canvas.snapNodeToGrid(this);
+            this.canvas._updateMinimap();
         });
     }
 
@@ -379,7 +323,7 @@ class SFNode {
             height: NODE_HEADER_HEIGHT,
             fill: headerColor,
             cornerRadius: this._collapsed ? 4 : [4, 4, 0, 0] as any,
-            listening: false,
+            listening: true,
         });
         this.group.add(header);
 

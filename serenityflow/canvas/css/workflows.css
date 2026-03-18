@@ -147,6 +147,8 @@
     border-radius: 8px;
     padding: 6px;
     min-width: 220px;
+    max-height: 70vh;
+    overflow-y: auto;
     z-index: 150;
     box-shadow: var(--shadow-lg);
 }

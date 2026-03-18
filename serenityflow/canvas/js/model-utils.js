@@ -54,7 +54,7 @@ var ModelUtils = (function () {
             return 'qwen';
         if (f.includes('zimage') || f.includes('z-image') || f.includes('z_image'))
             return 'zimage';
-        if (f.includes('flux') || f.includes('f1d') || f.includes('f1s'))
+        if (f.includes('flux') || f.includes('flex') || f.includes('f1d') || f.includes('f1s'))
             return 'flux';
         if (f.includes('sd3') || f.includes('stable-diffusion-3') || f.includes('sd_3'))
             return 'sd3';
@@ -66,6 +66,8 @@ var ModelUtils = (function () {
             return 'wan';
         if (f.includes('klein'))
             return 'klein';
+        if (f.includes('hunyuan') || f.includes('capybara'))
+            return 'hunyuan';
         return 'sd15';
     }
     // Check if a detected architecture is a video model
@@ -112,7 +114,7 @@ var ModelUtils = (function () {
     function isMainModel(name) {
         var lower = name.toLowerCase();
         // Skip files inside subdirectories that are clearly sub-components
-        if (/\/(text_encoder|clip|tokenizer|vae|scheduler|feature_extractor)\//.test(name))
+        if (/\/(text_encoder|clip|tokenizer|vae|scheduler|feature_extractor|vision_encoder|transformer)\//.test(name))
             return false;
         // Skip sharded model parts (model-00001-of-00004.safetensors)
         if (/model-\d+-of-\d+/.test(lower))
@@ -124,6 +126,9 @@ var ModelUtils = (function () {
             return false;
         // Skip individual training checkpoints (transformer-0001, etc.)
         if (/transformer-\d{4}/.test(lower))
+            return false;
+        // Skip diffusers subdirectory components (e.g. capybara/transformer/model.safetensors)
+        if (/\/transformer\//.test(name))
             return false;
         return true;
     }

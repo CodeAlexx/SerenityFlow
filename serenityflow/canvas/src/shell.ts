@@ -366,8 +366,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Restore mode (default: advanced).
     // setMode('advanced') internally calls switchTab to restore the saved tab.
-    var savedMode = localStorage.getItem('sf-mode') || (typeof Settings !== 'undefined' ? Settings.get('defaultMode') : 'advanced');
-    setMode(savedMode);
+    // Always use Advanced mode — Simple mode removed.
+    setMode('advanced');
 
     // Restore saved extra model directories, then warm object_info cache
     var savedDirs: string[] = [];

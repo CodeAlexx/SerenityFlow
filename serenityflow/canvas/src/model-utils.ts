@@ -14,7 +14,7 @@ interface ModelUtilEntry {
     loader: 'checkpoint' | 'unet';
 }
 
-type ArchType = 'sd15' | 'flux' | 'sd3' | 'sdxl' | 'ltxv' | 'wan' | 'klein' | 'qwen' | 'zimage';
+type ArchType = 'sd15' | 'flux' | 'sd3' | 'sdxl' | 'ltxv' | 'wan' | 'klein' | 'qwen' | 'zimage' | 'hunyuan';
 
 type ObjectInfo = ComfyObjectInfo | null;
 
@@ -77,12 +77,13 @@ var ModelUtils: ModelUtilsAPI = (function(): ModelUtilsAPI {
         var f: string = filename.toLowerCase();
         if (f.includes('qwen')) return 'qwen';
         if (f.includes('zimage') || f.includes('z-image') || f.includes('z_image')) return 'zimage';
-        if (f.includes('flux') || f.includes('f1d') || f.includes('f1s')) return 'flux';
+        if (f.includes('flux') || f.includes('flex') || f.includes('f1d') || f.includes('f1s')) return 'flux';
         if (f.includes('sd3') || f.includes('stable-diffusion-3') || f.includes('sd_3')) return 'sd3';
         if (f.includes('sdxl') || f.includes('xl') || f.includes('pony') || f.includes('illustrious')) return 'sdxl';
         if (f.includes('ltx') || f.includes('ltxv')) return 'ltxv';
         if (f.includes('wan')) return 'wan';
         if (f.includes('klein')) return 'klein';
+        if (f.includes('hunyuan') || f.includes('capybara')) return 'hunyuan';
         return 'sd15';
     }
 
@@ -137,7 +138,7 @@ var ModelUtils: ModelUtilsAPI = (function(): ModelUtilsAPI {
     function isMainModel(name: string): boolean {
         var lower: string = name.toLowerCase();
         // Skip files inside subdirectories that are clearly sub-components
-        if (/\/(text_encoder|clip|tokenizer|vae|scheduler|feature_extractor)\//.test(name)) return false;
+        if (/\/(text_encoder|clip|tokenizer|vae|scheduler|feature_extractor|vision_encoder|transformer)\//.test(name)) return false;
         // Skip sharded model parts (model-00001-of-00004.safetensors)
         if (/model-\d+-of-\d+/.test(lower)) return false;
         // Skip upscalers and loras mixed in
@@ -145,6 +146,8 @@ var ModelUtils: ModelUtilsAPI = (function(): ModelUtilsAPI {
         if (/[\-_]lora[\-_\.]/.test(lower)) return false;
         // Skip individual training checkpoints (transformer-0001, etc.)
         if (/transformer-\d{4}/.test(lower)) return false;
+        // Skip diffusers subdirectory components (e.g. capybara/transformer/model.safetensors)
+        if (/\/transformer\//.test(name)) return false;
         return true;
     }
 

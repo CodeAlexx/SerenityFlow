@@ -676,7 +676,6 @@ def register_routes(app: FastAPI):
                     })
 
         _collect(_CANVAS_WORKFLOWS_DIR, "workflows")
-        _collect(_WORKFLOW_TEMPLATES_REPO_DIR, "workflow_templates")
         return JSONResponse(result)
 
     # === SerenityFlow extensions ===
@@ -805,6 +804,18 @@ def register_routes(app: FastAPI):
 
     if _use_canvas:
         from fastapi.staticfiles import StaticFiles
+        from starlette.middleware.base import BaseHTTPMiddleware
+
+        class NoCacheStaticMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request, call_next):
+                response = await call_next(request)
+                if request.url.path.startswith(("/js/", "/css/")):
+                    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                    if "etag" in response.headers:
+                        del response.headers["etag"]
+                return response
+
+        app.add_middleware(NoCacheStaticMiddleware)
 
         @app.get("/")
         async def serve_index():

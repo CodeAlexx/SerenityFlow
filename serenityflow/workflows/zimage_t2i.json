@@ -63,8 +63,8 @@
             "negative": ["6", 0],
             "latent_image": ["7", 0],
             "seed": 42,
-            "steps": 4,
-            "cfg": 1,
+            "steps": 8,
+            "cfg": 1.5,
             "sampler_name": "res_multistep",
             "scheduler": "simple",
             "denoise": 1.0

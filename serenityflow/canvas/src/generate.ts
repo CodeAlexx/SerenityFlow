@@ -260,7 +260,7 @@ var GenerateTab = (function() {
 
     var videoAspects = [
         { label: 'Free', w: 0,    h: 0,    vw: 16, vh: 16 },
-        { label: '1:1',  w: 512, h: 512, vw: 16, vh: 16 },
+        { label: '1:1',  w: 768, h: 768, vw: 16, vh: 16 },
         { label: '4:3',  w: 768, h: 576, vw: 18, vh: 14 },
         { label: '3:2',  w: 768, h: 512, vw: 18, vh: 12 },
         { label: '16:9', w: 768, h: 432, vw: 20, vh: 11 },
@@ -1679,10 +1679,10 @@ var GenerateTab = (function() {
         var isFlux = arch === 'flux' || arch === 'klein';
         var isVideo = arch === 'ltxv' || arch === 'wan';
 
-        // Neg prompt: hide for flux and video
-        els.negSection!.style.display = (isFlux || isVideo) ? 'none' : 'block';
-        // CFG: hide for flux and video
-        els.cfgRow!.style.display = (isFlux || isVideo) ? 'none' : 'flex';
+        // Neg prompt: hide for flux only (video needs it for CFG)
+        els.negSection!.style.display = isFlux ? 'none' : 'block';
+        // CFG: hide for flux only (video uses CFG 3.0)
+        els.cfgRow!.style.display = isFlux ? 'none' : 'flex';
         // Guidance: flux only
         els.guidanceRow!.style.display = isFlux ? 'flex' : 'none';
         // Video controls
@@ -1742,11 +1742,13 @@ var GenerateTab = (function() {
             els.aspectDropdown.value = '1:1';
         }
 
-        // Select first non-Free aspect ratio for the new mode
+        // Select default aspect ratio for the new mode
         var aspects = getActiveAspects();
         if (aspects.length > 1) {
-            // Pick the second entry (first non-Free, which is 1:1)
-            var defaultAspect = aspects[1] || aspects[0];
+            // For video: pick 3:2 (768x512) as default; for image: 1:1
+            var defaultIdx = isVideo ? aspects.findIndex(function(a) { return a.label === '3:2'; }) : 1;
+            if (defaultIdx < 0) defaultIdx = 1;
+            var defaultAspect = aspects[defaultIdx] || aspects[0];
             state.width = defaultAspect.w;
             state.height = defaultAspect.h;
             syncDimensionInputs();
@@ -1754,7 +1756,14 @@ var GenerateTab = (function() {
             updateAspectPreview();
         }
 
-        if (isVideo) updateDurationHint();
+        // Set video-appropriate defaults
+        if (isVideo) {
+            state.cfg = 3.0;
+            state.frames = Math.min(state.frames, 129);
+            if (els.cfg) els.cfg.value = '3.0';
+            if (els.cfgRange) els.cfgRange.value = '3.0';
+            updateDurationHint();
+        }
     }
 
     function updateDurationHint() {
@@ -2284,8 +2293,8 @@ var GenerateTab = (function() {
 
         // Group by architecture
         var groups: Record<string, ModelUtilEntry[]> = {};
-        var groupOrder = ['flux', 'sdxl', 'sd3', 'sd15', 'ltxv', 'wan', 'klein', 'other'];
-        var groupLabels: Record<string, string> = { flux: 'FLUX', sdxl: 'SDXL', sd3: 'SD3', sd15: 'SD 1.5', ltxv: 'Video (LTX)', wan: 'Video (WAN)', klein: 'KLEIN', other: 'Other' };
+        var groupOrder = ['flux', 'sdxl', 'sd3', 'zimage', 'qwen', 'klein', 'hunyuan', 'sd15', 'ltxv', 'wan', 'other'];
+        var groupLabels: Record<string, string> = { flux: 'FLUX', sdxl: 'SDXL', sd3: 'SD3', zimage: 'Z-IMAGE', qwen: 'QWEN', klein: 'KLEIN', hunyuan: 'HUNYUAN', sd15: 'SD 1.5', ltxv: 'Video (LTX)', wan: 'Video (WAN)', other: 'Other' };
 
         filtered.forEach(function(m: ModelUtilEntry) {
             var arch = ModelUtils.detectArchFromFilename(m.name) || 'other';

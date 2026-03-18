@@ -2741,7 +2741,7 @@ def _resolve_ltxv_asset(path: str | None, folder: str, *fallback_names: str) -> 
     return None
 
 
-def _resolve_ltxv_gemma_root(gemma_root_path: str | None) -> str:
+def _resolve_ltxv_gemma_root(gemma_root_path: str | None, *, is_fp8: bool = False) -> str:
     requested = (gemma_root_path or "").strip()
     fallback_names: list[str] = []
     if requested:
@@ -2750,15 +2750,16 @@ def _resolve_ltxv_gemma_root(gemma_root_path: str | None) -> str:
             return str(requested_path)
         fallback_names.append(requested)
     if not requested or "gemma-3-12b-it" in requested:
-        # Fallback order favors standalone (bf16) when no explicit Gemma root
-        # resolves first. GPTQ-4b had builder compatibility issues here, but an
-        # explicit request should still win so users can force it when needed.
-        for candidate in (
+        # Fallback order favors standalone (bf16). GPTQ-4b cannot be loaded
+        # through ltx_core's SingleGPUModelBuilder (unpacks to bf16, corrupts).
+        # TODO: prefer GPTQ-4b for FP8 once a proper quantized load path exists.
+        candidates = (
             "gemma-3-12b-it-standalone",
             "gemma-3-12b-it",
             "gemma-3-12b-it-qat-q4_0-unquantized",
             "gemma-3-12b-it-GPTQ-4b",
-        ):
+        )
+        for candidate in candidates:
             if candidate not in fallback_names:
                 fallback_names.append(candidate)
 
@@ -3595,7 +3596,8 @@ def _sample_ltxv_official(
 
     checkpoint_path = model.checkpoint_path
     resolved_mode = _detect_ltxv_mode(checkpoint_path, mode)
-    gemma_root = _resolve_ltxv_gemma_root(model.gemma_root_path)
+    is_fp8 = "fp8" in (checkpoint_path or "").lower()
+    gemma_root = _resolve_ltxv_gemma_root(model.gemma_root_path, is_fp8=is_fp8)
     spatial_upsampler_path = (
         model.spatial_upsampler_path
         or _resolve_ltxv_asset(None, "upscale_models", *_default_ltxv_spatial_upsampler_candidates(checkpoint_path))
@@ -3773,7 +3775,8 @@ def load_ltxv_model(
 
     resolved_checkpoint = _resolve_ltxv_asset(checkpoint_path, "diffusion_models") or checkpoint_path
     resolved_checkpoint = _maybe_prefer_desktop_fast_ltx_checkpoint(resolved_checkpoint, backend)
-    resolved_gemma = _resolve_ltxv_gemma_root(gemma_path)
+    is_fp8 = "fp8" in (resolved_checkpoint or "").lower()
+    resolved_gemma = _resolve_ltxv_gemma_root(gemma_path, is_fp8=is_fp8)
     resolved_spatial_upsampler = (
         _resolve_ltxv_asset(spatial_upsampler_path, "upscale_models", *_default_ltxv_spatial_upsampler_candidates(resolved_checkpoint))
         if spatial_upsampler_path or checkpoint_path
@@ -4230,6 +4233,10 @@ def sample_ltxv(
     frame_rate: float = 25.0,
     dtype: str = "bfloat16",
     mode: str = "auto",
+    max_shift: float = 2.05,
+    base_shift: float = 0.95,
+    decode_timestep: float = 0.05,
+    decode_noise_scale: float = 0.025,
     guide_image: torch.Tensor | None = None,
     guide_strength: float = 1.0,
     guide_frame_idx: int = 0,
@@ -4262,6 +4269,7 @@ def sample_ltxv(
         cleanup_memory,
         denoise_audio_video,
         denoise_video_only,
+        multi_modal_guider_factory_denoising_func,
         simple_denoising_func,
     )
     from ltx_pipelines.utils.media_io import decode_audio_from_file
@@ -4306,13 +4314,6 @@ def sample_ltxv(
     # Resolve mode from checkpoint name
     resolved_mode = _detect_ltxv_mode(model.checkpoint_path, mode)
     is_dev = resolved_mode == "dev"
-
-    # Safety cap: limit frames to avoid OOM from attention activation memory.
-    # At full resolution, ~39K attention tokens (241 frames) exceeds 24GB VRAM.
-    max_frames = 129  # Safe limit for 24GB GPU at 768x512
-    if num_frames > max_frames:
-        logger.warning("Clamping num_frames from %d to %d to avoid OOM", num_frames, max_frames)
-        num_frames = max_frames
 
     if is_dev:
         # Dev mode: honor the requested step count; higher counts remain user-controlled.
@@ -4512,11 +4513,10 @@ def sample_ltxv(
             MultiModalGuiderParams,
             create_multimodal_guider_factory,
         )
-        from ltx_pipelines.utils.helpers import multi_modal_guider_factory_denoising_func
 
-        sigmas = LTX2Scheduler().execute(steps=steps).to(
-            dtype=torch.float32, device=device,
-        )
+        sigmas = LTX2Scheduler().execute(
+            steps=steps, max_shift=max_shift, base_shift=base_shift,
+        ).to(dtype=torch.float32, device=device)
 
         if stg_blocks is None:
             stg_blocks = [28]  # LTX 2.3 default
@@ -4560,11 +4560,42 @@ def sample_ltxv(
             DISTILLED_SIGMA_VALUES, dtype=torch.float32, device=device,
         )
 
-        base_fn = simple_denoising_func(
-            video_context=video_context,
-            audio_context=audio_context,
-            transformer=transformer,
-        )
+        if stg_scale > 0:
+            # STG in distilled mode: use guider pipeline with cfg_scale=1 (no CFG)
+            from ltx_core.components.guiders import (
+                MultiModalGuiderParams,
+                create_multimodal_guider_factory,
+            )
+            if stg_blocks is None:
+                stg_blocks = [28]  # LTX 2.3 default
+
+            distilled_guider_params = MultiModalGuiderParams(
+                cfg_scale=1.0,
+                stg_scale=stg_scale,
+                stg_blocks=stg_blocks,
+                rescale_scale=stg_rescale,
+            )
+            video_guider_factory = create_multimodal_guider_factory(
+                params=distilled_guider_params,
+            )
+            audio_guider_factory = create_multimodal_guider_factory(
+                params=distilled_guider_params,
+            )
+            base_fn = multi_modal_guider_factory_denoising_func(
+                video_guider_factory=video_guider_factory,
+                audio_guider_factory=audio_guider_factory,
+                v_context=video_context,
+                a_context=audio_context,
+                transformer=transformer,
+            )
+            logger.info("Distilled mode with STG: scale=%.2f, blocks=%s, rescale=%.2f",
+                        stg_scale, stg_blocks, stg_rescale)
+        else:
+            base_fn = simple_denoising_func(
+                video_context=video_context,
+                audio_context=audio_context,
+                transformer=transformer,
+            )
 
     _call = [0]
     n_steps = len(sigmas) - 1
@@ -4849,6 +4880,11 @@ def sample_ltxv(
     # ---------------------------------------------------------------
     logger.info("Decoding video...")
     video_decoder = stage_2_ledger.video_decoder()
+    # Override VAE decode params if caller specified non-default values
+    if hasattr(video_decoder, 'decode_noise_scale'):
+        video_decoder.decode_noise_scale = decode_noise_scale
+    if hasattr(video_decoder, 'decode_timestep'):
+        video_decoder.decode_timestep = decode_timestep
     decoded_video = vae_decode_video(video_state.latent, video_decoder)
     if not isinstance(decoded_video, torch.Tensor):
         decoded_video = torch.cat(list(decoded_video), dim=0)
