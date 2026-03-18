@@ -31,6 +31,8 @@ class SFWidgetManager {
                 return this._createBooleanWidget(node, inputName, inputDef, x, y, width);
             case 'COMBO':
                 return this._createComboWidget(node, inputName, inputDef, x, y, width);
+            case 'IMAGE_PICKER':
+                return this._createImagePickerWidget(node, inputName, inputDef, x, y, width);
             default:
                 return null;
         }
@@ -41,9 +43,12 @@ class SFWidgetManager {
         // inputDef is usually [type, config] from object_info
         if (Array.isArray(inputDef)) {
             const t = inputDef[0];
-            // Combo: array of options
-            if (Array.isArray(t))
+            // Combo: array of options — check if all are media filenames
+            if (Array.isArray(t)) {
+                if (this._isMediaFileList(t))
+                    return 'IMAGE_PICKER';
                 return 'COMBO';
+            }
             if (typeof t === 'string') {
                 const upper = t.toUpperCase();
                 if (upper === 'INT' || upper === 'FLOAT' || upper === 'STRING' || upper === 'BOOLEAN') {
@@ -52,6 +57,21 @@ class SFWidgetManager {
             }
         }
         return null;
+    }
+    _isMediaFileList(options) {
+        if (options.length === 0)
+            return false;
+        // Skip placeholder entries
+        const real = options.filter((o) => typeof o === 'string' && !o.startsWith('('));
+        if (real.length === 0)
+            return false;
+        const mediaExts = ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.gif', '.mp4', '.mov', '.avi', '.mkv'];
+        return real.every(name => {
+            const dot = name.lastIndexOf('.');
+            if (dot < 0)
+                return false;
+            return mediaExts.includes(name.substring(dot).toLowerCase());
+        });
     }
     _getDefault(inputDef) {
         if (Array.isArray(inputDef) && inputDef.length > 1 && inputDef[1]) {
@@ -487,6 +507,217 @@ class SFWidgetManager {
         };
         select.addEventListener('change', finish);
         select.addEventListener('blur', finish);
+    }
+    _createImagePickerWidget(node, inputName, inputDef, x, y, width) {
+        const options = Array.isArray(inputDef[0]) ? inputDef[0] : [];
+        const config = this._getConfig(inputDef);
+        let value = config.default !== undefined ? String(config.default) : (options[0] || '');
+        const THUMB_H = 48;
+        const THUMB_W = 64;
+        const widgetH = THUMB_H + 8;
+        const group = new Konva.Group({ x: x, y: y });
+        const bg = new Konva.Rect({
+            width: width,
+            height: widgetH,
+            fill: '#1a1a35',
+            cornerRadius: 3,
+            listening: true,
+        });
+        // Label
+        const label = new Konva.Text({
+            x: THUMB_W + 12,
+            y: 4,
+            text: inputName,
+            fontSize: 9,
+            fill: '#606070',
+            width: width - THUMB_W - 18,
+            ellipsis: true,
+            wrap: 'none',
+            listening: false,
+        });
+        // Filename text (truncated)
+        const valueText = new Konva.Text({
+            x: THUMB_W + 12,
+            y: 16,
+            text: value || '(none)',
+            fontSize: 10,
+            fill: value ? '#e0e0e0' : '#505060',
+            width: width - THUMB_W - 18,
+            ellipsis: true,
+            wrap: 'none',
+            listening: false,
+        });
+        // Thumbnail placeholder rect
+        const thumbBg = new Konva.Rect({
+            x: 4,
+            y: 4,
+            width: THUMB_W,
+            height: THUMB_H,
+            fill: '#14142a',
+            cornerRadius: 2,
+            listening: false,
+        });
+        group.add(bg);
+        group.add(thumbBg);
+        group.add(label);
+        group.add(valueText);
+        // Konva.Image for the thumbnail
+        let thumbImage = null;
+        const loadThumbnail = (filename) => {
+            if (!filename || filename.startsWith('('))
+                return;
+            const img = new window.Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => {
+                if (thumbImage) {
+                    thumbImage.destroy();
+                }
+                // Fit within THUMB_W x THUMB_H preserving aspect ratio
+                const scale = Math.min(THUMB_W / img.width, THUMB_H / img.height);
+                const drawW = img.width * scale;
+                const drawH = img.height * scale;
+                thumbImage = new Konva.Image({
+                    x: 4 + (THUMB_W - drawW) / 2,
+                    y: 4 + (THUMB_H - drawH) / 2,
+                    image: img,
+                    width: drawW,
+                    height: drawH,
+                    listening: false,
+                });
+                group.add(thumbImage);
+                node.canvas.nodeLayer.batchDraw();
+            };
+            img.src = '/view?filename=' + encodeURIComponent(filename) + '&type=input';
+        };
+        // Load initial thumbnail
+        loadThumbnail(value);
+        bg.on('click', (e) => {
+            e.cancelBubble = true;
+            this._openImagePickerOverlay(node, bg, inputName, value, options, width, (newVal) => {
+                value = newVal;
+                valueText.text(value || '(none)');
+                valueText.fill(value ? '#e0e0e0' : '#505060');
+                loadThumbnail(value);
+                node.setWidgetValue(inputName, value);
+                node.canvas.nodeLayer.batchDraw();
+            });
+        });
+        return {
+            group: group,
+            getValue: () => value,
+            setValue: (v) => {
+                value = String(v);
+                valueText.text(value || '(none)');
+                valueText.fill(value ? '#e0e0e0' : '#505060');
+                loadThumbnail(value);
+            },
+            height: widgetH,
+        };
+    }
+    _openImagePickerOverlay(node, konvaRect, name, currentVal, options, width, onDone) {
+        this.removeOverlay();
+        const pos = this._getOverlayPosition(node, konvaRect);
+        const div = document.createElement('div');
+        div.className = 'widget-overlay image-picker-overlay';
+        div.style.left = pos.x + 'px';
+        div.style.top = pos.y + 'px';
+        // Search bar
+        const searchBar = document.createElement('input');
+        searchBar.type = 'text';
+        searchBar.placeholder = 'Filter...';
+        searchBar.className = 'image-picker-search';
+        // Grid container
+        const grid = document.createElement('div');
+        grid.className = 'image-picker-grid';
+        const mediaExts = ['.mp4', '.mov', '.avi', '.mkv'];
+        const buildGrid = (filter) => {
+            grid.innerHTML = '';
+            const lowerFilter = filter.toLowerCase();
+            const filtered = options.filter(o => !o.startsWith('(') && o.toLowerCase().includes(lowerFilter));
+            for (const filename of filtered) {
+                const item = document.createElement('div');
+                item.className = 'image-picker-item';
+                if (filename === currentVal)
+                    item.classList.add('selected');
+                const ext = filename.substring(filename.lastIndexOf('.')).toLowerCase();
+                const isVideo = mediaExts.includes(ext);
+                if (isVideo) {
+                    // Video icon placeholder
+                    const icon = document.createElement('div');
+                    icon.className = 'image-picker-video-icon';
+                    icon.textContent = '\u25B6';
+                    item.appendChild(icon);
+                }
+                else {
+                    const img = document.createElement('img');
+                    img.src = '/view?filename=' + encodeURIComponent(filename) + '&type=input';
+                    img.loading = 'lazy';
+                    img.alt = filename;
+                    img.onerror = () => { img.style.display = 'none'; };
+                    item.appendChild(img);
+                }
+                const label = document.createElement('div');
+                label.className = 'image-picker-label';
+                label.textContent = filename;
+                label.title = filename;
+                item.appendChild(label);
+                item.addEventListener('click', () => {
+                    this.removeOverlay();
+                    onDone(filename);
+                });
+                grid.appendChild(item);
+            }
+        };
+        searchBar.addEventListener('input', () => buildGrid(searchBar.value));
+        // Upload button
+        const uploadBtn = document.createElement('button');
+        uploadBtn.className = 'image-picker-upload';
+        uploadBtn.textContent = 'Upload...';
+        uploadBtn.addEventListener('click', () => {
+            const fileInput = document.createElement('input');
+            fileInput.type = 'file';
+            fileInput.accept = 'image/*,video/*';
+            fileInput.addEventListener('change', () => {
+                if (!fileInput.files || fileInput.files.length === 0)
+                    return;
+                const file = fileInput.files[0];
+                const formData = new FormData();
+                formData.append('image', file);
+                fetch('/upload/image', { method: 'POST', body: formData })
+                    .then(r => r.json())
+                    .then(data => {
+                    if (data.name) {
+                        // Add to options and select
+                        if (!options.includes(data.name))
+                            options.push(data.name);
+                        this.removeOverlay();
+                        onDone(data.name);
+                    }
+                })
+                    .catch(() => { });
+            });
+            fileInput.click();
+        });
+        // Header row with search + upload
+        const header = document.createElement('div');
+        header.className = 'image-picker-header';
+        header.appendChild(searchBar);
+        header.appendChild(uploadBtn);
+        div.appendChild(header);
+        div.appendChild(grid);
+        document.body.appendChild(div);
+        this.activeOverlay = div;
+        buildGrid('');
+        searchBar.focus();
+        // Close on outside click
+        const onClickOutside = (e) => {
+            if (!div.contains(e.target)) {
+                this.removeOverlay();
+                window.removeEventListener('mousedown', onClickOutside);
+            }
+        };
+        // Defer so the current click doesn't immediately close
+        setTimeout(() => window.addEventListener('mousedown', onClickOutside), 0);
     }
 }
 // Global widget manager

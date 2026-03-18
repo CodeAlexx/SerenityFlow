@@ -99,8 +99,12 @@ class SFNode {
     _extractType(def) {
         if (Array.isArray(def)) {
             const t = def[0];
-            if (Array.isArray(t))
+            if (Array.isArray(t)) {
+                // Detect media file lists → IMAGE_PICKER
+                if (sfWidgets._isMediaFileList(t))
+                    return 'IMAGE_PICKER';
                 return 'COMBO';
+            }
             return String(t);
         }
         return '*';
@@ -116,7 +120,7 @@ class SFNode {
         return undefined;
     }
     _isWidgetType(type) {
-        return ['INT', 'FLOAT', 'STRING', 'BOOLEAN', 'COMBO'].includes(type);
+        return ['INT', 'FLOAT', 'STRING', 'BOOLEAN', 'COMBO', 'IMAGE_PICKER'].includes(type);
     }
     _calcWidth() {
         // Estimate based on name lengths and widget content

@@ -80,6 +80,15 @@ class SFProperties {
                         this.canvas.nodeLayer.batchDraw();
                     });
                 }
+                else if (type === 'IMAGE_PICKER') {
+                    const options = Array.isArray(inp.config) && Array.isArray(inp.config[0]) ? inp.config[0] : [];
+                    this._addImagePicker(valGroup, name, value, options, (v) => {
+                        node.setWidgetValue(name, v);
+                        if (node.widgets[name])
+                            node.widgets[name].setValue(v);
+                        this.canvas.nodeLayer.batchDraw();
+                    });
+                }
             }
         }
         this.panel.classList.remove('hidden');
@@ -187,6 +196,83 @@ class SFProperties {
         row.appendChild(l);
         row.appendChild(v);
         parent.appendChild(row);
+    }
+    _addImagePicker(parent, label, value, options, onChange) {
+        const container = document.createElement('div');
+        container.className = 'prop-image-picker';
+        // Label
+        const l = document.createElement('div');
+        l.className = 'prop-label';
+        l.textContent = label;
+        l.style.marginBottom = '6px';
+        container.appendChild(l);
+        // Preview image
+        const preview = document.createElement('img');
+        preview.className = 'prop-image-preview';
+        if (value && !value.startsWith('(')) {
+            preview.src = '/view?filename=' + encodeURIComponent(value) + '&type=input';
+        }
+        preview.onerror = () => { preview.style.display = 'none'; };
+        container.appendChild(preview);
+        // Dropdown selector
+        const select = document.createElement('select');
+        select.className = 'prop-select';
+        select.style.marginTop = '6px';
+        options.forEach(opt => {
+            const o = document.createElement('option');
+            o.value = opt;
+            o.text = opt;
+            if (opt === value)
+                o.selected = true;
+            select.appendChild(o);
+        });
+        select.addEventListener('change', () => {
+            const newVal = select.value;
+            if (newVal && !newVal.startsWith('(')) {
+                preview.src = '/view?filename=' + encodeURIComponent(newVal) + '&type=input';
+                preview.style.display = '';
+            }
+            else {
+                preview.style.display = 'none';
+            }
+            onChange(newVal);
+        });
+        container.appendChild(select);
+        // Upload button
+        const uploadBtn = document.createElement('button');
+        uploadBtn.className = 'prop-upload-btn';
+        uploadBtn.textContent = 'Upload...';
+        uploadBtn.addEventListener('click', () => {
+            const fileInput = document.createElement('input');
+            fileInput.type = 'file';
+            fileInput.accept = 'image/*,video/*';
+            fileInput.addEventListener('change', () => {
+                if (!fileInput.files || fileInput.files.length === 0)
+                    return;
+                const file = fileInput.files[0];
+                const formData = new FormData();
+                formData.append('image', file);
+                fetch('/upload/image', { method: 'POST', body: formData })
+                    .then(r => r.json())
+                    .then(data => {
+                    if (data.name) {
+                        // Add to dropdown
+                        const o = document.createElement('option');
+                        o.value = data.name;
+                        o.text = data.name;
+                        select.appendChild(o);
+                        select.value = data.name;
+                        preview.src = '/view?filename=' + encodeURIComponent(data.name) + '&type=input';
+                        preview.style.display = '';
+                        onChange(data.name);
+                    }
+                })
+                    .catch(() => { });
+            });
+            fileInput.click();
+        });
+        container.appendChild(uploadBtn);
+        parent.appendChild(container);
     }
 }
 //# sourceMappingURL=properties.js.map

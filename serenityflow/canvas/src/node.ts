@@ -164,7 +164,11 @@ class SFNode {
     _extractType(def: ComfyInputSpec): string {
         if (Array.isArray(def)) {
             const t = def[0];
-            if (Array.isArray(t)) return 'COMBO';
+            if (Array.isArray(t)) {
+                // Detect media file lists → IMAGE_PICKER
+                if ((sfWidgets as any)._isMediaFileList(t)) return 'IMAGE_PICKER';
+                return 'COMBO';
+            }
             return String(t);
         }
         return '*';
@@ -182,7 +186,7 @@ class SFNode {
     }
 
     _isWidgetType(type: string): boolean {
-        return ['INT', 'FLOAT', 'STRING', 'BOOLEAN', 'COMBO'].includes(type);
+        return ['INT', 'FLOAT', 'STRING', 'BOOLEAN', 'COMBO', 'IMAGE_PICKER'].includes(type);
     }
 
     _calcWidth(): number {

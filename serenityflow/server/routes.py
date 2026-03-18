@@ -708,6 +708,32 @@ def register_routes(app: FastAPI):
         enhanced = _enhance_rule_based(prompt, arch)
         return JSONResponse({"enhanced": enhanced, "source": "rules"})
 
+    # === Input file listing ===
+
+    @app.get("/input_files")
+    async def list_input_files():
+        """List media files in the input directory with type metadata."""
+        state = _state()
+        input_dir = state.input_dir
+        if not os.path.isdir(input_dir):
+            return JSONResponse([])
+        image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".gif"}
+        video_exts = {".mp4", ".mov", ".avi", ".mkv"}
+        files = []
+        try:
+            for name in sorted(os.listdir(input_dir)):
+                path = os.path.join(input_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext in image_exts:
+                    files.append({"name": name, "type": "image"})
+                elif ext in video_exts:
+                    files.append({"name": name, "type": "video"})
+        except Exception:
+            pass
+        return JSONResponse(files)
+
     # === Output file management ===
 
     @app.get("/output_files")

@@ -576,6 +576,151 @@ body {
     resize: none;
 }
 
+/* ===== Image Picker Overlay ===== */
+.image-picker-overlay {
+    width: 360px;
+    max-height: 420px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.image-picker-header {
+    display: flex;
+    gap: 6px;
+    padding: 6px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.image-picker-search {
+    flex: 1;
+    background: var(--bg-input) !important;
+    border: 1px solid var(--border) !important;
+    box-shadow: none !important;
+}
+
+.image-picker-upload {
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 4px 10px;
+    font-size: 11px;
+    font-family: var(--font);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all var(--transition);
+}
+
+.image-picker-upload:hover {
+    background: var(--accent-dim);
+    color: var(--text-primary);
+    border-color: var(--accent);
+}
+
+.image-picker-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+    padding: 6px;
+    overflow-y: auto;
+    max-height: 370px;
+}
+
+.image-picker-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    border: 2px solid transparent;
+    padding: 3px;
+    transition: all var(--transition);
+    background: var(--bg-input);
+}
+
+.image-picker-item:hover {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+}
+
+.image-picker-item.selected {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+}
+
+.image-picker-item img {
+    width: 72px;
+    height: 72px;
+    object-fit: cover;
+    border-radius: 2px;
+    background: var(--bg-primary);
+}
+
+.image-picker-video-icon {
+    width: 72px;
+    height: 72px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-primary);
+    border-radius: 2px;
+    color: var(--text-muted);
+    font-size: 24px;
+}
+
+.image-picker-label {
+    font-size: 9px;
+    color: var(--text-muted);
+    text-align: center;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-top: 2px;
+    line-height: 1.2;
+}
+
+/* ===== Properties Image Picker ===== */
+.prop-image-picker {
+    margin-bottom: 8px;
+}
+
+.prop-image-preview {
+    width: 100%;
+    max-height: 200px;
+    object-fit: contain;
+    border-radius: var(--radius-sm);
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    display: block;
+}
+
+.prop-upload-btn {
+    margin-top: 6px;
+    width: 100%;
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 5px 10px;
+    font-size: 11px;
+    font-family: var(--font);
+    cursor: pointer;
+    transition: all var(--transition);
+}
+
+.prop-upload-btn:hover {
+    background: var(--accent-dim);
+    color: var(--text-primary);
+    border-color: var(--accent);
+}
+
 /* ===== Node Execution States ===== */
 .node-executing {
     box-shadow: 0 0 12px var(--executing);
