@@ -18,10 +18,14 @@ import torch
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "can_use_fp8_matmul",
     "dequantize_fp8",
     "dequant_scaled_fp8",
     "dequant_scaled_fp8_in_model",
+    "detect_fp8_format",
+    "fp8_linear_forward",
     "has_fp8_scales",
+    "normalize_fp8_state_dict",
 ]
 
 # FP8 dtypes
@@ -35,6 +39,126 @@ except AttributeError:
 
 def _is_fp8(tensor: torch.Tensor) -> bool:
     return tensor.dtype in _FP8_DTYPES
+
+
+def detect_fp8_format(state_dict: dict[str, Any], prefix: str = "") -> str | None:
+    """Detect which FP8 checkpoint format a state dict uses.
+
+    Returns ``"scaled_fp8_v1"`` (old Lightricks/ComfyUI), ``"comfy_quant_v2"``
+    (ComfyUI v2 metadata format), or ``None`` (not FP8).
+    """
+    scaled_key = f"{prefix}scaled_fp8"
+    if scaled_key in state_dict:
+        return "scaled_fp8_v1"
+    for k in state_dict:
+        if k.startswith(prefix) and k.endswith(".comfy_quant"):
+            return "comfy_quant_v2"
+    return None
+
+
+def normalize_fp8_state_dict(
+    state_dict: dict[str, Any],
+    prefix: str = "",
+    fmt: str | None = None,
+) -> dict[str, Any]:
+    """Normalize either FP8 format to a clean internal representation.
+
+    After normalization:
+    - FP8 weights keep their original dtype
+    - Each FP8 layer has a ``<layer>.weight_scale`` float32 tensor
+    - No stray keys (``scaled_fp8``, ``comfy_quant``, ``scale_weight``, ``scale_input``)
+
+    Returns a new dict (does not mutate the input).
+    """
+    if fmt is None:
+        fmt = detect_fp8_format(state_dict, prefix)
+    if fmt is None:
+        return dict(state_dict)
+
+    out: dict[str, Any] = {}
+
+    if fmt == "scaled_fp8_v1":
+        scaled_key = f"{prefix}scaled_fp8"
+        for k, v in state_dict.items():
+            if k == scaled_key:
+                continue  # drop the marker key
+            if k.endswith(".scale_weight"):
+                layer = k[: -len(".scale_weight")]
+                out[f"{layer}.weight_scale"] = v
+            elif k.endswith(".scale_input"):
+                if v.numel() == 1 and v.item() == 1.0:
+                    continue  # drop trivial input scales
+                layer = k[: -len(".scale_input")]
+                out[f"{layer}.input_scale"] = v
+            else:
+                out[k] = v
+
+    elif fmt == "comfy_quant_v2":
+        for k, v in state_dict.items():
+            if k.endswith(".comfy_quant"):
+                continue  # strip metadata keys
+            out[k] = v
+
+    else:
+        out = dict(state_dict)
+
+    return out
+
+
+def can_use_fp8_matmul() -> bool:
+    """Return ``True`` if the current GPU supports native FP8 matmul (SM >= 8.9)."""
+    if not torch.cuda.is_available():
+        return False
+    props = torch.cuda.get_device_properties(0)
+    return (props.major > 8) or (props.major == 8 and props.minor >= 9)
+
+
+def fp8_linear_forward(
+    input: torch.Tensor,
+    fp8_weight: torch.Tensor,
+    scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Unified forward for FP8 weight layers.
+
+    On SM86 and below: dequant to ``out_dtype`` and run a standard matmul.
+    On SM89+: use ``torch._scaled_mm`` for per-tensor or per-row scales,
+    falling back to dequant for blockwise scales or if ``_scaled_mm`` fails.
+    """
+    # Blockwise scales or no native FP8 → dequant path
+    if not can_use_fp8_matmul() or scale.numel() > fp8_weight.shape[0]:
+        w_dq = dequantize_fp8(fp8_weight, scale, out_dtype)
+        return torch.nn.functional.linear(input.to(out_dtype), w_dq, bias)
+
+    # SM89+ path: per-tensor or per-row via _scaled_mm
+    try:
+        input_f32 = input.to(torch.float32)
+        input_fp8 = input_f32.clamp(-448, 448).to(fp8_weight.dtype)
+        inp_2d = input_fp8.reshape(-1, input_fp8.shape[-1])
+        out_shape = (*input.shape[:-1], fp8_weight.shape[0])
+
+        scale_a = torch.ones(1, device=input.device, dtype=torch.float32).reshape(1, 1)
+        if scale.numel() == 1:
+            scale_b = scale.to(device=input.device, dtype=torch.float32).reshape(1, 1)
+        else:
+            scale_b = scale.to(device=input.device, dtype=torch.float32).reshape(1, -1)
+
+        out = torch._scaled_mm(
+            inp_2d,
+            fp8_weight.t(),
+            scale_a=scale_a,
+            scale_b=scale_b,
+            out_dtype=out_dtype,
+            use_fast_accum=False,
+        )
+        if bias is not None:
+            out = out + bias.to(out_dtype)
+        return out.reshape(out_shape)
+    except Exception:
+        # Fallback to dequant if _scaled_mm fails
+        w_dq = dequantize_fp8(fp8_weight, scale, out_dtype)
+        return torch.nn.functional.linear(input.to(out_dtype), w_dq, bias)
 
 
 def _maybe_expand_scale_to_tensor_shape(scale: torch.Tensor, target_shape: torch.Size | tuple[int, ...]) -> torch.Tensor:

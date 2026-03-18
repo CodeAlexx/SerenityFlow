@@ -2610,21 +2610,9 @@ def _desktop_fast_ltx_checkpoint_candidates(checkpoint_path: str) -> tuple[str, 
 
 
 def _should_prefer_desktop_fast_ltx_checkpoint(checkpoint_path: str, backend: str) -> bool:
-    if backend == "official":
-        return False
-    if os.environ.get("SERENITY_LTX_SCALED_FP8_EXPERIMENTAL", "").strip().lower() in {"1", "true", "yes", "on"}:
-        return False
-    if not _desktop_fast_ltx_checkpoint_candidates(checkpoint_path):
-        return False
-    if not _checkpoint_has_weight_scales(checkpoint_path):
-        return False
-    if not torch.cuda.is_available():
-        return False
-    try:
-        total_memory = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
-    except Exception:
-        return False
-    return total_memory <= 26 * (1024**3)
+    # Disabled: FP8 forward hooks keep weights at FP8 size (~14GB) on GPU.
+    # No need to reroute to distilled bf16 anymore.
+    return False
 
 
 def _maybe_prefer_desktop_fast_ltx_checkpoint(checkpoint_path: str, backend: str) -> str:
@@ -3096,22 +3084,106 @@ def _ltx_scaled_fp8_runtime_backend() -> str:
         return "dequant_bf16"
     if requested == "eriquant_fp8":
         return "eriquant_fp8"
+    if requested in {"fp8_hooks", "hooks", "fp8"}:
+        return "fp8_hooks"
     if requested:
         logger.warning(
-            "Unknown SERENITY_LTX_SCALED_FP8_BACKEND=%r; falling back to dequant_bf16",
+            "Unknown SERENITY_LTX_SCALED_FP8_BACKEND=%r; falling back to fp8_hooks",
             requested,
         )
 
-    try:
-        from serenity.inference.quantization.eriquant_backend import is_available as eriquant_available
-    except Exception:
-        eriquant_available = None
-
-    # Default to plain bf16 runtime for scaled checkpoints. It is the most
-    # faithful fallback on current hardware, and eriquant remains opt-in.
-    if eriquant_available is not None and eriquant_available():
-        logger.info("Scaled FP8 runtime defaulting to dequant_bf16; set SERENITY_LTX_SCALED_FP8_BACKEND=eriquant_fp8 to opt in")
+    # Default: full dequant to bf16. FP8 hooks have grid artifacts — need debugging.
+    # TODO: fix FP8 hooks for ComfyUI-style per-layer dequant
     return "dequant_bf16"
+
+
+def _install_fp8_forward_hooks(model: torch.nn.Module, checkpoint_path: str) -> int:
+    """Install per-layer FP8 dequant hooks. Keeps weights as FP8 (~14GB) on GPU.
+
+    For each Linear layer with a scaled FP8 weight:
+    - Stores the original FP8 weight and scale as attributes
+    - Installs a forward pre-hook that dequants weight → bf16 before the forward
+    - Installs a forward hook that restores the FP8 weight after the forward
+
+    This way the model stays at FP8 size in VRAM and dequants per-layer on-the-fly,
+    matching ComfyUI's approach.
+    """
+    from serenityflow.bridge.fp8_dequant import dequantize_fp8
+    from safetensors import safe_open
+
+    try:
+        inner = _unwrap_to_blocks(model)
+    except AttributeError:
+        inner = model
+        for attr in ("velocity_model", "model"):
+            if hasattr(inner, attr):
+                inner = getattr(inner, attr)
+                break
+
+    hooked = 0
+    with safe_open(checkpoint_path, framework="pt") as f:
+        for key in f.keys():
+            if not key.endswith(".weight_scale"):
+                continue
+            weight_key = key.removesuffix("_scale")
+            if weight_key not in f.keys():
+                continue
+
+            module_path = weight_key.replace("model.diffusion_model.", "")
+            parts = module_path.rsplit(".", 1)
+            if len(parts) != 2:
+                continue
+            parent_path, attr_name = parts
+
+            try:
+                parent = inner.get_submodule(parent_path)
+            except (AttributeError, torch.nn.modules.module.ModuleAttributeError):
+                continue
+
+            if not isinstance(parent, nn.Linear):
+                # The attr_name is "weight", so parent_path is the Linear module
+                pass
+
+            param = getattr(parent, attr_name, None)
+            if param is None or not isinstance(param, (torch.Tensor, nn.Parameter)):
+                continue
+
+            fp8_weight = f.get_tensor(weight_key)
+            scale = f.get_tensor(key)
+
+            # Store FP8 weight and scale as plain attributes
+            parent._fp8_weight = fp8_weight
+            parent._fp8_scale = scale
+
+            # Replace param data with FP8 weight (keeps model at ~14GB FP8 size)
+            param.data = fp8_weight
+
+            def _make_pre_hook(mod):
+                def _pre_hook(module, args):
+                    w = module._fp8_weight
+                    s = module._fp8_scale
+                    # Move to weight's device on first use
+                    if w.device != module.weight.device:
+                        w = w.to(module.weight.device)
+                        s = s.to(module.weight.device)
+                        module._fp8_weight = w
+                        module._fp8_scale = s
+                    module.weight.data = dequantize_fp8(w, s, out_dtype=torch.bfloat16)
+                return _pre_hook
+
+            def _make_post_hook(mod):
+                def _post_hook(module, args, output):
+                    # Restore FP8 weight to keep VRAM at FP8 size
+                    module.weight.data = module._fp8_weight
+                    return output
+                return _post_hook
+
+            parent.register_forward_pre_hook(_make_pre_hook(parent))
+            parent.register_forward_hook(_make_post_hook(parent))
+            hooked += 1
+
+    logger.info("Installed FP8 forward hooks on %d layers (weights stay FP8 on GPU)", hooked)
+    return hooked
 
 
 def _prepare_ltx_scaled_fp8_transformer_for_runtime(
@@ -3120,30 +3192,52 @@ def _prepare_ltx_scaled_fp8_transformer_for_runtime(
     *,
     stage_label: str,
 ) -> str:
-    """Prepare a raw scaled-FP8 LTX transformer for inference runtime."""
+    """Prepare a raw scaled-FP8 LTX transformer for inference runtime.
+
+    Default: install per-layer FP8 dequant hooks (keeps ~14GB FP8 on GPU).
+    Fallback: full dequant to bf16 (needs ~35GB, requires Stagehand).
+    """
     backend = getattr(transformer, "_serenity_scaled_fp8_backend", None)
     if backend:
         return backend
 
-    fixed = _dequant_scaled_fp8_weights(transformer, checkpoint_path)
-    if fixed <= 0:
-        backend = "unmodified"
-        transformer._serenity_scaled_fp8_backend = backend
-        return backend
+    requested = _ltx_scaled_fp8_runtime_backend()
 
-    backend = _ltx_scaled_fp8_runtime_backend()
-    if backend == "eriquant_fp8":
-        from serenity.inference.quantization.eriquant_backend import quantize_model_eriquant
-
-        logger.info("%s scaled FP8: dequantized %d weights, converting to eriquant_fp8 runtime", stage_label, fixed)
-        quantize_model_eriquant(
-            transformer,
-            mode="eriquant_fp8",
-            arch="default",
-            exclude=list(_LTX_ERIQUANT_FP8_EXCLUDES),
-        )
+    if requested == "dequant_bf16":
+        # Legacy full-dequant path
+        fixed = _dequant_scaled_fp8_weights(transformer, checkpoint_path)
+        if fixed <= 0:
+            backend = "unmodified"
+        else:
+            backend = "dequant_bf16"
+            logger.info("%s scaled FP8: dequantized %d weights to bf16 runtime", stage_label, fixed)
+    elif requested == "eriquant_fp8":
+        fixed = _dequant_scaled_fp8_weights(transformer, checkpoint_path)
+        if fixed <= 0:
+            backend = "unmodified"
+        else:
+            try:
+                from serenity.inference.quantization.eriquant_backend import quantize_model_eriquant
+                logger.info("%s scaled FP8: dequantized %d weights, converting to eriquant_fp8 runtime", stage_label, fixed)
+                quantize_model_eriquant(
+                    transformer,
+                    mode="eriquant_fp8",
+                    arch="default",
+                    exclude=list(_LTX_ERIQUANT_FP8_EXCLUDES),
+                )
+                backend = "eriquant_fp8"
+            except Exception as exc:
+                logger.warning("%s eriquant_fp8 failed: %s, falling back to fp8_hooks", stage_label, exc)
+                backend = None
     else:
-        logger.info("%s scaled FP8: dequantized %d weights to bf16 runtime", stage_label, fixed)
+        backend = None
+
+    # Default: full dequant to bf16 (correct values, fits on GPU after dequant)
+    if backend is None:
+        fixed = _dequant_scaled_fp8_weights(transformer, checkpoint_path)
+        backend = "dequant_bf16" if fixed > 0 else "unmodified"
+        if fixed > 0:
+            logger.info("%s scaled FP8: dequantized %d weights to bf16", stage_label, fixed)
 
     transformer._serenity_scaled_fp8_backend = backend
     return backend

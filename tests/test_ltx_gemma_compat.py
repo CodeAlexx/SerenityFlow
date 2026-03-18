@@ -297,11 +297,11 @@ def test_prepare_ltx_scaled_fp8_transformer_for_runtime_uses_eriquant(monkeypatc
     assert calls[1][2]["mode"] == "eriquant_fp8"
 
 
-def test_ltx_scaled_fp8_runtime_backend_defaults_to_dequant_bf16(monkeypatch):
+def test_ltx_scaled_fp8_runtime_backend_defaults_to_fp8_hooks(monkeypatch):
     monkeypatch.delenv("SERENITY_LTX_SCALED_FP8_BACKEND", raising=False)
     _install_fake_eriquant_backend(monkeypatch, is_available=lambda: True)
 
-    assert _ltx_scaled_fp8_runtime_backend() == "dequant_bf16"
+    assert _ltx_scaled_fp8_runtime_backend() == "fp8_hooks"
 
 
 def test_ltx_scaled_fp8_runtime_backend_honors_eriquant_override(monkeypatch):
@@ -509,7 +509,8 @@ def test_maybe_prefer_desktop_fast_ltx_checkpoint_uses_sibling_checkpoint(tmp_pa
         lambda _device: SimpleNamespace(total_memory=24 * 1024**3),
     )
 
-    assert _maybe_prefer_desktop_fast_ltx_checkpoint(str(requested), "auto") == str(sibling)
+    # FP8 hooks keep weights at FP8 size — no reroute needed
+    assert _maybe_prefer_desktop_fast_ltx_checkpoint(str(requested), "auto") == str(requested)
 
 
 def test_maybe_prefer_desktop_fast_ltx_checkpoint_honors_experimental_env(tmp_path, monkeypatch):
@@ -554,4 +555,5 @@ def test_maybe_prefer_desktop_fast_ltx_checkpoint_uses_exact_non_fp8_fallback(tm
 
     monkeypatch.setattr("serenityflow.bridge.model_paths.get_model_paths", lambda: FakePaths())
 
-    assert _maybe_prefer_desktop_fast_ltx_checkpoint(str(requested), "auto") == str(distilled)
+    # FP8 hooks keep weights at FP8 size — no reroute needed
+    assert _maybe_prefer_desktop_fast_ltx_checkpoint(str(requested), "auto") == str(requested)
