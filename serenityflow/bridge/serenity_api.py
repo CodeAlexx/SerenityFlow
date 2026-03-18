@@ -7,6 +7,8 @@ SerenityFlow nodes never import from serenity directly -- only from here.
 from __future__ import annotations
 
 import copy
+import functools
+import gc
 import io
 import logging
 import os
@@ -270,6 +272,15 @@ def load_checkpoint(path: str, dtype: str = "float16") -> tuple:
         torch.cuda.empty_cache()
     model = s["load_model"](path, config=model_config, device="cpu", dtype=torch_dtype)
 
+    # Fix scaled FP8: generic loader may cast FP8→bf16 without applying scales.
+    try:
+        from serenityflow.bridge.fp8_dequant import dequant_scaled_fp8_in_model
+        fixed = dequant_scaled_fp8_in_model(model, path)
+        if fixed > 0:
+            logger.info("Checkpoint FP8 dequant: fixed %d weights", fixed)
+    except Exception as exc:
+        logger.debug("FP8 dequant check skipped for checkpoint: %s", exc)
+
     # Attach prediction metadata (same as load_diffusion_model does)
     from serenity.inference.models.loader import _get_adapter
     adapter = _get_adapter(model_config)
@@ -400,6 +411,17 @@ def load_diffusion_model(path: str, dtype: str = "default") -> nn.Module:
     if _is_flux2_model_config(model_config, s["ModelArchitecture"]):
         model._serenity_flux2 = True
         _attach_flux2_vae_stats(model, path)
+
+    # Fix scaled FP8 for non-Flux models (Flux handled inside _load_flux2_transformer).
+    # Loaders like from_single_file may cast FP8→bf16 without applying scale factors.
+    if not _is_flux2_model_config(model_config, s["ModelArchitecture"]):
+        try:
+            from serenityflow.bridge.fp8_dequant import dequant_scaled_fp8_in_model
+            fixed = dequant_scaled_fp8_in_model(model, path)
+            if fixed > 0:
+                logger.info("FP8 dequant: fixed %d weights for %s", fixed, path)
+        except Exception as exc:
+            logger.debug("FP8 dequant check skipped: %s", exc)
 
     # Partially load to GPU, keeping headroom for text encoders + VAE (~4GB).
     # Blocks that don't fit get CPU↔GPU streaming hooks.
@@ -592,6 +614,22 @@ def _load_flux2_transformer(path: str, dtype: torch.dtype, model_config) -> nn.M
     model._serenity_model_config = model_config
     model._serenity_flux2 = True
     model._serenity_flux2_variant = variant
+
+    # Fix scaled FP8: from_single_file casts FP8→bf16 without applying scales.
+    # Re-read original FP8 values + scales and write correct bf16 in-place.
+    from serenityflow.bridge.fp8_dequant import has_fp8_scales as _has_fp8_scales
+    try:
+        from safetensors import safe_open
+        with safe_open(path, framework="pt") as f:
+            raw_sd = {k: f.get_tensor(k) for k in f.keys()}
+        if _has_fp8_scales(raw_sd):
+            from serenityflow.bridge.fp8_dequant import dequant_scaled_fp8_in_model
+            fixed = dequant_scaled_fp8_in_model(model, path)
+            logger.info("FLUX.2 FP8: fixed %d weights from scaled checkpoint", fixed)
+        del raw_sd
+    except Exception as exc:
+        logger.warning("FP8 dequant check failed for FLUX.2: %s", exc)
+
     return model
 
 
@@ -2018,13 +2056,30 @@ def _run_sampling(
         return s["apply_cfg"](cond_denoised, uncond_denoised, cfg)
 
     step_callback = _make_step_callback(preview_interval=3)
+
+    # Wrap with pipeline counters if available.
+    _sampling_counters = None
+    try:
+        from serenity.inference.sampling.counters import PipelineCounters
+        _sampling_counters = PipelineCounters()
+        _sampling_counters.start()
+        _instrumented_fn = _sampling_counters.wrap_model_fn(denoise_fn)
+        _instrumented_cb = _sampling_counters.make_callback(step_callback)
+    except ImportError:
+        _instrumented_fn = denoise_fn
+        _instrumented_cb = step_callback
+
     result = s["sample"](
-        model_fn=denoise_fn,
+        model_fn=_instrumented_fn,
         noise=noisy_latent,
         sigmas=sigmas,
         sampler_type=sampler_name,
-        callback=step_callback,
+        callback=_instrumented_cb,
     )
+
+    if _sampling_counters is not None:
+        _sampling_counters.finalize()
+        logger.info("Sampling perf:\n%s", _sampling_counters.report())
 
     if is_flux and result.ndim == 3 and flux_h is not None and flux_w is not None:
         if is_flux2 and flux_patch_h is not None and flux_patch_w is not None:
@@ -2299,6 +2354,8 @@ class LTXVModelWrapper:
         "lora_strengths",
         "quantization",
         "backend",
+        "is_scaled_fp8",
+        "_cached_text_encoder",
     )
 
     def __init__(
@@ -2327,6 +2384,8 @@ class LTXVModelWrapper:
         self.lora_strengths = lora_strengths
         self.quantization = quantization
         self.backend = backend
+        self.is_scaled_fp8 = _checkpoint_has_weight_scales(checkpoint_path)
+        self._cached_text_encoder = None
 
     def vae_decode(self, latent: torch.Tensor) -> torch.Tensor:
         """Decode 5D video latent [B,C,T,H,W] to pixel frames."""
@@ -2538,11 +2597,43 @@ def _default_ltxv_spatial_upsampler_candidates(checkpoint_path: str) -> tuple[st
 
 def _default_ltxv_distilled_lora_candidates(checkpoint_path: str) -> tuple[str, ...]:
     if _ltx_checkpoint_looks_23(checkpoint_path):
-        return (
-            "ltx-2.3-22b-distilled-lora-384.safetensors",
-            "ltx-2-19b-distilled-lora-384.safetensors",
-        )
+        return ("ltx-2.3-22b-distilled-lora-384.safetensors",)
     return ("ltx-2-19b-distilled-lora-384.safetensors",)
+
+
+def _hf_hub_root() -> Path:
+    hub_cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
+    if hub_cache:
+        return Path(hub_cache).expanduser()
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        return Path(hf_home).expanduser() / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+@functools.lru_cache(maxsize=64)
+def _resolve_ltxv_asset_from_hf_cache(name: str) -> str | None:
+    if not name:
+        return None
+
+    hub_root = _hf_hub_root()
+    repo_patterns = (
+        "models--Lightricks--LTX-2.3",
+        "models--Lightricks--LTX-2",
+        "models--Lightricks--LTX-Video*",
+    )
+    matches: list[Path] = []
+    for repo_pattern in repo_patterns:
+        matches.extend(hub_root.glob(f"{repo_pattern}/snapshots/*/{name}"))
+
+    if not matches:
+        return None
+
+    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for match in matches:
+        if match.is_file():
+            return str(match)
+    return None
 
 
 def _resolve_ltxv_asset(path: str | None, folder: str, *fallback_names: str) -> str | None:
@@ -2554,17 +2645,21 @@ def _resolve_ltxv_asset(path: str | None, folder: str, *fallback_names: str) -> 
         if candidate and candidate not in search_names:
             search_names.append(candidate)
 
-    try:
-        from serenityflow.bridge.model_paths import get_model_paths
+    for name in search_names:
+        try:
+            from serenityflow.bridge.model_paths import get_model_paths
 
-        paths = get_model_paths()
-        for name in search_names:
+            paths = get_model_paths()
             try:
                 return paths.find(name, folder)
             except FileNotFoundError:
-                continue
-    except Exception:
-        pass
+                pass
+        except Exception:
+            pass
+
+        resolved = _resolve_ltxv_asset_from_hf_cache(name)
+        if resolved is not None:
+            return resolved
 
     if requested:
         candidate = Path(requested).expanduser()
@@ -2578,19 +2673,23 @@ def _resolve_ltxv_asset(path: str | None, folder: str, *fallback_names: str) -> 
 def _resolve_ltxv_gemma_root(gemma_root_path: str | None) -> str:
     requested = (gemma_root_path or "").strip()
     fallback_names: list[str] = []
-    if requested and "gemma-3-12b-it" not in requested:
+    if requested:
+        requested_path = Path(requested).expanduser()
+        if requested_path.is_dir() and (requested_path / "tokenizer.model").is_file():
+            return str(requested_path)
         fallback_names.append(requested)
     if not requested or "gemma-3-12b-it" in requested:
+        # Fallback order favors standalone (bf16) when no explicit Gemma root
+        # resolves first. GPTQ-4b had builder compatibility issues here, but an
+        # explicit request should still win so users can force it when needed.
         for candidate in (
             "gemma-3-12b-it-standalone",
-            "gemma-3-12b-it-qat-q4_0-unquantized",
             "gemma-3-12b-it",
+            "gemma-3-12b-it-qat-q4_0-unquantized",
             "gemma-3-12b-it-GPTQ-4b",
         ):
             if candidate not in fallback_names:
                 fallback_names.append(candidate)
-    if requested and requested not in fallback_names:
-        fallback_names.append(requested)
 
     try:
         from serenityflow.bridge.model_paths import get_model_paths
@@ -2674,6 +2773,11 @@ def _patch_ltx_gemma_transformers_compat() -> None:
             full_attention.setdefault("factor", 1.0)
         full_attention.setdefault("rope_theta", rope_theta)
 
+        # Build rope_scaling dict for transformers' rope init functions.
+        # _compute_linear_scaling_rope_parameters reads config.rope_scaling["factor"].
+        _rope_scaling = {"rope_type": rope_type, "factor": float(full_attention.get("factor", 1.0))}
+        _rope_scaling.update(full_attention)
+
         rope_config = type(
             "_SerenityLTXGemmaRopeConfig",
             (),
@@ -2683,6 +2787,8 @@ def _patch_ltx_gemma_transformers_compat() -> None:
                 "head_dim": getattr(config, "head_dim", None),
                 "rope_theta": rope_theta,
                 "rope_parameters": full_attention,
+                "rope_scaling": _rope_scaling,
+                "partial_rotary_factor": partial_rotary_factor,
                 "standardize_rope_params": lambda self: None,
             },
         )()
@@ -2766,6 +2872,197 @@ def _patch_ltx_gemma_transformers_compat() -> None:
     _LTX_GEMMA_TRANSFORMERS_COMPAT_PATCHED = True
 
 
+def _checkpoint_has_weight_scales(checkpoint_path: str) -> bool:
+    """Check if a safetensors checkpoint contains weight_scale or scale_weight tensors (scaled FP8)."""
+    try:
+        from safetensors import safe_open
+        with safe_open(checkpoint_path, framework="pt") as f:
+            for key in f.keys():
+                if key.endswith(".weight_scale") or key.endswith(".scale_weight"):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _build_scaled_fp8_raw_load_policy():
+    """Build a QuantizationPolicy that preserves raw scaled-FP8 checkpoint tensors.
+
+    ModelLedger's quantized branch skips the blanket dtype cast that would otherwise
+    turn FP8 weights into incorrect bf16 values during load. Runtime preparation is
+    handled later by _prepare_ltx_scaled_fp8_transformer_for_runtime().
+    """
+    from ltx_core.quantization.policy import QuantizationPolicy
+    from ltx_core.loader.module_ops import ModuleOps
+    from ltx_core.model.transformer.model import LTXModel
+
+    logger.info("Detected scaled FP8 checkpoint — preserving raw FP8 tensors for runtime preparation")
+    return QuantizationPolicy(
+        sd_ops=None,
+        module_ops=(
+            ModuleOps(
+                name="scaled_fp8_raw_load",
+                matcher=lambda model: isinstance(model, LTXModel),
+                mutator=lambda model: model,
+            ),
+        ),
+    )
+
+
+def _inject_fp8_weight_scales(model: torch.nn.Module, checkpoint_path: str) -> int:
+    """Inject weight_scale tensors as plain attributes on Linear modules.
+
+    Called AFTER model loading. Scales are tiny CPU scalars — the forward hook
+    moves them to GPU on the fly (4 bytes, negligible cost).
+    """
+    from safetensors import safe_open
+
+    try:
+        inner = _unwrap_to_blocks(model)
+    except AttributeError:
+        inner = model
+        for attr in ("velocity_model", "model"):
+            if hasattr(inner, attr):
+                inner = getattr(inner, attr)
+                break
+
+    scale_map: dict[str, torch.Tensor] = {}
+    with safe_open(checkpoint_path, framework="pt") as f:
+        for key in f.keys():
+            if key.endswith(".weight_scale"):
+                module_path = key.replace("model.diffusion_model.", "").removesuffix(".weight_scale")
+                scale_map[module_path] = f.get_tensor(key)
+
+    injected = 0
+    for name, m in inner.named_modules():
+        if name in scale_map and isinstance(m, torch.nn.Linear):
+            m.weight_scale = scale_map[name]
+            injected += 1
+
+    logger.info("Injected %d/%d FP8 weight scales", injected, len(scale_map))
+    return injected
+
+
+def _dequant_scaled_fp8_weights(model: torch.nn.Module, checkpoint_path: str) -> int:
+    """Dequantize scaled FP8 weights in-place: weight.data = fp8_raw * weight_scale.
+
+    Re-reads the original FP8 values and scale factors from the safetensors file
+    and writes correctly dequantized bf16 values into the model parameters.
+    """
+    from safetensors import safe_open
+
+    try:
+        inner = _unwrap_to_blocks(model)
+    except AttributeError:
+        inner = model
+        for attr in ("velocity_model", "model"):
+            if hasattr(inner, attr):
+                inner = getattr(inner, attr)
+                break
+
+    fixed = 0
+    with safe_open(checkpoint_path, framework="pt") as f:
+        for key in f.keys():
+            if not key.endswith(".weight_scale"):
+                continue
+            weight_key = key.removesuffix("_scale")
+            if weight_key not in f.keys():
+                continue
+
+            module_path = weight_key.replace("model.diffusion_model.", "")
+            parts = module_path.rsplit(".", 1)
+            if len(parts) != 2:
+                continue
+            parent_path, attr_name = parts
+
+            try:
+                parent = inner.get_submodule(parent_path)
+            except (AttributeError, torch.nn.modules.module.ModuleAttributeError):
+                continue
+
+            param = getattr(parent, attr_name, None)
+            if param is None or not isinstance(param, (torch.Tensor, nn.Parameter)):
+                continue
+
+            fp8_weight = f.get_tensor(weight_key)
+            scale = f.get_tensor(key)
+            dequanted = fp8_weight.to(torch.bfloat16) * scale.to(torch.bfloat16)
+            param.data = dequanted
+            fixed += 1
+
+    logger.info("Dequantized %d scaled FP8 weights in-place", fixed)
+    return fixed
+
+
+_LTX_ERIQUANT_FP8_EXCLUDES = (
+    "*patchify_proj*",
+    "*adaln_single*",
+    "*av_ca_video_scale_shift_adaln_single*",
+    "*av_ca_a2v_gate_adaln_single*",
+    "*caption_projection*",
+    "*proj_out*",
+    "*audio_patchify_proj*",
+    "*audio_adaln_single*",
+    "*av_ca_audio_scale_shift_adaln_single*",
+    "*av_ca_v2a_gate_adaln_single*",
+    "*audio_caption_projection*",
+    "*audio_proj_out*",
+    "transformer_blocks.0.*",
+    "transformer_blocks.43.*",
+    "transformer_blocks.44.*",
+    "transformer_blocks.45.*",
+    "transformer_blocks.46.*",
+    "transformer_blocks.47.*",
+)
+
+
+def _ltx_scaled_fp8_runtime_backend() -> str:
+    """Choose the runtime path for scaled FP8 LTX checkpoints."""
+    try:
+        from serenity.inference.quantization.eriquant_backend import is_available as eriquant_available
+    except Exception:
+        eriquant_available = None
+
+    if eriquant_available is not None and eriquant_available():
+        return "eriquant_fp8"
+    return "dequant_bf16"
+
+
+def _prepare_ltx_scaled_fp8_transformer_for_runtime(
+    transformer: torch.nn.Module,
+    checkpoint_path: str,
+    *,
+    stage_label: str,
+) -> str:
+    """Prepare a raw scaled-FP8 LTX transformer for inference runtime."""
+    backend = getattr(transformer, "_serenity_scaled_fp8_backend", None)
+    if backend:
+        return backend
+
+    fixed = _dequant_scaled_fp8_weights(transformer, checkpoint_path)
+    if fixed <= 0:
+        backend = "unmodified"
+        transformer._serenity_scaled_fp8_backend = backend
+        return backend
+
+    backend = _ltx_scaled_fp8_runtime_backend()
+    if backend == "eriquant_fp8":
+        from serenity.inference.quantization.eriquant_backend import quantize_model_eriquant
+
+        logger.info("%s scaled FP8: dequantized %d weights, converting to eriquant_fp8 runtime", stage_label, fixed)
+        quantize_model_eriquant(
+            transformer,
+            mode="eriquant_fp8",
+            arch="default",
+            exclude=list(_LTX_ERIQUANT_FP8_EXCLUDES),
+        )
+    else:
+        logger.info("%s scaled FP8: dequantized %d weights to bf16 runtime", stage_label, fixed)
+
+    transformer._serenity_scaled_fp8_backend = backend
+    return backend
+
+
 def _coerce_ltxv_quantization_policy(checkpoint_path: str, quantization: str = "auto"):
     quantization_name = (quantization or "auto").strip().lower()
     if quantization_name in {"", "auto"}:
@@ -2773,6 +3070,13 @@ def _coerce_ltxv_quantization_policy(checkpoint_path: str, quantization: str = "
     if quantization_name in {"none", "off"}:
         return None
 
+    # Scaled FP8 checkpoints carry pre-quantized weights and scale tensors.
+    # Preserve the raw tensors during load, then prepare an inference runtime
+    # explicitly once the transformer object exists.
+    if _checkpoint_has_weight_scales(checkpoint_path):
+        return _build_scaled_fp8_raw_load_policy()
+
+    # Legacy naive FP8 — fall back to ltx_core's upcast-during-inference.
     from ltx_core.quantization.policy import QuantizationPolicy
 
     if quantization_name == "fp8-cast":
@@ -2926,28 +3230,225 @@ def _decode_ltxv_video_iterator(video_iter: Any) -> torch.Tensor:
     return torch.cat(chunks, dim=0).clamp(0, 1)
 
 
-def _wrap_ltx_ledger_text_encoder_cpu(ledger: Any) -> None:
-    """Force official LTX pipelines to build/text-encode Gemma on CPU."""
-    if ledger is None or getattr(ledger, "_serenity_text_encoder_cpu_wrap", False):
-        return
+def _ltx_text_encoder_device_candidates(device: torch.device | str | None) -> tuple[torch.device, ...]:
+    target = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    if torch.cuda.is_available() and target.type == "cuda":
+        return (target, torch.device("cpu"))
+    return (torch.device("cpu"),)
 
-    original_text_encoder = ledger.text_encoder
 
-    def _text_encoder_on_cpu():
-        previous_device = ledger.device
-        ledger.device = torch.device("cpu")
+@functools.lru_cache(maxsize=8)
+def _ltx_gemma_weight_bytes(gemma_root: str | None) -> int:
+    if not gemma_root:
+        return 0
+    root = Path(gemma_root).expanduser()
+    if not root.is_dir():
+        return 0
+    return sum(path.stat().st_size for path in root.rglob("model*.safetensors"))
+
+
+def _should_try_cuda_for_full_ltx_text_encoder(ledger: Any, device: torch.device) -> bool:
+    if not torch.cuda.is_available() or device.type != "cuda":
+        return False
+
+    weight_bytes = _ltx_gemma_weight_bytes(getattr(ledger, "gemma_root_path", None))
+    if weight_bytes <= 0:
+        return True
+
+    free_vram = torch.cuda.mem_get_info()[0]
+    load_headroom = 1 * (1024**3)
+    fits = weight_bytes < (free_vram - load_headroom)
+    if not fits:
+        logger.info(
+            "Skipping full Gemma CUDA load: weights %.1f GB, VRAM free %.1f GB, headroom %.1f GB",
+            weight_bytes / (1024**3),
+            free_vram / (1024**3),
+            load_headroom / (1024**3),
+        )
+    return fits
+
+
+def _load_ltx_text_encoder_with_fallback(
+    ledger: Any,
+    *,
+    bind_text_only_precompute: bool = False,
+) -> tuple[Any, torch.device]:
+    previous_device = torch.device(getattr(ledger, "device", "cpu"))
+    last_exc: Exception | None = None
+    candidates = _ltx_text_encoder_device_candidates(previous_device)
+    original_text_encoder = getattr(ledger, "_serenity_original_text_encoder", None)
+    text_encoder_factory = original_text_encoder or ledger.text_encoder
+
+    if candidates and candidates[0].type == "cuda" and not _should_try_cuda_for_full_ltx_text_encoder(ledger, candidates[0]):
+        candidates = (torch.device("cpu"),)
+
+    for candidate in candidates:
         try:
-            return original_text_encoder()
+            ledger.device = candidate
+            logger.info("Loading Gemma 3 text encoder on %s...", candidate)
+            text_encoder = text_encoder_factory()
+            if bind_text_only_precompute:
+                _bind_gemma_text_encoder_text_only_precompute(text_encoder)
+            return text_encoder, candidate
+        except Exception as exc:
+            last_exc = exc
+            if candidate.type == "cuda":
+                logger.warning("Gemma 3 text encoder load on %s failed: %s. Falling back to CPU.", candidate, exc)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                continue
+            raise
         finally:
             ledger.device = previous_device
 
-    ledger.text_encoder = _text_encoder_on_cpu
+    assert last_exc is not None
+    raise last_exc
+
+
+class _OfficialLTXTextEncoderAdapter:
+    """Adapter that lets official pipelines reuse Serenity's text-encoding path."""
+
+    def __init__(
+        self,
+        text_encoder: Any,
+        *,
+        text_encoder_device: torch.device,
+        device: torch.device,
+        gemma_root: str,
+    ):
+        self._text_encoder = text_encoder
+        self._text_encoder_device = torch.device(text_encoder_device)
+        self._device = torch.device(device)
+        self._gemma_root = gemma_root
+
+    def _move_output_to_device(self, output: Any):
+        video_encoding = output.video_encoding.to(device=self._device).clone()
+        audio_encoding = output.audio_encoding
+        if audio_encoding is not None:
+            audio_encoding = audio_encoding.to(device=self._device).clone()
+        attention_mask = output.attention_mask.to(device=self._device).clone()
+        return type(output)(video_encoding, audio_encoding, attention_mask)
+
+    def __call__(self, text: str, padding_side: str = "left"):
+        if self._text_encoder_device.type == "cpu" and self._device.type == "cuda" and torch.cuda.is_available():
+            output = _encode_ltx_prompts_with_stagehand(
+                self._text_encoder,
+                (text,),
+                device=self._device,
+                gemma_root=self._gemma_root,
+            )[0]
+            return self._move_output_to_device(output)
+        return self._move_output_to_device(self._text_encoder(text, padding_side))
+
+    def __getattr__(self, name: str):
+        return getattr(self._text_encoder, name)
+
+
+def _wrap_ltx_ledger_text_encoder_cpu(ledger: Any, model: LTXVModelWrapper) -> None:
+    """Make official LTX pipelines use Serenity's text-encoder loading/encoding path."""
+    if ledger is None or getattr(ledger, "_serenity_text_encoder_cpu_wrap", False):
+        return
+
+    ledger._serenity_original_text_encoder = ledger.text_encoder
+
+    def _text_encoder_with_fallback():
+        if model._cached_text_encoder is not None:
+            logger.info("Using cached Gemma 3 text encoder on CPU for official LTX pipeline")
+            text_encoder = model._cached_text_encoder
+            text_encoder_device = torch.device("cpu")
+        else:
+            text_encoder, text_encoder_device = _load_ltx_text_encoder_with_fallback(
+                ledger,
+                bind_text_only_precompute=True,
+            )
+            if text_encoder_device.type == "cpu":
+                logger.info("Caching Gemma 3 text encoder on CPU for official LTX pipeline")
+                model._cached_text_encoder = text_encoder
+
+        return _OfficialLTXTextEncoderAdapter(
+            text_encoder,
+            text_encoder_device=text_encoder_device,
+            device=model.device,
+            gemma_root=getattr(ledger, "gemma_root_path", "") or "",
+        )
+
+    ledger.text_encoder = _text_encoder_with_fallback
     ledger._serenity_text_encoder_cpu_wrap = True
 
 
-def _patch_official_ltx_pipeline_text_encoder_cpu(pipeline: Any) -> None:
+def _patch_official_ltx_pipeline_text_encoder_cpu(pipeline: Any, model: LTXVModelWrapper) -> None:
     for attr in ("model_ledger", "stage_1_model_ledger", "stage_2_model_ledger"):
-        _wrap_ltx_ledger_text_encoder_cpu(getattr(pipeline, attr, None))
+        _wrap_ltx_ledger_text_encoder_cpu(getattr(pipeline, attr, None), model)
+
+
+def _wrap_official_ltx_ledger_transformer_cpu_stage(
+    ledger: Any,
+    model: LTXVModelWrapper,
+    *,
+    stage_label: str,
+) -> None:
+    """Load official-pipeline transformers on CPU first, then move to GPU."""
+    if ledger is None or getattr(ledger, "_serenity_transformer_cpu_stage_wrap", False):
+        return
+
+    ledger._serenity_original_transformer = ledger.transformer
+
+    def _transformer_with_cpu_stage():
+        target_device = torch.device(getattr(ledger, "device", model.device))
+        previous_device = target_device
+        try:
+            ledger.device = torch.device("cpu")
+            logger.info("%s transformer: loading on CPU first for official LTX pipeline", stage_label)
+            transformer = ledger._serenity_original_transformer()
+        finally:
+            ledger.device = previous_device
+
+        if model.is_scaled_fp8:
+            _prepare_ltx_scaled_fp8_transformer_for_runtime(
+                transformer,
+                model.checkpoint_path,
+                stage_label=stage_label,
+            )
+
+        if target_device.type == "cuda":
+            model_bytes = sum(p.data.nbytes for p in transformer.parameters())
+            use_direct_gpu = _try_load_ltx_transformer_direct_gpu(
+                transformer,
+                device=target_device,
+                model_bytes=model_bytes,
+                is_scaled_fp8=model.is_scaled_fp8,
+                stage_label=stage_label,
+            )
+            if not use_direct_gpu:
+                raise RuntimeError(f"{stage_label} transformer does not fit on GPU in official backend")
+
+        return transformer
+
+    ledger.transformer = _transformer_with_cpu_stage
+    ledger._serenity_transformer_cpu_stage_wrap = True
+
+
+def _patch_official_ltx_pipeline_transformers(pipeline: Any, model: LTXVModelWrapper) -> None:
+    _wrap_official_ltx_ledger_transformer_cpu_stage(
+        getattr(pipeline, "model_ledger", None),
+        model,
+        stage_label="Official",
+    )
+    _wrap_official_ltx_ledger_transformer_cpu_stage(
+        getattr(pipeline, "stage_1_model_ledger", None),
+        model,
+        stage_label="Official Stage 1",
+    )
+    _wrap_official_ltx_ledger_transformer_cpu_stage(
+        getattr(pipeline, "stage_2_model_ledger", None),
+        model,
+        stage_label="Official Stage 2",
+    )
+
+
+def _patch_official_ltx_pipeline_runtime(pipeline: Any, model: LTXVModelWrapper) -> None:
+    _patch_official_ltx_pipeline_text_encoder_cpu(pipeline, model)
+    _patch_official_ltx_pipeline_transformers(pipeline, model)
 
 
 def _should_use_official_ltx_backend(
@@ -3067,7 +3568,7 @@ def _sample_ltxv_official(
             device=model.device,
             quantization=quantization_policy,
         )
-        _patch_official_ltx_pipeline_text_encoder_cpu(pipeline)
+        _patch_official_ltx_pipeline_runtime(pipeline, model)
         video_iter, decoded_audio = pipeline(
             prompt=prompt,
             negative_prompt=negative_prompt or _DEFAULT_NEGATIVE_PROMPT,
@@ -3094,7 +3595,7 @@ def _sample_ltxv_official(
             device=model.device,
             quantization=quantization_policy,
         )
-        _patch_official_ltx_pipeline_text_encoder_cpu(pipeline)
+        _patch_official_ltx_pipeline_runtime(pipeline, model)
         video_iter, decoded_audio = pipeline(
             prompt=prompt,
             seed=seed,
@@ -3114,7 +3615,7 @@ def _sample_ltxv_official(
             device=model.device,
             quantization=quantization_policy,
         )
-        _patch_official_ltx_pipeline_text_encoder_cpu(pipeline)
+        _patch_official_ltx_pipeline_runtime(pipeline, model)
         video_iter, decoded_audio = pipeline(
             prompt=prompt,
             negative_prompt=negative_prompt or _DEFAULT_NEGATIVE_PROMPT,
@@ -3136,7 +3637,7 @@ def _sample_ltxv_official(
             device=model.device,
             quantization=quantization_policy,
         )
-        _patch_official_ltx_pipeline_text_encoder_cpu(pipeline)
+        _patch_official_ltx_pipeline_runtime(pipeline, model)
         video_iter, decoded_audio = pipeline(
             prompt=prompt,
             negative_prompt=negative_prompt or _DEFAULT_NEGATIVE_PROMPT,
@@ -3258,7 +3759,7 @@ def _stagehand_config_xfm():
     """Stagehand config for 22B transformer (48 blocks, ~800MB each in bf16)."""
     from stagehand import StagehandConfig
     return StagehandConfig(
-        pinned_pool_mb=6400,
+        pinned_pool_mb=6400,  # 8 slabs × 800MB (fits both FP8 ~400MB and bf16 ~800MB blocks)
         pinned_slab_mb=800,
         vram_high_watermark_mb=18000,
         vram_low_watermark_mb=14000,
@@ -3303,8 +3804,21 @@ def _unwrap_to_blocks(model):
     raise AttributeError(f"Cannot find transformer_blocks on {type(model).__name__}")
 
 
-def _move_non_blocks_to_device(root_module, block_container, device):
-    """Move all params/buffers to device EXCEPT those inside block_container's layers."""
+def _move_non_blocks_to_device(root_module, block_container, device, *, preserve_fp8=False):
+    """Move all params/buffers to device EXCEPT those inside block_container's layers.
+
+    When preserve_fp8=True, FP8 params are moved to device WITHOUT dtype cast.
+    This keeps them in float8_e4m3fn/e5m2 so the forward hooks can dequant correctly
+    (fp8→bf16 * weight_scale). Without this, FP8 non-block params (proj_in, proj_out)
+    get cast to bf16 with wrong values, causing grid artifacts.
+    """
+    _fp8_dtypes = set()
+    try:
+        _fp8_dtypes.add(torch.float8_e4m3fn)
+        _fp8_dtypes.add(torch.float8_e5m2)
+    except AttributeError:
+        pass
+
     layers = getattr(block_container, "layers", None) or getattr(block_container, "transformer_blocks", None)
     if layers is None:
         raise AttributeError("block_container has no .layers or .transformer_blocks")
@@ -3314,8 +3828,13 @@ def _move_non_blocks_to_device(root_module, block_container, device):
 
     with torch.no_grad():
         for p in root_module.parameters():
-            if id(p) not in block_param_ids and (p.device != device or p.dtype != torch.bfloat16):
-                p.data = p.data.to(device, dtype=torch.bfloat16, non_blocking=True)
+            if id(p) not in block_param_ids:
+                if preserve_fp8 and p.dtype in _fp8_dtypes:
+                    # FP8 param: move to GPU preserving dtype — forward hook handles dequant.
+                    if p.device != device:
+                        p.data = p.data.to(device, non_blocking=True)
+                elif p.device != device or p.dtype != torch.bfloat16:
+                    p.data = p.data.to(device, dtype=torch.bfloat16, non_blocking=True)
         for name, buf in root_module.named_buffers():
             if id(buf) not in block_buf_ids and buf.device != device:
                 parts = name.rsplit(".", 1)
@@ -3481,6 +4000,99 @@ def _ltx_finalize_gemma_text_encoder_output(text_encoder, hidden_states, attenti
     return video_enc, audio_enc, binary_mask
 
 
+def _encode_ltx_prompts_with_stagehand(
+    text_encoder,
+    prompts: tuple[str, ...],
+    *,
+    device: torch.device,
+    gemma_root: str = "",
+):
+    """Run Gemma LM prompt encoding on GPU via Stagehand while keeping weights resident on CPU."""
+    from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaEncoderOutput
+    from stagehand import StagehandRuntime
+
+    block_container = _get_gemma_block_module(text_encoder)
+    _move_gemma_text_encoder_non_blocks_to_device(text_encoder, block_container, device)
+    block_container.requires_grad_(False)
+
+    runtime = StagehandRuntime(
+        model=block_container,
+        config=_stagehand_config_te(gemma_root),
+        block_pattern=r"^layers\.\d+$",
+        group="text_encoder",
+        dtype=torch.bfloat16,
+        inference_mode=True,
+    )
+    logger.info("Stagehand Gemma ready (%d blocks)", len(runtime._registry))
+
+    outputs = []
+    try:
+        for step, prompt in enumerate(prompts):
+            runtime.begin_step(step)
+            with runtime.managed_forward():
+                hidden_states, attention_mask = _ltx_gemma_text_encoder_lm_forward(text_encoder, prompt)
+            runtime.end_step()
+            hidden_states, attention_mask = _ltx_move_gemma_hidden_states_to_cpu(hidden_states, attention_mask)
+            video_enc, audio_enc, binary_mask = _ltx_finalize_gemma_text_encoder_output(
+                text_encoder,
+                hidden_states,
+                attention_mask,
+            )
+            outputs.append(GemmaEncoderOutput(video_enc, audio_enc, binary_mask))
+    finally:
+        runtime.shutdown()
+        _move_gemma_text_encoder_non_blocks_to_device(text_encoder, block_container, torch.device("cpu"))
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("Stagehand Gemma prompt encoding complete")
+
+    return outputs
+
+
+def _try_load_ltx_transformer_direct_gpu(
+    transformer,
+    *,
+    device: torch.device,
+    model_bytes: int,
+    is_scaled_fp8: bool,
+    stage_label: str,
+) -> bool:
+    if not torch.cuda.is_available() or device.type != "cuda":
+        return False
+
+    torch.cuda.empty_cache()
+    free_vram = torch.cuda.mem_get_info()[0]
+    direct_margin = 256 * (1024**2) if is_scaled_fp8 else 4 * (1024**3)
+    should_try = is_scaled_fp8 or model_bytes < (free_vram - direct_margin)
+    logger.info(
+        "%s transformer: %.1f GB, VRAM free: %.1f GB, margin: %.1f GB → %s",
+        stage_label,
+        model_bytes / (1024**3),
+        free_vram / (1024**3),
+        direct_margin / (1024**3),
+        "try direct GPU" if should_try else "Stagehand",
+    )
+    if not should_try:
+        return False
+
+    try:
+        transformer.to(device)
+        post_free = torch.cuda.mem_get_info()[0]
+        logger.info(
+            "%s direct GPU: loaded entire transformer (%.1f GB, free after load %.1f GB)",
+            stage_label,
+            model_bytes / (1024**3),
+            post_free / (1024**3),
+        )
+        return True
+    except torch.OutOfMemoryError as exc:
+        logger.warning("%s direct GPU load failed: %s. Falling back to Stagehand.", stage_label, exc)
+        transformer.to(torch.device("cpu"))
+        torch.cuda.empty_cache()
+        return False
+
+
 def _detect_ltxv_mode(checkpoint_path: str, mode: str) -> str:
     """Resolve 'auto' mode to 'distilled' or 'dev' based on checkpoint filename."""
     if mode != "auto":
@@ -3559,6 +4171,8 @@ def sample_ltxv(
     from ltx_pipelines.utils.samplers import euler_denoising_loop
     from ltx_pipelines.utils.types import PipelineComponents
 
+    logging.getLogger("stagehand").setLevel(logging.INFO)
+
     ledger = model.model_ledger
     stage_2_ledger = _build_ltxv_stage2_ledger(model)
     device = model.device
@@ -3596,6 +4210,13 @@ def sample_ltxv(
     resolved_mode = _detect_ltxv_mode(model.checkpoint_path, mode)
     is_dev = resolved_mode == "dev"
 
+    # Safety cap: limit frames to avoid OOM from attention activation memory.
+    # At full resolution, ~39K attention tokens (241 frames) exceeds 24GB VRAM.
+    max_frames = 129  # Safe limit for 24GB GPU at 768x512
+    if num_frames > max_frames:
+        logger.warning("Clamping num_frames from %d to %d to avoid OOM", num_frames, max_frames)
+        num_frames = max_frames
+
     if is_dev:
         # Dev mode: honor the requested step count; higher counts remain user-controlled.
         if not negative_prompt:
@@ -3612,21 +4233,54 @@ def sample_ltxv(
     audio_path = _materialize_ltxv_audio_path(audio)
 
     # ---------------------------------------------------------------
-    # 1. Text encoding on CPU (Gemma 3 12B)
+    # 1. Text encoding (prefer GPU, fall back to cached CPU encoder)
     # ---------------------------------------------------------------
-    logger.info("Loading Gemma 3 text encoder on CPU...")
-    ledger.device = torch.device("cpu")
-    text_encoder = ledger.text_encoder()
-    ledger.device = device
-    _bind_gemma_text_encoder_text_only_precompute(text_encoder)
+    text_encoder_device = torch.device("cpu")
+    keep_text_encoder_cached = False
+    if model._cached_text_encoder is not None:
+        logger.info("Using cached Gemma 3 text encoder on CPU")
+        text_encoder = model._cached_text_encoder
+        keep_text_encoder_cached = True
+    else:
+        text_encoder, text_encoder_device = _load_ltx_text_encoder_with_fallback(
+            ledger,
+            bind_text_only_precompute=True,
+        )
+        if text_encoder_device.type == "cpu":
+            logger.info("Caching Gemma 3 text encoder on CPU for reuse")
+            model._cached_text_encoder = text_encoder
+            keep_text_encoder_cached = True
 
-    # Encode positive prompt
-    context_p = text_encoder(prompt)
-
-    # Encode negative prompt for dev mode (CFG requires it)
+    use_stagehand_text = text_encoder_device.type == "cpu" and torch.cuda.is_available()
     neg_context_p = None
-    if is_dev and negative_prompt:
-        neg_context_p = text_encoder(negative_prompt)
+    if use_stagehand_text:
+        prompts = [prompt]
+        if is_dev and negative_prompt:
+            prompts.append(negative_prompt)
+        try:
+            logger.info("Using Stagehand Gemma prompt encoding from CPU weights")
+            stagehand_outputs = _encode_ltx_prompts_with_stagehand(
+                text_encoder,
+                tuple(prompts),
+                device=device,
+                gemma_root=getattr(ledger, "gemma_root_path", "") or "",
+            )
+            context_p = stagehand_outputs[0]
+            if len(stagehand_outputs) > 1:
+                neg_context_p = stagehand_outputs[1]
+        except Exception as exc:
+            logger.warning("Stagehand Gemma prompt encoding failed: %s. Falling back to CPU.", exc)
+            cleanup_memory()
+            context_p = text_encoder(prompt)
+            if is_dev and negative_prompt:
+                neg_context_p = text_encoder(negative_prompt)
+    else:
+        # Encode positive prompt directly
+        context_p = text_encoder(prompt)
+
+        # Encode negative prompt for dev mode (CFG requires it)
+        if is_dev and negative_prompt:
+            neg_context_p = text_encoder(negative_prompt)
 
     video_context = context_p.video_encoding.to(device=device).clone()
     audio_context = context_p.audio_encoding
@@ -3641,14 +4295,17 @@ def sample_ltxv(
         if neg_audio_context is not None:
             neg_audio_context = neg_audio_context.to(device=device).clone()
 
-    del text_encoder
-    gc.collect()
-    cleanup_memory()
-    logger.info("Text encoder freed")
+    if keep_text_encoder_cached:
+        logger.info("Text encoder retained on CPU cache")
+    else:
+        del text_encoder
+        gc.collect()
+        cleanup_memory()
+        logger.info("Text encoder freed from %s", text_encoder_device)
+
     del context_p
     if neg_context_p is not None:
         del neg_context_p
-    gc.collect()
     cleanup_memory()
     logger.info("Text encoding complete")
 
@@ -3707,19 +4364,41 @@ def sample_ltxv(
     transformer = ledger.transformer()
     ledger.device = device
 
+    if model.is_scaled_fp8:
+        _prepare_ltx_scaled_fp8_transformer_for_runtime(
+            transformer,
+            model.checkpoint_path,
+            stage_label="Stage 1",
+        )
+
     xfm_inner = _unwrap_to_blocks(transformer)
-    _move_non_blocks_to_device(transformer, xfm_inner, device)
+
+    _move_non_blocks_to_device(transformer, xfm_inner, device, preserve_fp8=model.is_scaled_fp8)
     transformer.requires_grad_(False)
 
-    xfm_runtime = StagehandRuntime(
-        model=xfm_inner,
-        config=_stagehand_config_xfm(),
-        block_pattern=r"^transformer_blocks\.\d+$",
-        group="transformer",
-        dtype=model.dtype,
-        inference_mode=True,
+    # Decide: direct GPU load vs Stagehand.
+    # FP8 models (~19GB) fit in 24GB VRAM — load directly, skip block-swap.
+    # bf16 models (~35GB+) need Stagehand to stream blocks.
+    xfm_runtime = None
+    model_bytes = sum(p.data.nbytes for p in transformer.parameters())
+    use_direct_gpu = _try_load_ltx_transformer_direct_gpu(
+        transformer,
+        device=device,
+        model_bytes=model_bytes,
+        is_scaled_fp8=model.is_scaled_fp8,
+        stage_label="Stage 1",
     )
-    logger.info("Stagehand transformer ready (%d blocks)", len(xfm_runtime._registry))
+
+    if not use_direct_gpu:
+        xfm_runtime = StagehandRuntime(
+            model=xfm_inner,
+            config=_stagehand_config_xfm(),
+            block_pattern=r"^transformer_blocks\.\d+$",
+            group="transformer",
+            dtype=model.dtype,
+            inference_mode=True,
+        )
+        logger.info("Stagehand transformer ready (%d blocks)", len(xfm_runtime._registry))
 
     generator = torch.Generator(device=device).manual_seed(seed)
     noiser = GaussianNoiser(generator=generator)
@@ -3793,13 +4472,34 @@ def sample_ltxv(
     _ltxv_send_progress = getattr(_preview_local, 'send_progress', None)
     _ltxv_send_binary = getattr(_preview_local, 'send_binary', None)
 
+    # Per-step timing counters (nanoseconds).
+    import time as _time
+    _step_times_ns: list[dict] = []
+
     def wrapped_fn(video_state, audio_state, sigmas_arg, step_index):
-        xfm_runtime.begin_step(_call[0])
-        with xfm_runtime.managed_forward():
+        t0 = _time.perf_counter_ns()
+        if xfm_runtime is not None:
+            xfm_runtime.begin_step(_call[0])
+            with xfm_runtime.managed_forward():
+                result = base_fn(video_state, audio_state, sigmas_arg, step_index)
+            xfm_runtime.end_step()
+        else:
             result = base_fn(video_state, audio_state, sigmas_arg, step_index)
-        xfm_runtime.end_step()
+        elapsed_ns = _time.perf_counter_ns() - t0
         _call[0] += 1
-        logger.info("Step %d/%d complete", _call[0], n_steps)
+
+        vram_mb = 0.0
+        if torch.cuda.is_available():
+            vram_mb = torch.cuda.memory_allocated() / (1024 * 1024)
+        _step_times_ns.append({
+            "step": _call[0],
+            "elapsed_ms": elapsed_ns / 1_000_000,
+            "vram_mb": round(vram_mb, 1),
+        })
+        logger.info(
+            "Step %d/%d complete (%.0fms, VRAM %.0fMB)",
+            _call[0], n_steps, elapsed_ns / 1_000_000, vram_mb,
+        )
         # Send progress + preview via WS
         if _ltxv_send_progress is not None:
             _ltxv_send_progress(_call[0], n_steps)
@@ -3866,7 +4566,8 @@ def sample_ltxv(
         s1_audio_latent = encoded_audio_latent.detach().cpu()
     else:
         s1_audio_latent = audio_state.latent.cpu() if audio_state is not None and audio_state.latent is not None else None
-    xfm_runtime.shutdown()
+    if xfm_runtime is not None:
+        xfm_runtime.shutdown()
     del xfm_runtime, transformer, xfm_inner, base_fn, encoded_audio_latent
     gc.collect()
     cleanup_memory()
@@ -3888,11 +4589,18 @@ def sample_ltxv(
         dtype=model.dtype,
         device=device,
     ) if conditioning_images else []
-    try:
-        upsampler = stage_2_ledger.spatial_upsampler()
-    except Exception:
-        logger.warning("No spatial upsampler available — skipping stage 2, using stage 1 output directly")
+    if not model.distilled_lora_path:
+        logger.warning(
+            "No compatible distilled LTX stage-2 LoRA resolved for %s — skipping stage 2 and using stage 1 output directly",
+            model.checkpoint_path,
+        )
         upsampler = None
+    else:
+        try:
+            upsampler = stage_2_ledger.spatial_upsampler()
+        except Exception:
+            logger.warning("No spatial upsampler available — skipping stage 2, using stage 1 output directly")
+            upsampler = None
 
     if upsampler is not None:
         upscaled = upsample_video(
@@ -3911,19 +4619,37 @@ def sample_ltxv(
         transformer2 = stage_2_ledger.transformer()
         stage_2_ledger.device = device
 
+        if model.is_scaled_fp8:
+            _prepare_ltx_scaled_fp8_transformer_for_runtime(
+                transformer2,
+                model.checkpoint_path,
+                stage_label="Stage 2",
+            )
+
         xfm_inner2 = _unwrap_to_blocks(transformer2)
-        _move_non_blocks_to_device(transformer2, xfm_inner2, device)
+        _move_non_blocks_to_device(transformer2, xfm_inner2, device, preserve_fp8=model.is_scaled_fp8)
         transformer2.requires_grad_(False)
 
-        xfm_runtime2 = StagehandRuntime(
-            model=xfm_inner2,
-            config=_stagehand_config_xfm(),
-            block_pattern=r"^transformer_blocks\.\d+$",
-            group="transformer",
-            dtype=model.dtype,
-            inference_mode=True,
+        # Direct GPU vs Stagehand for stage 2
+        xfm_runtime2 = None
+        s2_model_bytes = sum(p.data.nbytes for p in transformer2.parameters())
+        use_direct_gpu2 = _try_load_ltx_transformer_direct_gpu(
+            transformer2,
+            device=device,
+            model_bytes=s2_model_bytes,
+            is_scaled_fp8=model.is_scaled_fp8,
+            stage_label="Stage 2",
         )
-        logger.info("Stage 2 Stagehand ready (%d blocks)", len(xfm_runtime2._registry))
+        if not use_direct_gpu2:
+            xfm_runtime2 = StagehandRuntime(
+                model=xfm_inner2,
+                config=_stagehand_config_xfm(),
+                block_pattern=r"^transformer_blocks\.\d+$",
+                group="transformer",
+                dtype=model.dtype,
+                inference_mode=True,
+            )
+            logger.info("Stage 2 Stagehand ready (%d blocks)", len(xfm_runtime2._registry))
 
         # Stage 2 always uses simple denoising (distilled sigmas, no CFG)
         s2_sigmas = torch.tensor(STAGE_2_DISTILLED_SIGMA_VALUES, dtype=torch.float32, device=device)
@@ -3937,10 +4663,13 @@ def sample_ltxv(
         s2_n_steps = len(s2_sigmas) - 1
 
         def s2_wrapped_fn(video_state, audio_state, sigmas_arg, step_index):
-            xfm_runtime2.begin_step(_call2[0])
-            with xfm_runtime2.managed_forward():
+            if xfm_runtime2 is not None:
+                xfm_runtime2.begin_step(_call2[0])
+                with xfm_runtime2.managed_forward():
+                    result = s2_base_fn(video_state, audio_state, sigmas_arg, step_index)
+                xfm_runtime2.end_step()
+            else:
                 result = s2_base_fn(video_state, audio_state, sigmas_arg, step_index)
-            xfm_runtime2.end_step()
             _call2[0] += 1
             logger.info("Stage 2 step %d/%d complete", _call2[0], s2_n_steps)
             # Send progress + preview via WS (stage 2)
@@ -4002,7 +4731,8 @@ def sample_ltxv(
             )
         logger.info("Stage 2 complete")
 
-        xfm_runtime2.shutdown()
+        if xfm_runtime2 is not None:
+            xfm_runtime2.shutdown()
         del xfm_runtime2, transformer2, xfm_inner2, s2_base_fn, upscaled
     else:
         # No upsampler — use stage 1 output directly
@@ -4041,7 +4771,21 @@ def sample_ltxv(
     gc.collect()
     cleanup_memory()
 
-    return {"video": decoded_video.cpu(), "audio": decoded_audio}
+    # Build performance counters summary.
+    perf_counters = None
+    if _step_times_ns:
+        step_ms = [s["elapsed_ms"] for s in _step_times_ns]
+        perf_counters = {
+            "steps": len(_step_times_ns),
+            "total_ms": sum(step_ms),
+            "avg_step_ms": sum(step_ms) / len(step_ms),
+            "min_step_ms": min(step_ms),
+            "max_step_ms": max(step_ms),
+            "peak_vram_mb": max(s["vram_mb"] for s in _step_times_ns),
+            "per_step": _step_times_ns,
+        }
+
+    return {"video": decoded_video.cpu(), "audio": decoded_audio, "counters": perf_counters}
 
 
 __all__ = [
