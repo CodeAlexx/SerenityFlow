@@ -49,6 +49,22 @@ body {
     align-items: center;
     gap: 8px;
 }
+.topbar-icon-btn {
+    background: none;
+    border: none;
+    color: var(--shell-text-muted, #888);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    opacity: 0.6;
+    transition: opacity 0.15s;
+}
+.topbar-icon-btn:hover {
+    opacity: 1;
+    background: rgba(255,255,255,0.08);
+}
 
 .topbar-center {
     position: absolute;

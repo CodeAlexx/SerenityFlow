@@ -84,6 +84,7 @@ interface WorkflowParams {
     maskImageName?: string;
     strengthModel?: number;
     strengthClip?: number;
+    upscale?: string;
     [key: string]: unknown;
 }
 

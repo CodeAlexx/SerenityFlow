@@ -24,6 +24,9 @@ var WorkflowBuilder = (function() {
         if (params.loras && params.loras.length > 0) {
             workflow = injectLoRAs(workflow, params.loras);
         }
+        if (params.upscale && params.upscale !== 'none') {
+            workflow = injectUpscale(workflow, params.upscale, arch);
+        }
         return workflow;
     }
 
@@ -487,11 +490,11 @@ var WorkflowBuilder = (function() {
         var w = ModelUtils.clampVideoDimension(p.width);
         var h = ModelUtils.clampVideoDimension(p.height);
         var seed = resolveSeed(p.seed);
-        var frames = Math.max(9, p.frames || 97);
+        var frames = Math.min(Math.max(9, p.frames || 97), 129);
         var fps = p.fps || 24;
         var hasGuideImage = typeof p.initImageName === 'string' && p.initImageName.length > 0;
         var isDistilled = /distill/i.test(p.model);
-        var defaultSteps = isDistilled ? 8 : 25;
+        var defaultSteps = isDistilled ? 8 : 20;
         var loaderInputs: Record<string, unknown> = {
             checkpoint_path: p.model,
             gemma_path: 'gemma-3-12b-it',
@@ -682,6 +685,52 @@ var WorkflowBuilder = (function() {
         });
 
         workflow[samplerKey].inputs.model = currentModel;
+        return workflow;
+    }
+
+    // ─── Post-generation upscale (RealESRGAN) ─────────────────────────────
+
+    function injectUpscale(workflow: ComfyPrompt, upscaleValue: string, arch: string) {
+        var scale = upscaleValue === '4x' ? 4 : 2;
+
+        // Find the Save node that receives decoded images/video
+        var saveNodeId: string | null = null;
+        var sourceRef: [string, number] | null = null;
+        var isVideo = (arch === 'ltxv' || arch === 'wan');
+
+        Object.keys(workflow).forEach(function(key) {
+            var node = workflow[key];
+            if (isVideo && node.class_type === 'SaveVideo') {
+                saveNodeId = key;
+                // SaveVideo input is 'video' which comes from sampler output 1
+                sourceRef = node.inputs.video as [string, number];
+            } else if (!isVideo && (node.class_type === 'SaveImage' || node.class_type === 'SaveAnimatedWEBP')) {
+                saveNodeId = key;
+                sourceRef = node.inputs.images as [string, number];
+            }
+        });
+
+        if (!saveNodeId || !sourceRef) return workflow;
+
+        var nextId = String(Math.max.apply(null, Object.keys(workflow).map(Number)) + 1);
+
+        // Insert VideoUpscaleRealESRGAN between source and save
+        workflow[nextId] = {
+            class_type: 'VideoUpscaleRealESRGAN',
+            inputs: {
+                images: sourceRef,
+                scale: scale,
+                model_path: '/home/alex/.serenity/models/upscalers/realesrgan-x4plus/RealESRGAN_x4.pth'
+            }
+        };
+
+        // Rewire save node to use upscaled output
+        if (isVideo) {
+            workflow[saveNodeId].inputs.video = [nextId, 0];
+        } else {
+            workflow[saveNodeId].inputs.images = [nextId, 0];
+        }
+
         return workflow;
     }
 

@@ -117,13 +117,19 @@ def ltxv_loader(
         "audio": ("AUDIO",),
         "audio_start_time": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 600.0, "step": 0.1}),
         "audio_duration": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 600.0, "step": 0.1}),
+        "max_shift": ("FLOAT", {"default": 2.05, "min": 0.0, "max": 10.0, "step": 0.05}),
+        "base_shift": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 10.0, "step": 0.05}),
+        "decode_timestep": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.005}),
+        "decode_noise_scale": ("FLOAT", {"default": 0.025, "min": 0.0, "max": 1.0, "step": 0.005}),
     }},
 )
 def ltxv_sampler(ltxv_model, prompt, width=768, height=512, num_frames=25,
                  steps=8, cfg=3.0, seed=42, negative_prompt="",
                  frame_rate=25.0, stg_scale=1.0, mode="auto",
                  guide_image=None, guide_strength=1.0, guide_frame_idx=0,
-                 audio=None, audio_start_time=0.0, audio_duration=0.0):
+                 audio=None, audio_start_time=0.0, audio_duration=0.0,
+                 max_shift=2.05, base_shift=0.95,
+                 decode_timestep=0.05, decode_noise_scale=0.025):
     """Generate video frames using LTX-V 19B.
 
     Mode controls the denoising schedule:
@@ -154,6 +160,10 @@ def ltxv_sampler(ltxv_model, prompt, width=768, height=512, num_frames=25,
         audio=audio,
         audio_start_time=audio_start_time,
         audio_duration=audio_duration if audio_duration and audio_duration > 0 else None,
+        max_shift=max_shift,
+        base_shift=base_shift,
+        decode_timestep=decode_timestep,
+        decode_noise_scale=decode_noise_scale,
     )
 
     video = result["video"]

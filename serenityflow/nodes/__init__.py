@@ -28,4 +28,5 @@ from serenityflow.nodes import (  # noqa: F401
     res4lyf,
     face_workflow,
     video_pipeline,
+    propost,
 )

@@ -17,11 +17,38 @@ log = logging.getLogger(__name__)
 _output_counter: dict[str, int] = {}
 
 
+def _list_input_images():
+    """List image files in the input directory."""
+    try:
+        # Project root: serenityflow/nodes/image_io.py → ../../input
+        _this_dir = os.path.dirname(os.path.abspath(__file__))
+        _project_root = os.path.dirname(os.path.dirname(_this_dir))
+        candidates = [os.path.join(_project_root, "input")]
+        try:
+            from serenityflow.bridge.model_paths import get_model_paths
+            candidates.append(os.path.join(get_model_paths().base_dir, "input"))
+        except Exception:
+            pass
+        exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".gif"}
+        files = []
+        seen = set()
+        for input_dir in candidates:
+            if not os.path.isdir(input_dir):
+                continue
+            for f in sorted(os.listdir(input_dir)):
+                if f not in seen and os.path.splitext(f)[1].lower() in exts:
+                    files.append(f)
+                    seen.add(f)
+        return files or ["(no images)"]
+    except Exception:
+        return ["(no images)"]
+
+
 @registry.register(
     "LoadImage",
     return_types=("IMAGE", "MASK"),
     category="image",
-    input_types={"required": {"image": ("STRING",)}},
+    input_types=lambda: {"required": {"image": (_list_input_images(),)}},
 )
 def load_image(image):
     from serenityflow.bridge.model_paths import get_model_paths

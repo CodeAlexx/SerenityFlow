@@ -154,7 +154,7 @@ var SimpleMode = (function() {
     var durationPresets: Record<string, { frames: number; fps: number }> = {
         short:  { frames: 49,  fps: 24 },
         medium: { frames: 97,  fps: 24 },
-        long:   { frames: 193, fps: 24 }
+        long:   { frames: 129, fps: 24 }
     };
 
     var imageAspects = [
@@ -166,10 +166,10 @@ var SimpleMode = (function() {
     ];
 
     var videoAspects = [
-        { label: '1:1',  w: 512, h: 512, vw: 16, vh: 16 },
+        { label: '1:1',  w: 768, h: 768, vw: 16, vh: 16 },
         { label: '4:3',  w: 768, h: 576, vw: 18, vh: 14 },
         { label: '16:9', w: 768, h: 432, vw: 20, vh: 11 },
-        { label: '3:4',  w: 576, h: 768, vw: 14, vh: 18 },
+        { label: '3:2',  w: 768, h: 512, vw: 18, vh: 12 },
         { label: '9:16', w: 432, h: 768, vw: 11, vh: 20 }
     ];
 
@@ -190,8 +190,12 @@ var SimpleMode = (function() {
     function getQualityConfig(quality: string) {
         var base = qualityPresets[quality] || qualityPresets.balanced;
         var cfg: number, scheduler: string;
+        var isVideo = state.arch === 'ltxv' || state.arch === 'wan';
         if (state.arch === 'flux') {
             cfg = 1.0;
+            scheduler = 'euler';
+        } else if (isVideo) {
+            cfg = 3.0;
             scheduler = 'euler';
         } else if (quality === 'draft') {
             cfg = 5.0;
@@ -298,7 +302,53 @@ var SimpleMode = (function() {
                 '<div id="simple-duration" class="simple-duration-row">' +
                     '<button class="simple-duration-btn" data-duration="short">Short (2s)</button>' +
                     '<button class="simple-duration-btn active" data-duration="medium">Medium (4s)</button>' +
-                    '<button class="simple-duration-btn" data-duration="long">Long (8s)</button>' +
+                    '<button class="simple-duration-btn" data-duration="long">Long (5s)</button>' +
+                '</div>' +
+            '</div>' +
+        '</div>' +
+
+        // Advanced Options (CFG, Sampler, Negative Prompt)
+        '<div class="simple-section">' +
+            '<div id="simple-adv-options-toggle" class="simple-disclosure">' +
+                '<span class="simple-disclosure-arrow">&#9654;</span> Advanced Options' +
+            '</div>' +
+            '<div id="simple-adv-options-body" class="simple-disclosure-body">' +
+                '<div class="simple-adv-row">' +
+                    '<span class="simple-quick-label">CFG</span>' +
+                    '<input type="range" id="simple-cfg-slider" class="simple-slider" min="1" max="20" step="0.5" value="3.0">' +
+                    '<span id="simple-cfg-value" class="simple-slider-value">3.0</span>' +
+                '</div>' +
+                '<div class="simple-adv-row">' +
+                    '<span class="simple-quick-label">Steps</span>' +
+                    '<input type="range" id="simple-steps-slider" class="simple-slider" min="1" max="50" step="1" value="20">' +
+                    '<span id="simple-steps-value" class="simple-slider-value">20</span>' +
+                '</div>' +
+                '<div class="simple-adv-row">' +
+                    '<span class="simple-quick-label">Sampler</span>' +
+                    '<select id="simple-sampler" class="simple-select-sm">' +
+                        '<option value="euler" selected>Euler</option>' +
+                        '<option value="euler_ancestral">Euler A</option>' +
+                        '<option value="dpmpp_2m">DPM++ 2M</option>' +
+                        '<option value="dpmpp_sde">DPM++ SDE</option>' +
+                        '<option value="ddim">DDIM</option>' +
+                        '<option value="uni_pc">UniPC</option>' +
+                    '</select>' +
+                '</div>' +
+                '<div class="simple-adv-row">' +
+                    '<span class="simple-quick-label">Negative Prompt</span>' +
+                    '<textarea id="simple-neg-prompt-adv" class="simple-neg-prompt" rows="2" placeholder="What to avoid (blur, low quality, etc.)"></textarea>' +
+                '</div>' +
+                '<div class="simple-adv-row">' +
+                    '<span class="simple-quick-label">Seed</span>' +
+                    '<input type="number" id="simple-seed" class="simple-input-sm" value="-1" min="-1">' +
+                '</div>' +
+                '<div class="simple-adv-row">' +
+                    '<span class="simple-quick-label">Upscale</span>' +
+                    '<select id="simple-upscale" class="simple-select-sm">' +
+                        '<option value="none" selected>None</option>' +
+                        '<option value="2x">2x</option>' +
+                        '<option value="4x">4x</option>' +
+                    '</select>' +
                 '</div>' +
             '</div>' +
         '</div>' +
@@ -503,7 +553,7 @@ var SimpleMode = (function() {
     function setDurationPreset(d: string) {
         state.duration = d;
         var dp = durationPresets[d];
-        state.frames = dp.frames;
+        state.frames = Math.min(dp.frames, 129);
         state.fps = dp.fps;
         var row = document.getElementById('simple-duration');
         if (row) {
@@ -677,6 +727,50 @@ var SimpleMode = (function() {
             });
         }
 
+        // Advanced Options disclosure + controls
+        var advOptionsToggle = document.getElementById('simple-adv-options-toggle');
+        var advOptionsBody = document.getElementById('simple-adv-options-body');
+        if (advOptionsToggle && advOptionsBody) {
+            advOptionsToggle.addEventListener('click', function(this: HTMLElement) {
+                this.classList.toggle('open');
+                advOptionsBody!.classList.toggle('open');
+            });
+        }
+        var cfgSlider = document.getElementById('simple-cfg-slider') as HTMLInputElement | null;
+        var cfgValue = document.getElementById('simple-cfg-value');
+        if (cfgSlider) {
+            cfgSlider.addEventListener('input', function(this: HTMLInputElement) {
+                state.cfg = parseFloat(this.value);
+                if (cfgValue) cfgValue.textContent = this.value;
+            });
+        }
+        var stepsSlider = document.getElementById('simple-steps-slider') as HTMLInputElement | null;
+        var stepsValue = document.getElementById('simple-steps-value');
+        if (stepsSlider) {
+            stepsSlider.addEventListener('input', function(this: HTMLInputElement) {
+                state.steps = parseInt(this.value);
+                if (stepsValue) stepsValue.textContent = this.value;
+            });
+        }
+        var samplerSelect = document.getElementById('simple-sampler') as HTMLSelectElement | null;
+        if (samplerSelect) {
+            samplerSelect.addEventListener('change', function(this: HTMLSelectElement) {
+                state.scheduler = this.value;
+            });
+        }
+        var negPromptAdv = document.getElementById('simple-neg-prompt-adv') as HTMLTextAreaElement | null;
+        if (negPromptAdv) {
+            negPromptAdv.addEventListener('input', function(this: HTMLTextAreaElement) {
+                state.negPrompt = this.value;
+            });
+        }
+        var seedInput = document.getElementById('simple-seed') as HTMLInputElement | null;
+        if (seedInput) {
+            seedInput.addEventListener('change', function(this: HTMLInputElement) {
+                state.seed = parseInt(this.value) || -1;
+            });
+        }
+
         // Quality presets (with arch-aware config)
         if (els.qualityRow) {
             els.qualityRow.addEventListener('click', function(e: MouseEvent) {
@@ -834,9 +928,11 @@ var SimpleMode = (function() {
         var isVideo = arch === 'ltxv' || arch === 'wan';
 
         // Auto-set CFG/Guidance based on arch
-        if (isFlux || isVideo) {
+        if (isFlux) {
             state.cfg = 1.0;
             state.guidance = 3.5;
+        } else if (isVideo) {
+            state.cfg = 3.0;
         } else {
             state.cfg = 7.0;
         }
@@ -860,7 +956,7 @@ var SimpleMode = (function() {
         // Apply current duration preset for video
         if (isVideo) {
             var dp = durationPresets[state.duration];
-            state.frames = dp.frames;
+            state.frames = Math.min(dp.frames, 129);
             state.fps = dp.fps;
         }
 
@@ -894,6 +990,8 @@ var SimpleMode = (function() {
     function buildWorkflow() {
         // Apply quality config before building
         var config = getQualityConfig(state.quality);
+        var upscaleEl = document.getElementById('simple-upscale') as HTMLSelectElement | null;
+        var upscaleVal = upscaleEl ? upscaleEl.value : 'none';
         return WorkflowBuilder.build({
             model: state.model || '',
             prompt: getEffectivePrompt(),
@@ -906,7 +1004,8 @@ var SimpleMode = (function() {
             scheduler: config.scheduler,
             seed: state.seed,
             frames: state.frames,
-            fps: state.fps
+            fps: state.fps,
+            upscale: upscaleVal
         });
     }
 

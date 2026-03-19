@@ -1,6 +1,7 @@
-"""Upscale & Hires Fix nodes -- bislerp latent upscale, UltimateSDUpscale, latent compositing."""
+"""Upscale & Hires Fix nodes -- bislerp latent upscale, UltimateSDUpscale, latent compositing, RealESRGAN."""
 from __future__ import annotations
 
+import logging
 import math
 
 import torch
@@ -8,6 +9,8 @@ import torch.nn.functional as F
 
 from serenityflow.bridge.types import unwrap_latent, wrap_latent
 from serenityflow.nodes.registry import registry
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -517,3 +520,106 @@ def ultimate_sd_upscale(
     result = result.clamp(0.0, 1.0)
 
     return (result,)
+
+
+# ---------------------------------------------------------------------------
+# VideoUpscaleRealESRGAN -- pixel-space upscale for video frames
+# ---------------------------------------------------------------------------
+
+_realesrgan_model_cache: dict[str, torch.nn.Module] = {}
+
+
+def _load_rrdbnet(model_path: str, scale: int, device: torch.device) -> torch.nn.Module:
+    """Load RRDBNet from a RealESRGAN checkpoint.
+
+    Requires the ``basicsr`` package for the RRDBNet architecture.
+    Returns the model in eval mode on the given device.
+    """
+    from basicsr.archs.rrdbnet_arch import RRDBNet
+
+    # RealESRGAN_x4plus default arch: 3 in, 3 out, 64 features, 23 RRDB blocks, grow channels 32
+    model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=scale)
+    state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+    # Some checkpoints wrap the state dict under 'params_ema' or 'params'
+    if "params_ema" in state_dict:
+        state_dict = state_dict["params_ema"]
+    elif "params" in state_dict:
+        state_dict = state_dict["params"]
+    model.load_state_dict(state_dict, strict=True)
+    model.eval()
+    model.to(device)
+    return model
+
+
+@registry.register(
+    "VideoUpscaleRealESRGAN",
+    return_types=("IMAGE",),
+    category="image/upscaling",
+    input_types={"required": {
+        "images": ("IMAGE",),
+        "scale": ("INT",),
+        "model_path": ("STRING",),
+    }},
+)
+def video_upscale_realesrgan(
+    images: torch.Tensor,
+    scale: int = 4,
+    model_path: str = "/home/alex/.serenity/models/upscalers/realesrgan-x4plus/RealESRGAN_x4.pth",
+) -> tuple[torch.Tensor]:
+    """Upscale image/video frames using RealESRGAN (basicsr RRDBNet).
+
+    Falls back to bicubic interpolation if ``basicsr`` is not installed.
+
+    Args:
+        images: [N, H, W, C] float32 tensor in [0, 1].
+        scale: Upscale factor (2 or 4).
+        model_path: Path to ``RealESRGAN_x4.pth`` weights.
+
+    Returns:
+        Upscaled [N, H*scale, W*scale, C] float32 tensor in [0, 1].
+    """
+    N, H, W, C = images.shape
+    target_h = H * scale
+    target_w = W * scale
+
+    # Try loading RRDBNet via basicsr
+    try:
+        cache_key = f"{model_path}:{scale}"
+        if cache_key not in _realesrgan_model_cache:
+            _realesrgan_model_cache[cache_key] = _load_rrdbnet(model_path, scale, torch.device("cuda"))
+        model = _realesrgan_model_cache[cache_key]
+        device = next(model.parameters()).device
+
+        # Process frames one at a time to limit VRAM usage
+        out_frames = []
+        for i in range(N):
+            frame = images[i:i + 1]  # [1, H, W, C]
+            frame_bchw = frame.permute(0, 3, 1, 2).to(device=device, dtype=torch.float32)
+            with torch.no_grad():
+                upscaled = model(frame_bchw)  # [1, C, H*scale, W*scale]
+            upscaled = upscaled.clamp(0.0, 1.0).permute(0, 2, 3, 1).cpu()
+            # If model is x4 but we want x2, downsample by 2
+            if scale == 2 and upscaled.shape[1] == H * 4:
+                upscaled = F.interpolate(
+                    upscaled.permute(0, 3, 1, 2), size=(target_h, target_w),
+                    mode="bicubic", align_corners=False,
+                ).permute(0, 2, 3, 1).clamp(0.0, 1.0)
+            out_frames.append(upscaled)
+        result = torch.cat(out_frames, dim=0)  # [N, H*scale, W*scale, C]
+        logger.info("RealESRGAN upscaled %d frames %dx%d -> %dx%d", N, H, W, target_h, target_w)
+        return (result,)
+
+    except ImportError:
+        logger.warning(
+            "basicsr not installed -- falling back to bicubic interpolation. "
+            "Install basicsr for RealESRGAN quality: pip install basicsr"
+        )
+    except Exception as e:
+        logger.warning("RealESRGAN failed (%s) -- falling back to bicubic interpolation", e)
+
+    # Fallback: bicubic interpolation
+    img_bchw = images.permute(0, 3, 1, 2)  # [N, C, H, W]
+    upscaled = F.interpolate(img_bchw, size=(target_h, target_w), mode="bicubic", align_corners=False)
+    upscaled = upscaled.clamp(0.0, 1.0).permute(0, 2, 3, 1)  # [N, H*s, W*s, C]
+    logger.info("Bicubic upscaled %d frames %dx%d -> %dx%d (fallback)", N, H, W, target_h, target_w)
+    return (upscaled,)
