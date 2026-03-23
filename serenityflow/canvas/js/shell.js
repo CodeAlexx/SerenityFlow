@@ -74,6 +74,14 @@ function switchTab(tabId) {
     if (tabId === 'settings' && typeof SettingsTab !== 'undefined') {
         SettingsTab.init();
     }
+    // Init Video Edit tab on first switch (deferred — Konva needs visible container)
+    if (tabId === 'video-edit' && typeof VideoEditTab !== 'undefined') {
+        if (!VideoEditTab._initialized) {
+            VideoEditTab.init();
+        } else {
+            requestAnimationFrame(function () { VideoEditTab.resize(); });
+        }
+    }
     // Resize Konva stage when workflows tab becomes visible
     if (tabId === 'workflows') {
         requestAnimationFrame(resizeWorkflowStage);
@@ -103,6 +111,9 @@ window.addEventListener('resize', function () {
     }
     if (activeTab === 'canvas' && typeof CanvasTab !== 'undefined') {
         CanvasTab.resize();
+    }
+    if (activeTab === 'video-edit' && typeof VideoEditTab !== 'undefined' && VideoEditTab._initialized) {
+        VideoEditTab.resize();
     }
 });
 /**
@@ -345,7 +356,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     });
     // ── Keyboard Shortcuts ──
-    var tabKeys = { '1': 'generate', '2': 'queue', '3': 'canvas', '4': 'models', '5': 'workflows', '6': 'settings' };
+    var tabKeys = { '1': 'generate', '2': 'queue', '3': 'canvas', '4': 'video-edit', '5': 'models', '6': 'workflows', '7': 'settings' };
     document.addEventListener('keydown', function (e) {
         var target = e.target;
         var tag = target.tagName;

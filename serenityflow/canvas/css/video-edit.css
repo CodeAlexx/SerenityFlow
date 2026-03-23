@@ -1,0 +1,544 @@
+/* video-edit.css — Video Edit tab: timeline, toolbar, preview placeholder */
+
+#panel-video-edit {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    background: var(--shell-bg-base, #0f0f13);
+}
+
+/* ===== Preview Player ===== */
+#ve-preview {
+    flex: 0 0 40%;
+    min-height: 200px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #111;
+    border-bottom: 1px solid var(--shell-border, #2a2a3a);
+    position: relative;
+    overflow: hidden;
+}
+
+#ve-preview-video {
+    display: none;
+}
+
+#ve-preview-canvas {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+#ve-preview-overlay {
+    position: absolute;
+    bottom: 8px;
+    right: 12px;
+    pointer-events: none;
+}
+
+#ve-preview-tc {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.6);
+    background: rgba(0, 0, 0, 0.5);
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+#ve-preview-placeholder {
+    color: #555;
+    font-size: 14px;
+    user-select: none;
+}
+
+/* ===== Toolbar ===== */
+#ve-toolbar {
+    flex: 0 0 auto;
+    height: 40px;
+    background: var(--shell-bg-surface, #1a1a24);
+    border-bottom: 1px solid var(--shell-border, #2a2a3a);
+}
+
+.ve-toolbar-inner {
+    display: flex;
+    align-items: center;
+    height: 100%;
+    padding: 0 8px;
+    gap: 4px;
+}
+
+.ve-tb-btn {
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: #ccc;
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 150ms ease;
+}
+
+.ve-tb-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.ve-tb-btn.ve-active {
+    color: var(--shell-accent, #6c6af5);
+}
+
+.ve-timecode {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 12px;
+    color: #aaa;
+    padding: 0 8px;
+    min-width: 70px;
+    user-select: none;
+}
+
+.ve-spacer {
+    flex: 1;
+}
+
+.ve-zoom-label {
+    font-size: 11px;
+    color: #888;
+    min-width: 40px;
+    text-align: right;
+    user-select: none;
+}
+
+.ve-zoom-slider {
+    width: 100px;
+    accent-color: var(--shell-accent, #6c6af5);
+}
+
+/* ===== Timeline Container ===== */
+#ve-timeline-container {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    min-height: 0;
+}
+
+#ve-timeline-canvas {
+    width: 100%;
+    height: 100%;
+}
+
+/* ===== Context Menu ===== */
+.ve-context-menu {
+    position: absolute;
+    z-index: 500;
+    background: var(--shell-bg-panel, #1f1f2e);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 8px;
+    padding: 4px 0;
+    min-width: 160px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.ve-ctx-item {
+    padding: 6px 14px;
+    font-size: 12px;
+    color: var(--shell-text, #e8e8f0);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+}
+
+.ve-ctx-item:hover {
+    background: var(--shell-bg-hover, #252538);
+}
+
+.ve-ctx-sep {
+    height: 1px;
+    background: var(--shell-border, #2a2a3a);
+    margin: 4px 8px;
+}
+
+/* ===== Loading shimmer for clips awaiting thumbnails ===== */
+@keyframes ve-shimmer {
+    0%   { background-position: -200px 0; }
+    100% { background-position: 200px 0; }
+}
+
+.ve-loading-text {
+    font-size: 9px;
+    fill: rgba(255, 255, 255, 0.4);
+}
+
+/* ===== V4: Retake Panel ===== */
+.ve-retake-panel {
+    position: absolute;
+    z-index: 400;
+    background: var(--shell-bg-panel, #1f1f2e);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 10px;
+    padding: 12px 16px;
+    width: 320px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    display: none;
+}
+
+.ve-retake-panel h4 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    color: var(--shell-text, #e8e8f0);
+    font-weight: 600;
+}
+
+.ve-retake-prompt {
+    width: 100%;
+    height: 60px;
+    background: var(--shell-bg-base, #0f0f13);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 6px;
+    color: var(--shell-text, #e8e8f0);
+    padding: 8px;
+    font-size: 12px;
+    resize: vertical;
+    font-family: inherit;
+}
+
+.ve-retake-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.ve-retake-row label {
+    font-size: 11px;
+    color: var(--shell-text-muted, #6b6b80);
+    min-width: 55px;
+}
+
+.ve-retake-row input[type="range"] {
+    flex: 1;
+    accent-color: #ff8c42;
+}
+
+.ve-retake-row .ve-retake-val {
+    font-size: 11px;
+    color: #aaa;
+    min-width: 30px;
+    text-align: right;
+}
+
+.ve-retake-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+    justify-content: flex-end;
+}
+
+.ve-retake-btn {
+    padding: 6px 14px;
+    border: none;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.ve-retake-btn-primary {
+    background: #ff8c42;
+    color: #fff;
+}
+
+.ve-retake-btn-primary:hover {
+    background: #ff9d5c;
+}
+
+.ve-retake-btn-secondary {
+    background: transparent;
+    color: var(--shell-text-muted, #6b6b80);
+    border: 1px solid var(--shell-border, #2a2a3a);
+}
+
+.ve-retake-btn-secondary:hover {
+    background: var(--shell-bg-hover, #252538);
+}
+
+/* ===== V4: Take Switcher Dropdown ===== */
+.ve-take-dropdown {
+    position: absolute;
+    z-index: 450;
+    background: var(--shell-bg-panel, #1f1f2e);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 8px;
+    padding: 4px 0;
+    min-width: 180px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+    display: none;
+    max-height: 240px;
+    overflow-y: auto;
+}
+
+.ve-take-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--shell-text, #e8e8f0);
+}
+
+.ve-take-item:hover {
+    background: var(--shell-bg-hover, #252538);
+}
+
+.ve-take-item.ve-take-active {
+    color: #ff8c42;
+}
+
+.ve-take-radio {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid var(--shell-text-muted, #6b6b80);
+    flex-shrink: 0;
+}
+
+.ve-take-active .ve-take-radio {
+    border-color: #ff8c42;
+    background: #ff8c42;
+}
+
+/* ===== V4: Bridge shot prompt panel ===== */
+.ve-bridge-panel {
+    position: absolute;
+    z-index: 400;
+    background: var(--shell-bg-panel, #1f1f2e);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 10px;
+    padding: 12px 16px;
+    width: 300px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    display: none;
+}
+
+.ve-bridge-panel h4 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    color: var(--shell-text, #e8e8f0);
+    font-weight: 600;
+}
+
+.ve-bridge-info {
+    font-size: 11px;
+    color: var(--shell-text-muted, #6b6b80);
+    margin-bottom: 8px;
+}
+
+/* ===== V4: Generation progress pulse ===== */
+@keyframes ve-gen-pulse {
+    0%, 100% { opacity: 0.5; }
+    50% { opacity: 0.85; }
+}
+
+.ve-generating {
+    animation: ve-gen-pulse 1.5s ease-in-out infinite;
+}
+
+/* ===== V4: Disabled context menu item ===== */
+.ve-ctx-item.ve-ctx-disabled {
+    color: var(--shell-text-muted, #6b6b80);
+    cursor: default;
+    pointer-events: none;
+}
+
+/* ===== V5: Export Dialog ===== */
+.ve-export-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.ve-export-dialog {
+    background: var(--shell-bg-panel, #1f1f2e);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 12px;
+    padding: 20px 24px;
+    width: 400px;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+}
+
+.ve-export-dialog h3 {
+    margin: 0 0 16px;
+    font-size: 15px;
+    color: var(--shell-text, #e8e8f0);
+    font-weight: 600;
+}
+
+.ve-export-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.ve-export-row label {
+    font-size: 12px;
+    color: var(--shell-text-muted, #6b6b80);
+    min-width: 80px;
+}
+
+.ve-export-row select,
+.ve-export-row input[type="text"],
+.ve-export-row input[type="number"] {
+    flex: 1;
+    background: var(--shell-bg-base, #0f0f13);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 6px;
+    color: var(--shell-text, #e8e8f0);
+    padding: 5px 8px;
+    font-size: 12px;
+}
+
+.ve-export-row input[type="checkbox"] {
+    accent-color: var(--shell-accent, #6c6af5);
+}
+
+.ve-export-radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 10px;
+}
+
+.ve-export-radio-group label {
+    font-size: 12px;
+    color: var(--shell-text, #e8e8f0);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
+
+.ve-export-progress {
+    background: var(--shell-bg-base, #0f0f13);
+    border-radius: 6px;
+    padding: 10px;
+    margin: 12px 0;
+}
+
+.ve-export-progress-bar {
+    height: 6px;
+    background: var(--shell-border, #2a2a3a);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 6px;
+}
+
+.ve-export-progress-fill {
+    height: 100%;
+    background: var(--shell-accent, #6c6af5);
+    border-radius: 3px;
+    width: 0%;
+    transition: width 200ms ease;
+}
+
+.ve-export-progress-text {
+    font-size: 11px;
+    color: var(--shell-text-muted, #6b6b80);
+}
+
+.ve-export-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 16px;
+}
+
+.ve-export-btn {
+    padding: 7px 16px;
+    border: none;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.ve-export-btn-primary {
+    background: var(--shell-accent, #6c6af5);
+    color: #fff;
+}
+
+.ve-export-btn-primary:hover {
+    background: var(--shell-accent-hover, #8583ff);
+}
+
+.ve-export-btn-primary:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.ve-export-btn-secondary {
+    background: transparent;
+    color: var(--shell-text-muted, #6b6b80);
+    border: 1px solid var(--shell-border, #2a2a3a);
+}
+
+/* ===== V5: File dropdown menu ===== */
+.ve-file-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 500;
+    background: var(--shell-bg-panel, #1f1f2e);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 8px;
+    padding: 4px 0;
+    min-width: 180px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* ===== V5: Subtitle overlay in preview ===== */
+#ve-preview-subtitle {
+    position: absolute;
+    bottom: 32px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 16px;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.65);
+    padding: 4px 12px;
+    border-radius: 4px;
+    max-width: 80%;
+    text-align: center;
+    pointer-events: none;
+    white-space: pre-wrap;
+    display: none;
+}
+
+/* ===== V5: Inline subtitle editor ===== */
+.ve-sub-editor {
+    position: absolute;
+    z-index: 300;
+    background: var(--shell-bg-panel, #1f1f2e);
+    border: 1px solid #d4a72c;
+    border-radius: 6px;
+    padding: 4px;
+}
+
+.ve-sub-editor textarea {
+    width: 200px;
+    height: 50px;
+    background: var(--shell-bg-base, #0f0f13);
+    border: none;
+    border-radius: 4px;
+    color: var(--shell-text, #e8e8f0);
+    font-size: 12px;
+    padding: 4px;
+    resize: none;
+}

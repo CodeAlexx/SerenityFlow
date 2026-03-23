@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="css/queue.css">
     <link rel="stylesheet" href="css/models.css">
     <link rel="stylesheet" href="css/settings.css">
+    <link rel="stylesheet" href="css/video-edit.css">
     <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
 </head>
 <body>
@@ -52,6 +53,10 @@
                 <button class="nav-btn" data-tab="workflows" title="Workflows">
                     <i data-lucide="share-2"></i>
                     <div class="tooltip">Workflows</div>
+                </button>
+                <button class="nav-btn" data-tab="video-edit" title="Video Edit">
+                    <i data-lucide="film"></i>
+                    <div class="tooltip">Video Edit</div>
                 </button>
                 <button class="nav-btn" data-tab="models" title="Models">
                     <i data-lucide="box"></i>
@@ -171,6 +176,9 @@
                 <input type="file" id="file-input" accept=".json" style="display:none">
             </div>
 
+            <div class="tab-panel" id="panel-video-edit" style="display: none">
+            </div>
+
             <div class="tab-panel" id="panel-models" style="display: none">
                 <div class="placeholder">Models</div>
             </div>
@@ -273,6 +281,9 @@
 
     <!-- Models tab -->
     <script src="js/models.js"></script>
+
+    <!-- Video Edit tab -->
+    <script src="js/video-edit.js"></script>
 
     <!-- Shell navigation (runs after app.js init, switches to saved tab) -->
     <script src="js/shell.js"></script>

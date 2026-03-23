@@ -585,6 +585,7 @@ var GenerateTab = (function () {
             '<div id="gen-action-bar" class="gen-action-bar" style="display:none">' +
             '<button class="gen-action-btn" id="gen-download" title="Download"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>' +
             '<button class="gen-action-btn" id="gen-to-canvas" title="Coming in Canvas tab" disabled><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg></button>' +
+            '<button class="gen-action-btn" id="gen-to-timeline" title="Send to Timeline"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/><line x1="17" y1="17" x2="22" y2="17"/></svg></button>' +
             '<button class="gen-action-btn" id="gen-clear-preview" title="Clear"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg></button>' +
             '</div>' +
             // Metadata panel (below action bar)
@@ -1188,6 +1189,72 @@ var GenerateTab = (function () {
         els.clearPreview.addEventListener('click', function () {
             clearPreview();
         });
+        // Send to Timeline
+        var toTimelineBtn = document.getElementById('gen-to-timeline');
+        if (toTimelineBtn) {
+            toTimelineBtn.addEventListener('click', function () {
+                if (!state.currentImage) return;
+                if (typeof VideoEditTab === 'undefined') {
+                    alert('Open the Video Edit tab first.');
+                    return;
+                }
+                var pid = VideoEditTab.getActiveProjectId();
+                if (!pid) {
+                    alert('Open the Video Edit tab first to create a project.');
+                    return;
+                }
+                var label = 'Generated';
+                try {
+                    var promptEl = document.getElementById('gen-prompt');
+                    if (promptEl && promptEl.value) {
+                        label = promptEl.value.slice(0, 30).trim() || 'Generated';
+                    }
+                } catch (e) {}
+                var durationFrames = state.currentIsVideo ? (30 * 5) : (30 * 3);
+
+                // Resolve /view URL to a real filesystem path before passing to timeline
+                var viewUrl = state.currentImage;
+                var params = {};
+                try {
+                    var urlObj = new URL(viewUrl, window.location.origin);
+                    urlObj.searchParams.forEach(function (v, k) { params[k] = v; });
+                } catch (e) {
+                    // Not a URL — pass as-is (may be a direct path)
+                    VideoEditTab.addClipFromExternal(viewUrl, label, durationFrames);
+                    if (typeof switchTab === 'function') switchTab('video-edit');
+                    return;
+                }
+
+                if (params.filename) {
+                    fetch('/video_edit/resolve_view_path', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            filename: params.filename,
+                            subfolder: params.subfolder || '',
+                            type: params.type || 'output',
+                        }),
+                    })
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data.path) {
+                            VideoEditTab.addClipFromExternal(data.path, label, durationFrames);
+                        } else {
+                            // Fallback: use the URL as-is
+                            VideoEditTab.addClipFromExternal(viewUrl, label, durationFrames);
+                        }
+                        if (typeof switchTab === 'function') switchTab('video-edit');
+                    })
+                    .catch(function () {
+                        VideoEditTab.addClipFromExternal(viewUrl, label, durationFrames);
+                        if (typeof switchTab === 'function') switchTab('video-edit');
+                    });
+                } else {
+                    VideoEditTab.addClipFromExternal(viewUrl, label, durationFrames);
+                    if (typeof switchTab === 'function') switchTab('video-edit');
+                }
+            });
+        }
         // Gallery clear
         els.galleryClear.addEventListener('click', function () {
             if (state.gallery.length === 0)

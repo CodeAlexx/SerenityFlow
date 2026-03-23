@@ -163,11 +163,13 @@ async def _execution_loop():
 from serenityflow.server.routes import register_routes  # noqa: E402
 from serenityflow.server.sam_routes import register_sam_routes  # noqa: E402
 from serenityflow.server.preprocess_routes import register_preprocess_routes  # noqa: E402
+from serenityflow.server.video_edit_routes import register_video_edit_routes  # noqa: E402
 from serenityflow.server.websocket import register_websocket  # noqa: E402
 
 # SAM and preprocess routes MUST register before the catch-all static route in register_routes
 register_sam_routes(app)
 register_preprocess_routes(app)
+register_video_edit_routes(app)
 register_routes(app)
 register_websocket(app)
 
