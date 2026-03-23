@@ -247,15 +247,12 @@ def _patch_ltx_gemma_transformers_compat() -> None:
         return module
 
     def patched_precompute(self, text: str, padding_side: str = "left"):
+        # Use the same path as the original ltx_core precompute: call self.model
+        # (Gemma3ForConditionalGeneration), NOT language_model directly.
         token_pairs = self.tokenizer.tokenize_with_weights(text)["gemma"]
         input_ids = torch.tensor([[t[0] for t in token_pairs]], device=self.model.device)
         attention_mask = torch.tensor([[w[1] for w in token_pairs]], device=self.model.device)
-
-        language_model = getattr(getattr(self.model, "model", None), "language_model", None)
-        if language_model is None:
-            return original_precompute(self, text, padding_side)
-
-        outputs = language_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         video_feats, audio_feats = self.feature_extractor(outputs.hidden_states, attention_mask, padding_side)
         return video_feats, audio_feats, attention_mask
 
@@ -1188,6 +1185,29 @@ def _should_try_cuda_for_full_ltx_text_encoder(ledger: Any, device: torch.device
     return fits
 
 
+def _quantize_text_encoder_fp8(module: Any) -> None:
+    """Cast all Linear weights to float8_e4m3fn with upcast forward — matches LTX-Desktop.
+
+    This shrinks the 23GB bf16 Gemma to ~12GB FP8, allowing it to fit on 24GB GPU
+    for native text encoding (no Stagehand block-swap needed for text encoder).
+    """
+    for child in module.modules():
+        if not isinstance(child, torch.nn.Linear):
+            continue
+        child.weight.data = child.weight.data.to(torch.float8_e4m3fn)
+        if child.bias is not None:
+            child.bias.data = child.bias.data.to(torch.float8_e4m3fn)
+
+        def _make_upcast_forward(lin: torch.nn.Linear):
+            def _fwd(x: torch.Tensor, **kw) -> torch.Tensor:
+                w = lin.weight.to(x.dtype)
+                b = lin.bias.to(x.dtype) if lin.bias is not None else None
+                return torch.nn.functional.linear(x, w, b)
+            return _fwd
+
+        child.forward = _make_upcast_forward(child)
+
+
 def _load_ltx_text_encoder_with_fallback(
     ledger: Any,
     *,
@@ -2016,15 +2036,18 @@ def _bind_gemma_text_encoder_text_only_precompute(text_encoder) -> None:
 
 
 def _ltx_gemma_text_encoder_lm_forward(text_encoder, text: str):
-    token_pairs = _ltx_prepare_gemma_token_pairs(text_encoder, text)
+    # Use the FULL token sequence including padding — matches official precompute().
+    # _ltx_prepare_gemma_token_pairs strips padding tokens, which breaks the
+    # embedding shape (128 vs 1024) and produces semantically empty output.
+    token_pairs = text_encoder.tokenizer.tokenize_with_weights(text)["gemma"]
     language_model = getattr(getattr(text_encoder.model, "model", None), "language_model", None)
     if language_model is None:
         raise AttributeError("Gemma language model is missing from the LTX text encoder")
 
     embed_tokens = getattr(language_model, "embed_tokens", None)
     device = embed_tokens.weight.device if embed_tokens is not None else text_encoder.model.device
-    input_ids = torch.tensor([[token_id for token_id, _ in token_pairs]], device=device)
-    attention_mask = torch.tensor([[weight for _, weight in token_pairs]], device=device)
+    input_ids = torch.tensor([[t[0] for t in token_pairs]], device=device)
+    attention_mask = torch.tensor([[w[1] for w in token_pairs]], device=device)
     logger.info("LTX Gemma LM forward start (tokens=%d)", input_ids.shape[1])
     outputs = language_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
     logger.info("LTX Gemma LM forward complete")
@@ -2292,8 +2315,10 @@ def sample_ltxv(
     text_encoder_device = torch.device("cpu")
     keep_text_encoder_cached = False
     if model._cached_text_encoder is not None:
-        logger.info("Using cached Gemma 3 text encoder on CPU")
+        cached_dev = next(model._cached_text_encoder.parameters()).device
+        logger.info("Using cached Gemma 3 text encoder on %s", cached_dev)
         text_encoder = model._cached_text_encoder
+        text_encoder_device = cached_dev
         keep_text_encoder_cached = True
     else:
         text_encoder, text_encoder_device = _load_ltx_text_encoder_with_fallback(
@@ -2454,6 +2479,15 @@ def sample_ltxv(
             dtype=model.dtype,
             inference_mode=True,
         )
+        # File-backed mode: read block weights from checkpoint file instead of
+        # CPU module params.  Matches LTX-Desktop and avoids module-backed staging
+        # bug in Stagehand 0.2.0.
+        try:
+            n_fb = xfm_runtime.convert_registry_to_file_backed(model.checkpoint_path)
+            gc.collect()
+            logger.info("File-backed: %d params from %s", n_fb, model.checkpoint_path)
+        except Exception as exc:
+            logger.warning("File-backed conversion failed (%s), using module-backed", exc)
         logger.info("Stagehand transformer ready (%d blocks)", len(xfm_runtime._registry))
 
     generator = torch.Generator(device=device).manual_seed(seed)
@@ -2737,6 +2771,12 @@ def sample_ltxv(
                 dtype=model.dtype,
                 inference_mode=True,
             )
+            try:
+                n_fb2 = xfm_runtime2.convert_registry_to_file_backed(model.checkpoint_path)
+                gc.collect()
+                logger.info("Stage 2 file-backed: %d params from %s", n_fb2, model.checkpoint_path)
+            except Exception as exc:
+                logger.warning("Stage 2 file-backed conversion failed (%s)", exc)
             logger.info("Stage 2 Stagehand ready (%d blocks)", len(xfm_runtime2._registry))
 
         # Stage 2 always uses simple denoising (distilled sigmas, no CFG)
