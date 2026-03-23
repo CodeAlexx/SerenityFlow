@@ -6,9 +6,10 @@
             "gemma_path": "gemma-3-12b-it",
             "dtype": "bfloat16",
             "quantization": "auto",
-            "backend": "legacy_stagehand"
+            "backend": "legacy_stagehand",
+            "serenityfp8_path": "ltx2_serenityfp8.safetensors"
         },
-        "_meta": {"title": "Load LTX 2.3 Dev"}
+        "_meta": {"title": "Load LTX 2.3 SerenityFP8"}
     },
     "2": {
         "class_type": "LoadImage",
@@ -18,10 +19,17 @@
         "_meta": {"title": "Load Guide Image"}
     },
     "3": {
+        "class_type": "LoadAudio",
+        "inputs": {
+            "audio": "input.mp3"
+        },
+        "_meta": {"title": "Load Audio"}
+    },
+    "4": {
         "class_type": "LTXVSampler",
         "inputs": {
             "ltxv_model": ["1", 0],
-            "prompt": "The subject slowly turns toward camera while soft atmospheric light blooms behind them",
+            "prompt": "A character performs to the beat with expressive motion and camera drift that follows the rhythm",
             "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted",
             "width": 768,
             "height": 512,
@@ -34,18 +42,29 @@
             "mode": "dev",
             "guide_image": ["2", 0],
             "guide_strength": 1.0,
-            "guide_frame_idx": 0
+            "guide_frame_idx": 0,
+            "audio": ["3", 0],
+            "audio_start_time": 0.0,
+            "audio_duration": 4.0
         },
-        "_meta": {"title": "Sample Image To Video"}
+        "_meta": {"title": "Sample Image And Audio To Video"}
     },
-    "4": {
+    "5": {
         "class_type": "SaveVideo",
         "inputs": {
-            "video": ["3", 1],
-            "filename_prefix": "ltx23_i2v",
+            "video": ["4", 1],
+            "filename_prefix": "ltx23_sfp8_ia2v",
             "fps": 24,
             "format": "mp4"
         },
         "_meta": {"title": "Save Video"}
+    },
+    "6": {
+        "class_type": "SaveAudioOpus",
+        "inputs": {
+            "audio": ["4", 2],
+            "filename_prefix": "ltx23_sfp8_ia2v"
+        },
+        "_meta": {"title": "Save Audio"}
     }
 }

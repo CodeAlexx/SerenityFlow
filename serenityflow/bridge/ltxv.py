@@ -17,6 +17,24 @@ import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
+# Eager patch: newer ltx_core GemmaTextEncoder has encode() but no forward().
+# PyTorch nn.Module.__call__ checks for forward at instantiation.
+# Must patch BEFORE any code can instantiate GemmaTextEncoder.
+try:
+    from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaTextEncoder as _GTE_early
+    if hasattr(_GTE_early, "encode") and "forward" not in _GTE_early.__dict__:
+        def _gte_forward(self, text, padding_side="left"):
+            from ltx_core.text_encoders.gemma.embeddings_processor import EmbeddingsProcessor as _EP
+            hs, mask = self.encode(text, padding_side)
+            for _, mod in self.named_modules():
+                if isinstance(mod, _EP):
+                    return mod.process_hidden_states(hs, mask, padding_side)
+            return hs, mask
+        _GTE_early.forward = _gte_forward
+        logger.info("Eager patch: GemmaTextEncoder.forward with full pipeline")
+except Exception:
+    pass
+
 
 # --- Facade proxies (avoid circular import at module level) ---
 def _parse_dtype(dtype_str):
@@ -47,6 +65,8 @@ class LTXVModelWrapper:
         "quantization",
         "backend",
         "is_scaled_fp8",
+        "serenityfp8_path",
+        "is_serenityfp8",
         "_cached_text_encoder",
     )
 
@@ -63,6 +83,7 @@ class LTXVModelWrapper:
         lora_strengths: tuple[float, ...] = (),
         quantization: str = "auto",
         backend: str = "auto",
+        serenityfp8_path: str = "",
     ):
         self.model_ledger = model_ledger
         self.device = device
@@ -77,6 +98,8 @@ class LTXVModelWrapper:
         self.quantization = quantization
         self.backend = backend
         self.is_scaled_fp8 = _checkpoint_has_weight_scales(checkpoint_path)
+        self.serenityfp8_path = serenityfp8_path
+        self.is_serenityfp8 = bool(serenityfp8_path) and _is_serenityfp8_slab(serenityfp8_path)
         self._cached_text_encoder = None
 
     def vae_decode(self, latent: torch.Tensor) -> torch.Tensor:
@@ -288,6 +311,10 @@ def _default_ltxv_spatial_upsampler_candidates(checkpoint_path: str) -> tuple[st
 
 
 def _default_ltxv_distilled_lora_candidates(checkpoint_path: str) -> tuple[str, ...]:
+    # Only auto-load distilled LoRA for distilled checkpoints, not dev
+    name = Path(checkpoint_path).name.lower()
+    if "distilled" not in name:
+        return ()
     if _ltx_checkpoint_looks_23(checkpoint_path):
         return ("ltx-2.3-22b-distilled-lora-384.safetensors",)
     return ("ltx-2-19b-distilled-lora-384.safetensors",)
@@ -524,7 +551,24 @@ def _patch_ltx_gemma_transformers_compat() -> None:
 
     from ltx_core.loader.module_ops import ModuleOps
     from ltx_core.text_encoders.gemma.encoders import encoder_configurator as gemma_encoder_configurator
+    from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaTextEncoder as _GTE
     from ltx_pipelines.utils import model_ledger as ltx_model_ledger
+
+    # PyTorch nn.Module requires forward(). New ltx_core has encode() (raw hidden states)
+    # but old code expects forward() to return GemmaEncoderOutput (final embeddings).
+    # Patch forward to do the full pipeline: encode → process_hidden_states.
+    if hasattr(_GTE, "encode") and "forward" not in _GTE.__dict__:
+        def _gte_forward(self, text: str, padding_side: str = "left"):
+            from ltx_core.text_encoders.gemma.embeddings_processor import EmbeddingsProcessor
+            hidden_states, attention_mask = self.encode(text, padding_side)
+            # Find EmbeddingsProcessor as submodule
+            for _, mod in self.named_modules():
+                if isinstance(mod, EmbeddingsProcessor):
+                    return mod.process_hidden_states(hidden_states, attention_mask, padding_side)
+            # Fallback: return raw (will fail downstream but at least doesn't crash PyTorch)
+            return hidden_states, attention_mask
+        _GTE.forward = _gte_forward
+        logger.info("Patched GemmaTextEncoder.forward with full pipeline")
 
     if getattr(gemma_encoder_configurator.create_and_populate, "_serenity_compat_patch", False):
         _facade._LTX_GEMMA_TRANSFORMERS_COMPAT_PATCHED = True
@@ -682,6 +726,19 @@ def _checkpoint_has_weight_scales(checkpoint_path: str) -> bool:
                     return True
     except Exception:
         pass
+    return False
+
+
+def _is_serenityfp8_slab(checkpoint_path: str) -> bool:
+    """Check if a checkpoint is a SerenityFP8 slab (has .manifest.json sidecar)."""
+    import json as _json
+    manifest_path = Path(checkpoint_path).with_suffix(".manifest.json")
+    if manifest_path.exists():
+        try:
+            data = _json.loads(manifest_path.read_text())
+            return "serenityfp8_version" in data
+        except Exception:
+            pass
     return False
 
 
@@ -1207,6 +1264,21 @@ def _load_ltx_text_encoder_with_fallback(
             ledger.device = candidate
             logger.info("Loading Gemma 3 text encoder on %s...", candidate)
             text_encoder = text_encoder_factory()
+            # New ltx_core: feature_extractor and embeddings_processor are separate.
+            # Load them from ledger and attach so existing code paths work.
+            if not hasattr(text_encoder, "feature_extractor"):
+                try:
+                    emb_proc = ledger.gemma_embeddings_processor()
+                    text_encoder.feature_extractor = emb_proc.feature_extractor
+                    text_encoder.embeddings_processor = emb_proc
+                    text_encoder._convert_to_additive_mask = lambda mask, dtype: (
+                        (mask.to(torch.int64) - 1).to(dtype).reshape(
+                            (mask.shape[0], 1, -1, mask.shape[-1])
+                        ) * torch.finfo(dtype).max
+                    )
+                    logger.info("Attached embeddings_processor to text encoder (new API compat)")
+                except Exception as exc:
+                    logger.warning("Could not attach embeddings_processor: %s", exc)
             if bind_text_only_precompute:
                 _bind_gemma_text_encoder_text_only_precompute(text_encoder)
             return text_encoder, candidate
@@ -1703,6 +1775,7 @@ def load_ltxv_model(
     lora_strengths: tuple[float, ...] = (),
     quantization: str = "auto",
     backend: str = "auto",
+    serenityfp8_path: str = "",
 ) -> LTXVModelWrapper:
     """Load LTX-V model using ltx_pipelines ModelLedger.
 
@@ -1774,6 +1847,7 @@ def load_ltxv_model(
         lora_strengths=tuple(float(x) for x in lora_strengths),
         quantization=resolved_quantization,
         backend=backend,
+        serenityfp8_path=serenityfp8_path,
     )
 
 
@@ -1949,8 +2023,9 @@ def _ltx_prepare_gemma_token_pairs(text_encoder, text: str):
 
 
 def _bind_gemma_text_encoder_text_only_precompute(text_encoder) -> None:
-    """Override Gemma precompute on this instance to use the text LM directly."""
-    original_precompute = getattr(text_encoder, "precompute")
+    """Override Gemma precompute/encode on this instance to use the text LM directly."""
+    _method_name = "precompute" if hasattr(text_encoder, "precompute") else "encode"
+    original_precompute = getattr(text_encoder, _method_name)
 
     def patched_precompute(self, text: str, padding_side: str = "left"):
         language_model = getattr(getattr(self.model, "model", None), "language_model", None)
@@ -1970,11 +2045,9 @@ def _bind_gemma_text_encoder_text_only_precompute(text_encoder) -> None:
             )
             input_ids = encoded.input_ids
             attention_mask = encoded.attention_mask
-            register_multiple = getattr(
-                getattr(self.embeddings_processor, "video_connector", None),
-                "num_learnable_registers",
-                None,
-            )
+            _emb_proc = getattr(self, "embeddings_processor", None)
+            _vid_conn = getattr(_emb_proc, "video_connector", None) if _emb_proc else None
+            register_multiple = getattr(_vid_conn, "num_learnable_registers", None)
             if register_multiple:
                 seq_len = input_ids.shape[1]
                 target_len = ((seq_len + register_multiple - 1) // register_multiple) * register_multiple
@@ -2000,19 +2073,22 @@ def _bind_gemma_text_encoder_text_only_precompute(text_encoder) -> None:
             logger.info("LTX Gemma precompute: moving hidden states to CPU")
             hidden_states = hidden_states.to("cpu")
         attention_mask_cpu = attention_mask.to("cpu")
-        # Cast hidden states to match feature extractor weight dtype (bf16).
-        # On CPU the language model may output float32 hidden states.
-        fe_dtype = next(self.feature_extractor.parameters()).dtype
+        # Cast hidden states to bf16 if needed
+        target_dtype = torch.bfloat16
+        if hasattr(self, "feature_extractor"):
+            target_dtype = next(self.feature_extractor.parameters()).dtype
         if isinstance(hidden_states, (list, tuple)):
-            hidden_states = tuple(s.to(dtype=fe_dtype) for s in hidden_states)
+            hidden_states = tuple(s.to(dtype=target_dtype) for s in hidden_states)
         else:
-            hidden_states = hidden_states.to(dtype=fe_dtype)
-        logger.info("LTX Gemma precompute: feature extraction start")
-        video_feats, audio_feats = self.feature_extractor(hidden_states, attention_mask_cpu, padding_side)
-        logger.info("LTX Gemma precompute: feature extraction complete")
-        return video_feats, audio_feats, attention_mask_cpu
+            hidden_states = hidden_states.to(dtype=target_dtype)
+        logger.info("LTX Gemma precompute: finalize start")
+        video_enc, audio_enc, mask = _ltx_finalize_gemma_text_encoder_output(
+            self, hidden_states, attention_mask_cpu, padding_side,
+        )
+        logger.info("LTX Gemma precompute: finalize complete")
+        return video_enc, audio_enc, mask
 
-    text_encoder.precompute = MethodType(patched_precompute, text_encoder)
+    setattr(text_encoder, _method_name, MethodType(patched_precompute, text_encoder))
 
 
 def _ltx_gemma_text_encoder_lm_forward(text_encoder, text: str):
@@ -2042,6 +2118,24 @@ def _ltx_move_gemma_hidden_states_to_cpu(hidden_states, attention_mask):
 
 
 def _ltx_finalize_gemma_text_encoder_output(text_encoder, hidden_states, attention_mask, padding_side: str = "left"):
+    # New API: EmbeddingsProcessor is separate from the text encoder
+    if not hasattr(text_encoder, "feature_extractor"):
+        from ltx_core.text_encoders.gemma.embeddings_processor import EmbeddingsProcessor
+        # Find the embeddings processor — it's stored as a submodule by the loader
+        emb_proc = None
+        for name, mod in text_encoder.named_modules():
+            if isinstance(mod, EmbeddingsProcessor):
+                emb_proc = mod
+                break
+        if emb_proc is None:
+            # Not found as submodule — try the ledger path
+            raise AttributeError("Cannot find EmbeddingsProcessor on text encoder or as submodule")
+        logger.info("LTX Gemma TE: process_hidden_states start")
+        result = emb_proc.process_hidden_states(hidden_states, attention_mask, padding_side)
+        logger.info("LTX Gemma TE: process_hidden_states complete")
+        return result.video_encoding, result.audio_encoding, result.attention_mask
+
+    # Old API: feature_extractor + embeddings_processor on text_encoder
     logger.info("LTX Gemma TE: feature extraction start")
     video_feats, audio_feats = text_encoder.feature_extractor(hidden_states, attention_mask, padding_side)
     logger.info("LTX Gemma TE: feature extraction complete")
@@ -2064,7 +2158,10 @@ def _encode_ltx_prompts_with_stagehand(
     gemma_root: str = "",
 ):
     """Run Gemma LM prompt encoding on GPU via Stagehand while keeping weights resident on CPU."""
-    from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaEncoderOutput
+    try:
+        from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaEncoderOutput
+    except ImportError:
+        from ltx_core.text_encoders.gemma.embeddings_processor import EmbeddingsProcessorOutput as GemmaEncoderOutput
     from stagehand import StagehandRuntime
 
     block_container = _get_gemma_block_module(text_encoder)
@@ -2220,7 +2317,7 @@ def sample_ltxv(
     from ltx_core.model.video_vae import decode_video as vae_decode_video
     from ltx_core.types import Audio, AudioLatentShape, VideoPixelShape
     from ltx_pipelines.utils.constants import DISTILLED_SIGMA_VALUES
-    from ltx_pipelines.utils import image_conditionings_by_replacing_latent
+    from ltx_pipelines.utils.helpers import image_conditionings_by_replacing_latent
     from ltx_pipelines.utils.helpers import (
         cleanup_memory,
         denoise_audio_video,
@@ -2824,7 +2921,8 @@ def sample_ltxv(
         del xfm_runtime2, transformer2, xfm_inner2, s2_base_fn, upscaled
     else:
         # No upsampler — use stage 1 output directly
-        video_state.latent = s1_video_latent.to(device)
+        import dataclasses as _dc
+        video_state = _dc.replace(video_state, latent=s1_video_latent.to(device))
         del video_encoder
 
     gc.collect()

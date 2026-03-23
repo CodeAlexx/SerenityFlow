@@ -169,3 +169,49 @@ class TestAutoDetection:
         assert prompt["5"]["inputs"]["video"] == ["4", 1]
         assert prompt["6"]["class_type"] == "SaveAudioOpus"
         assert prompt["6"]["inputs"]["audio"] == ["4", 2]
+
+    def test_detects_ltx23_serenityfp8_t2v_workflow(self):
+        prompt = parse_workflow(load_workflow("ltx23_serenityfp8_t2v.json"))
+
+        assert prompt["1"]["class_type"] == "LTXVLoader"
+        assert prompt["1"]["inputs"]["serenityfp8_path"] == "ltx2_serenityfp8.safetensors"
+        assert prompt["1"]["inputs"]["backend"] == "legacy_stagehand"
+        assert prompt["2"]["class_type"] == "LTXVSampler"
+        assert prompt["2"]["inputs"]["ltxv_model"] == ["1", 0]
+        assert "guide_image" not in prompt["2"]["inputs"]
+        assert "audio" not in prompt["2"]["inputs"]
+        assert prompt["3"]["class_type"] == "SaveVideo"
+
+    def test_detects_ltx23_serenityfp8_i2v_workflow(self):
+        prompt = parse_workflow(load_workflow("ltx23_serenityfp8_i2v.json"))
+
+        assert prompt["1"]["class_type"] == "LTXVLoader"
+        assert prompt["1"]["inputs"]["serenityfp8_path"] == "ltx2_serenityfp8.safetensors"
+        assert prompt["2"]["class_type"] == "LoadImage"
+        assert prompt["3"]["class_type"] == "LTXVSampler"
+        assert prompt["3"]["inputs"]["guide_image"] == ["2", 0]
+        assert "audio" not in prompt["3"]["inputs"]
+
+    def test_detects_ltx23_serenityfp8_a2v_workflow(self):
+        prompt = parse_workflow(load_workflow("ltx23_serenityfp8_a2v.json"))
+
+        assert prompt["1"]["class_type"] == "LTXVLoader"
+        assert prompt["1"]["inputs"]["serenityfp8_path"] == "ltx2_serenityfp8.safetensors"
+        assert prompt["2"]["class_type"] == "LoadAudio"
+        assert prompt["3"]["class_type"] == "LTXVSampler"
+        assert prompt["3"]["inputs"]["audio"] == ["2", 0]
+        assert prompt["4"]["class_type"] == "SaveVideo"
+        assert prompt["5"]["class_type"] == "SaveAudioOpus"
+
+    def test_detects_ltx23_serenityfp8_ia2v_workflow(self):
+        prompt = parse_workflow(load_workflow("ltx23_serenityfp8_ia2v.json"))
+
+        assert prompt["1"]["class_type"] == "LTXVLoader"
+        assert prompt["1"]["inputs"]["serenityfp8_path"] == "ltx2_serenityfp8.safetensors"
+        assert prompt["2"]["class_type"] == "LoadImage"
+        assert prompt["3"]["class_type"] == "LoadAudio"
+        assert prompt["4"]["class_type"] == "LTXVSampler"
+        assert prompt["4"]["inputs"]["guide_image"] == ["2", 0]
+        assert prompt["4"]["inputs"]["audio"] == ["3", 0]
+        assert prompt["5"]["class_type"] == "SaveVideo"
+        assert prompt["6"]["class_type"] == "SaveAudioOpus"

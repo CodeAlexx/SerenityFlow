@@ -28,7 +28,7 @@
         "Node name for S&R": "LTXVLoader"
       },
       "widgets_values": [
-        "ltx-2.3-22b-dev-fp8.safetensors",
+        "ltx-2.3-22b-dev.safetensors",
         "gemma-3-12b-it",
         "bfloat16"
       ]

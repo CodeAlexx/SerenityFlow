@@ -6,9 +6,10 @@
             "gemma_path": "gemma-3-12b-it",
             "dtype": "bfloat16",
             "quantization": "auto",
-            "backend": "legacy_stagehand"
+            "backend": "legacy_stagehand",
+            "serenityfp8_path": "ltx2_serenityfp8.safetensors"
         },
-        "_meta": {"title": "Load LTX 2.3 Dev"}
+        "_meta": {"title": "Load LTX 2.3 SerenityFP8"}
     },
     "2": {
         "class_type": "LTXVSampler",
@@ -32,7 +33,7 @@
         "class_type": "SaveVideo",
         "inputs": {
             "video": ["2", 1],
-            "filename_prefix": "ltx23_t2v",
+            "filename_prefix": "ltx23_sfp8_t2v",
             "fps": 24,
             "format": "mp4"
         },

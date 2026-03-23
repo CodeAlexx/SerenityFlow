@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
         "lora_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.05}),
         "quantization": (["auto", "none", "fp8-cast", "fp8-scaled-mm"], {"default": "auto"}),
         "backend": (["auto", "official", "legacy_stagehand"], {"default": "auto"}),
+        "serenityfp8_path": ("STRING", {"default": ""}),
     }},
 )
 def ltxv_loader(
@@ -45,6 +46,7 @@ def ltxv_loader(
     lora_strength=1.0,
     quantization="auto",
     backend="auto",
+    serenityfp8_path="",
 ):
     """Load LTX-V 19B model (transformer + VAE + text encoder)."""
     import os
@@ -75,7 +77,18 @@ def ltxv_loader(
                 gemma_path = candidate
                 break
 
-    log.info("LTXVLoader: checkpoint=%s, gemma=%s", checkpoint_path, gemma_path)
+    # Resolve serenityfp8 slab path
+    if serenityfp8_path and not os.path.exists(serenityfp8_path):
+        for base in [
+            os.path.expanduser("~/.serenity/models/checkpoints"),
+            os.path.expanduser("~/serenity/results/serenityfp8"),
+        ]:
+            candidate = os.path.join(base, serenityfp8_path)
+            if os.path.exists(candidate):
+                serenityfp8_path = candidate
+                break
+
+    log.info("LTXVLoader: checkpoint=%s, gemma=%s, serenityfp8=%s", checkpoint_path, gemma_path, serenityfp8_path or "(none)")
     model = load_ltxv_model(
         checkpoint_path,
         gemma_path,
@@ -86,6 +99,7 @@ def ltxv_loader(
         lora_strengths=(float(lora_strength),) if lora_path else (),
         quantization=quantization,
         backend="legacy_stagehand" if backend == "legacy_stagehand" else backend,
+        serenityfp8_path=serenityfp8_path or "",
     )
     return (model,)
 

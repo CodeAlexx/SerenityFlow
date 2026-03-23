@@ -16,6 +16,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 log = logging.getLogger(__name__)
 
 _CANVAS_WORKFLOWS_DIR = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "canvas", "workflows"))
+_SF_WORKFLOWS_DIR = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "workflows"))
 _WORKFLOW_TEMPLATES_REPO_DIR = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "tests", "workflow_templates", "templates"))
 _TEMPLATE_AUDIT_REPORT_PATH = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "tests", "template_audit_report.json"))
 
@@ -676,6 +677,7 @@ def register_routes(app: FastAPI):
                     })
 
         _collect(_CANVAS_WORKFLOWS_DIR, "workflows")
+        _collect(_SF_WORKFLOWS_DIR, "workflows")
         return JSONResponse(result)
 
     # === SerenityFlow extensions ===
@@ -856,6 +858,17 @@ def register_routes(app: FastAPI):
                     StaticFiles(directory=subpath),
                     name=f"canvas_{subdir}",
                 )
+
+        # Serve serenityflow/workflows/ as fallback for /workflows/ URLs
+        @app.get("/workflows/{wf_path:path}")
+        async def serve_sf_workflow(wf_path: str):
+            sf_file = os.path.join(_SF_WORKFLOWS_DIR, wf_path)
+            sf_file = os.path.realpath(sf_file)
+            if not sf_file.startswith(os.path.realpath(_SF_WORKFLOWS_DIR) + os.sep):
+                return Response(status_code=403)
+            if os.path.isfile(sf_file):
+                return FileResponse(sf_file)
+            return Response(status_code=404)
 
         if os.path.isdir(_WORKFLOW_TEMPLATES_REPO_DIR):
             app.mount(
