@@ -1407,11 +1407,24 @@ def _should_use_official_ltx_backend(
 
 
 def _build_ltxv_stage2_ledger(model: LTXVModelWrapper) -> Any:
-    """Build a stage-2 ledger that adds the distilled LoRA when available."""
+    """Build a stage-2 ledger.
+
+    For dev checkpoints: adds distilled LoRA at 0.25 strength (converts dev model
+    to distilled behavior for the 3-step stage 2 schedule).
+    For distilled checkpoints: no LoRA needed (model is already distilled).
+    """
     if not model.distilled_lora_path:
         return model.model_ledger
 
-    distilled_loras = tuple(_build_ltxv_loras((model.distilled_lora_path,), (1.0,)))
+    # Distilled checkpoints don't need distilled LoRA — they're already distilled.
+    # Also, file-backed Stagehand reads from the checkpoint file directly, so any
+    # LoRA merged into model params would be bypassed anyway.
+    is_distilled_ckpt = "distilled" in (model.checkpoint_path or "").lower()
+    if is_distilled_ckpt:
+        return model.model_ledger
+
+    # Dev checkpoint: apply distilled LoRA for stage 2 refinement
+    distilled_loras = tuple(_build_ltxv_loras((model.distilled_lora_path,), (0.25,)))
     if not distilled_loras:
         return model.model_ledger
     return model.model_ledger.with_loras(distilled_loras)
