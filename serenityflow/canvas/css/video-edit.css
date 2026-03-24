@@ -524,7 +524,7 @@
 /* ===== V5: Inline subtitle editor ===== */
 .ve-sub-editor {
     position: absolute;
-    z-index: 300;
+    z-index: 550;
     background: var(--shell-bg-panel, #1f1f2e);
     border: 1px solid #d4a72c;
     border-radius: 6px;

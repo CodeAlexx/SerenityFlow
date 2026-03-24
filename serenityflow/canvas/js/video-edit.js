@@ -397,6 +397,7 @@ var VideoEditTab = (function () {
             scrollOffsetX = 0;
             updateTimecodeDisplay();
             renderTimeline();
+            updatePreview();
         });
         if (btnStart) btnStart.addEventListener('click', function () {
             stopPlayback();
@@ -404,6 +405,7 @@ var VideoEditTab = (function () {
             scrollOffsetX = 0;
             updateTimecodeDisplay();
             renderTimeline();
+            updatePreview();
         });
         if (btnEnd) btnEnd.addEventListener('click', function () {
             stopPlayback();
@@ -412,6 +414,7 @@ var VideoEditTab = (function () {
             scrollOffsetX = Math.max(0, currentFrame * pixelsPerFrame - viewWidth + 60);
             updateTimecodeDisplay();
             renderTimeline();
+            updatePreview();
         });
         if (zoomSlider) {
             zoomSlider.addEventListener('input', function () {
@@ -634,7 +637,7 @@ var VideoEditTab = (function () {
             if (track.type !== 'video') continue;
             for (var j = 0; j < track.clips.length; j++) {
                 var clip = track.clips[j];
-                if (frame >= clip.startFrame && frame < clip.endFrame && clip.source_path) {
+                if (frame >= clip.startFrame && frame < clip.endFrame) {
                     return clip;
                 }
             }
@@ -649,15 +652,33 @@ var VideoEditTab = (function () {
         var clip = findActiveClipAtFrame(currentFrame);
 
         if (!clip) {
-            // Black frame
+            // Black frame — no clip at playhead
             previewCtx.fillStyle = '#111';
             previewCtx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
             previewActiveClipId = null;
             if (placeholder) placeholder.style.display = '';
+            if (previewTcEl) previewTcEl.textContent = frameToTimecode(currentFrame);
+            renderSubtitleOverlay();
             return;
         }
 
         if (placeholder) placeholder.style.display = 'none';
+
+        // Placeholder clip (no source file) — show color card with label
+        if (!clip.source_path) {
+            previewActiveClipId = clip.id;
+            previewCtx.fillStyle = clip.color || '#333';
+            previewCtx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+            previewCtx.fillStyle = '#fff';
+            previewCtx.font = '20px sans-serif';
+            previewCtx.textAlign = 'center';
+            previewCtx.textBaseline = 'middle';
+            previewCtx.fillText(clip.label || 'Untitled', previewCanvas.width / 2, previewCanvas.height / 2);
+            previewCtx.textAlign = 'start';
+            if (previewTcEl) previewTcEl.textContent = frameToTimecode(currentFrame);
+            renderSubtitleOverlay();
+            return;
+        }
 
         var sourceOffset = clip.source_start || 0;
         var frameInSource = currentFrame - clip.startFrame + sourceOffset;
@@ -666,10 +687,7 @@ var VideoEditTab = (function () {
         // Load video source if clip changed
         if (previewActiveClipId !== clip.id && previewVideo) {
             var relPath = clip.source_path;
-            // If source_path is absolute, compute relative to projects dir
-            var base = _projectsMediaPrefix();
             if (relPath.indexOf('/') === 0 || relPath.indexOf('\\') >= 0) {
-                // Use media endpoint with path
                 previewVideo.src = getApiBase() + '/video_edit/media/' + encodeURIComponent(relPath.split('/video_projects/').pop() || relPath);
             } else {
                 previewVideo.src = getApiBase() + '/video_edit/media/' + relPath;
@@ -1259,6 +1277,8 @@ var VideoEditTab = (function () {
             return;
         }
         dd.innerHTML =
+            '<div class="ve-ctx-item" data-action="import-video">Import Video/Audio...</div>' +
+            '<div class="ve-ctx-sep"></div>' +
             '<div class="ve-ctx-item" data-action="import-srt">Import SRT...</div>' +
             '<div class="ve-ctx-item" data-action="export-srt">Export SRT</div>' +
             '<div class="ve-ctx-sep"></div>' +
@@ -1286,8 +1306,26 @@ var VideoEditTab = (function () {
         }, 0);
     }
 
+    var videoFileInput = null;
+
     function handleFileAction(action) {
-        if (action === 'import-srt') {
+        if (action === 'import-video') {
+            if (!videoFileInput) {
+                videoFileInput = document.createElement('input');
+                videoFileInput.type = 'file';
+                videoFileInput.accept = 'video/*,audio/*';
+                videoFileInput.multiple = true;
+                videoFileInput.style.display = 'none';
+                document.body.appendChild(videoFileInput);
+                videoFileInput.addEventListener('change', function () {
+                    for (var i = 0; i < videoFileInput.files.length; i++) {
+                        importMediaFile(videoFileInput.files[i]);
+                    }
+                    videoFileInput.value = '';
+                });
+            }
+            videoFileInput.click();
+        } else if (action === 'import-srt') {
             if (!srtFileInput) {
                 srtFileInput = document.createElement('input');
                 srtFileInput.type = 'file';
@@ -1322,6 +1360,70 @@ var VideoEditTab = (function () {
         }
     }
 
+    // ===== V5: Media Import =====
+
+    function importMediaFile(file) {
+        if (!projectId) return;
+        var form = new FormData();
+        form.append('file', file);
+        fetch(getApiBase() + '/video_edit/projects/' + projectId + '/import_clip', {
+            method: 'POST',
+            body: form,
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (data.error) {
+                alert('Import failed: ' + data.error);
+                return;
+            }
+            // Determine track type from file
+            var isAudio = file.type && file.type.startsWith('audio');
+            var trackType = isAudio ? 'audio' : 'video';
+            var trackColor = isAudio ? '#2a9d5c' : '#4a7dff';
+
+            // Find or create matching track
+            var track = null;
+            for (var i = 0; i < project.tracks.length; i++) {
+                if (project.tracks[i].type === trackType) { track = project.tracks[i]; break; }
+            }
+            if (!track) {
+                track = { id: 'track-' + Date.now(), name: isAudio ? 'Audio' : 'Video 1', type: trackType, clips: [] };
+                project.tracks.push(track);
+            }
+
+            // Place at end of existing content on that track
+            var endFrame = 0;
+            track.clips.forEach(function (c) {
+                if (c.endFrame > endFrame) endFrame = c.endFrame;
+            });
+
+            pushUndo();
+            var dur = data.duration_frames || (FPS * 5);
+            track.clips.push({
+                id: data.clip_id || generateClipId(),
+                startFrame: endFrame,
+                endFrame: endFrame + dur,
+                label: file.name.replace(/\.[^.]+$/, '').slice(0, 30),
+                color: trackColor,
+                source_path: data.source_path,
+            });
+            recalcTotalFrames();
+            renderTimeline();
+            scheduleAutosave();
+
+            // Scroll to show new clip
+            var clipEndPx = (endFrame + dur) * pixelsPerFrame;
+            var viewWidth = stage ? stage.width() - TRACK_HEADER_WIDTH : 500;
+            if (clipEndPx > scrollOffsetX + viewWidth) {
+                scrollOffsetX = Math.max(0, clipEndPx - viewWidth + 100);
+                renderTimeline();
+            }
+        })
+        .catch(function (err) {
+            alert('Import failed: ' + (err.message || err));
+        });
+    }
+
     // ===== V5: SRT Import/Export =====
 
     function importSRTFile(file) {
@@ -1347,8 +1449,22 @@ var VideoEditTab = (function () {
     }
 
     function exportSRT() {
-        if (!projectId) return;
-        window.open(getApiBase() + '/video_edit/projects/' + projectId + '/export_srt', '_blank');
+        if (!projectId) { alert('No project. Open Video Edit tab first.'); return; }
+        // Save then download
+        saveProject();
+        fetch(getApiBase() + '/video_edit/projects/' + projectId + '/export_srt')
+            .then(function (r) {
+                if (!r.ok) throw new Error('Export failed');
+                return r.blob();
+            })
+            .then(function (blob) {
+                var a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = 'subtitles_' + projectId + '.srt';
+                a.click();
+                URL.revokeObjectURL(a.href);
+            })
+            .catch(function (err) { alert('SRT export failed: ' + err.message); });
     }
 
     function parseSRTLocal(content) {
@@ -1411,8 +1527,22 @@ var VideoEditTab = (function () {
     }
 
     function exportXML(format) {
-        if (!projectId) return;
-        window.open(getApiBase() + '/video_edit/projects/' + projectId + '/export_xml?format=' + format, '_blank');
+        if (!projectId) { alert('No project. Open Video Edit tab first.'); return; }
+        saveProject();
+        var ext = format === 'fcpxml' ? '.fcpxml' : '.xml';
+        fetch(getApiBase() + '/video_edit/projects/' + projectId + '/export_xml?format=' + format)
+            .then(function (r) {
+                if (!r.ok) throw new Error('Export failed');
+                return r.blob();
+            })
+            .then(function (blob) {
+                var a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = 'timeline_' + projectId + ext;
+                a.click();
+                URL.revokeObjectURL(a.href);
+            })
+            .catch(function (err) { alert('XML export failed: ' + err.message); });
     }
 
     // ===== V5: Export Dialog =====
@@ -1575,7 +1705,11 @@ var VideoEditTab = (function () {
         if (fill) fill.style.width = '100%';
         isExporting = false;
         var startBtn = document.getElementById('ve-exp-start');
-        if (startBtn) { startBtn.disabled = false; startBtn.textContent = 'Done'; }
+        if (startBtn) {
+            startBtn.disabled = false;
+            startBtn.textContent = 'Done';
+            startBtn.onclick = closeExportDialog;
+        }
     }
 
     function onExportError(msg) {
@@ -1627,11 +1761,17 @@ var VideoEditTab = (function () {
         subtitleEditingClipId = clipId;
         var clip = info.clip;
 
-        // Position editor over the clip on timeline
+        // Position editor relative to the panel
+        var panel = document.getElementById('panel-video-edit');
+        var timelineContainer = document.getElementById('ve-timeline-container');
+        if (!panel || !timelineContainer) return;
+
+        var tcRect = timelineContainer.getBoundingClientRect();
+        var panelRect = panel.getBoundingClientRect();
+        var offsetTop = tcRect.top - panelRect.top;
+
         var clipX = TRACK_HEADER_WIDTH + (clip.startFrame * pixelsPerFrame) - scrollOffsetX;
-        var clipY = RULER_HEIGHT + (info.trackIndex * TRACK_HEIGHT);
-        var container = document.getElementById('ve-timeline-container');
-        var containerRect = container ? container.getBoundingClientRect() : { left: 0, top: 0 };
+        var clipY = offsetTop + RULER_HEIGHT + (info.trackIndex * TRACK_HEIGHT);
 
         subtitleEditorEl = document.createElement('div');
         subtitleEditorEl.className = 've-sub-editor';
@@ -1642,7 +1782,8 @@ var VideoEditTab = (function () {
         ta.value = clip.label || '';
         subtitleEditorEl.appendChild(ta);
 
-        container.appendChild(subtitleEditorEl);
+        // Append to panel (not timeline container) so it's above Konva canvas
+        panel.appendChild(subtitleEditorEl);
         ta.focus();
         ta.select();
 
@@ -2124,24 +2265,27 @@ var VideoEditTab = (function () {
             var pointer = stage.getPointerPosition();
             if (!pointer) return;
 
-            if (e.evt.shiftKey) {
-                scrollOffsetX += e.evt.deltaY * 2;
+            // Ctrl+wheel = zoom, plain wheel = horizontal scroll
+            if (e.evt.ctrlKey || e.evt.metaKey) {
+                // Zoom toward cursor
+                if (pointer.x < TRACK_HEADER_WIDTH) return;
+
+                var frameAtCursor = (pointer.x - TRACK_HEADER_WIDTH + scrollOffsetX) / pixelsPerFrame;
+                var factor = e.evt.deltaY > 0 ? 0.9 : 1.1;
+                pixelsPerFrame = clamp(pixelsPerFrame * factor, MIN_PPF, MAX_PPF);
+
+                scrollOffsetX = (frameAtCursor * pixelsPerFrame) - (pointer.x - TRACK_HEADER_WIDTH);
+                scrollOffsetX = clamp(scrollOffsetX, 0, getMaxScroll());
+
+                updateZoomDisplay();
+                renderTimeline();
+            } else {
+                // Horizontal scroll
+                var delta = e.evt.shiftKey ? e.evt.deltaY : e.evt.deltaX || e.evt.deltaY;
+                scrollOffsetX += delta * 2;
                 scrollOffsetX = clamp(scrollOffsetX, 0, getMaxScroll());
                 renderTimeline();
-                return;
             }
-
-            if (pointer.x < TRACK_HEADER_WIDTH) return;
-
-            var frameAtCursor = (pointer.x - TRACK_HEADER_WIDTH + scrollOffsetX) / pixelsPerFrame;
-            var factor = e.evt.deltaY > 0 ? 0.9 : 1.1;
-            pixelsPerFrame = clamp(pixelsPerFrame * factor, MIN_PPF, MAX_PPF);
-
-            scrollOffsetX = (frameAtCursor * pixelsPerFrame) - (pointer.x - TRACK_HEADER_WIDTH);
-            scrollOffsetX = clamp(scrollOffsetX, 0, getMaxScroll());
-
-            updateZoomDisplay();
-            renderTimeline();
         });
 
         // --- Mouse events for selection, drag, trim, scrub ---
@@ -2157,21 +2301,39 @@ var VideoEditTab = (function () {
                 return;
             }
 
-            // Find what was clicked
+            // Find what was clicked — try Konva target first, fall back to position
             var target = e.target;
             var group = null;
-            if (target && target.parent && target.parent.getAttr('clipId')) {
-                group = target.parent;
-            } else if (target && target.getAttr('clipId')) {
-                group = target;
+            var _n = target;
+            while (_n) {
+                if (_n.getAttr && _n.getAttr('clipId')) { group = _n; break; }
+                _n = _n.parent;
             }
 
+            // Position-based fallback if Konva target didn't resolve
+            var clipId = null, trackId = null;
             if (group) {
-                var clipId = group.getAttr('clipId');
-                var trackId = group.getAttr('trackId');
+                clipId = group.getAttr('clipId');
+                trackId = group.getAttr('trackId');
+            } else if (pos.y > RULER_HEIGHT && pos.x >= TRACK_HEADER_WIDTH) {
+                var mdTrackIdx = trackIndexAtY(pos.y);
+                var mdFrame = pixelToFrame(pos.x);
+                if (mdTrackIdx >= 0 && mdTrackIdx < project.tracks.length) {
+                    var mdTrack = project.tracks[mdTrackIdx];
+                    for (var mci = 0; mci < mdTrack.clips.length; mci++) {
+                        if (mdFrame >= mdTrack.clips[mci].startFrame && mdFrame < mdTrack.clips[mci].endFrame) {
+                            clipId = mdTrack.clips[mci].id;
+                            trackId = mdTrack.id;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (clipId) {
                 var targetName = target.name ? target.name() : '';
 
-                // Trim handle check
+                // Trim handle check (only works with Konva target)
                 if (targetName === 'trimLeft' || targetName === 'trimRight') {
                     startTrim(clipId, trackId, targetName === 'trimLeft' ? 'left' : 'right', pos.x);
                     return;
@@ -2260,26 +2422,27 @@ var VideoEditTab = (function () {
 
         // Double-click: add placeholder clip
         stage.on('dblclick', function (e) {
+            // Cancel any drag that started from the first click
+            if (isDragging) { isDragging = false; dragOriginals = {}; dragUndoSnapshot = null; }
             var pos = stage.getPointerPosition();
             if (!pos || pos.y <= RULER_HEIGHT || pos.x < TRACK_HEADER_WIDTH) return;
 
-            // Check if clicking on a clip
-            var target = e.target;
-            var group = null;
-            if (target && target.parent && target.parent.getAttr('clipId')) group = target.parent;
-            if (group) {
-                // Double-click on text clip → open subtitle editor
-                var clipId = group.getAttr('clipId');
-                var info = findClipById(clipId);
-                if (info && info.track && info.track.type === 'text') {
-                    openSubtitleEditor(clipId);
+            // Use selected clip from first click if available (most reliable)
+            if (selectedClipIds.size === 1) {
+                var selId = selectedClipIds.values().next().value;
+                var selInfo = findClipById(selId);
+                if (selInfo && selInfo.track && selInfo.track.type === 'text') {
+                    openSubtitleEditor(selId);
+                    return;
                 }
+                // Non-text clip was double-clicked — do nothing extra
                 return;
             }
 
-            var trackIdx = trackIndexAtY(pos.y);
-            var frame = pixelToFrame(pos.x);
-            addPlaceholderClip(project.tracks[trackIdx].id, Math.max(0, frame));
+            // No clip selected — add placeholder at position
+            var dblTrackIdx = trackIndexAtY(pos.y);
+            var dblFrame = pixelToFrame(pos.x);
+            addPlaceholderClip(project.tracks[dblTrackIdx].id, Math.max(0, dblFrame));
         });
 
         // Right-click context menu
@@ -2288,9 +2451,24 @@ var VideoEditTab = (function () {
             var pos = stage.getPointerPosition();
             if (!pos) return;
 
-            var target = e.target;
-            var group = null;
-            if (target && target.parent && target.parent.getAttr('clipId')) group = target.parent;
+            // Find clip at click position (position-based — reliable regardless of Konva listening flags)
+            var clickedClipId = null;
+            var clickedTrackId = null;
+            if (pos.y > RULER_HEIGHT && pos.x >= TRACK_HEADER_WIDTH) {
+                var ctxTrackIdx = trackIndexAtY(pos.y);
+                var ctxFrame = pixelToFrame(pos.x);
+                if (ctxTrackIdx >= 0 && ctxTrackIdx < project.tracks.length) {
+                    var ctxTrack = project.tracks[ctxTrackIdx];
+                    for (var ci = 0; ci < ctxTrack.clips.length; ci++) {
+                        var cc = ctxTrack.clips[ci];
+                        if (ctxFrame >= cc.startFrame && ctxFrame < cc.endFrame) {
+                            clickedClipId = cc.id;
+                            clickedTrackId = ctxTrack.id;
+                            break;
+                        }
+                    }
+                }
+            }
 
             // Calculate menu position relative to panel
             var containerRect = stage.container().getBoundingClientRect();
@@ -2298,9 +2476,9 @@ var VideoEditTab = (function () {
             var menuX = containerRect.left - panelRect.left + pos.x;
             var menuY = containerRect.top - panelRect.top + pos.y;
 
-            if (group) {
-                var clipId = group.getAttr('clipId');
-                var trackId = group.getAttr('trackId');
+            if (clickedClipId) {
+                var clipId = clickedClipId;
+                var trackId = clickedTrackId;
 
                 // Select if not already
                 if (!selectedClipIds.has(clipId)) {
@@ -2431,7 +2609,7 @@ var VideoEditTab = (function () {
             newTrackOffset = Math.round(trackDeltaY / TRACK_HEIGHT);
         }
 
-        // Apply
+        // Apply with overlap prevention
         selectedClipIds.forEach(function (id) {
             var orig = dragOriginals[id];
             if (!orig) return;
@@ -2439,21 +2617,44 @@ var VideoEditTab = (function () {
             if (!info) return;
 
             var duration = orig.endFrame - orig.startFrame;
-            info.clip.startFrame = Math.max(0, orig.startFrame + frameDelta);
-            info.clip.endFrame = info.clip.startFrame + duration;
+            var newStart = Math.max(0, orig.startFrame + frameDelta);
+            var newEnd = newStart + duration;
 
             // Track move
             if (newTrackOffset !== dragTrackOffset) {
                 var newTrackIdx = clamp(orig.trackIndex + newTrackOffset, 0, project.tracks.length - 1);
                 var destTrack = project.tracks[newTrackIdx];
                 if (destTrack && destTrack.id !== info.track.id) {
-                    // Remove from current track
                     var curIdx = info.track.clips.indexOf(info.clip);
                     if (curIdx >= 0) info.track.clips.splice(curIdx, 1);
-                    // Add to destination
                     destTrack.clips.push(info.clip);
                 }
             }
+
+            // Overlap prevention: check against other clips on same track
+            var currentTrack = findClipById(id);
+            if (currentTrack) {
+                var track = currentTrack.track;
+                for (var oi = 0; oi < track.clips.length; oi++) {
+                    var other = track.clips[oi];
+                    if (other.id === id || selectedClipIds.has(other.id)) continue;
+                    // Check overlap
+                    if (newStart < other.endFrame && newEnd > other.startFrame) {
+                        // Collision — push to nearest edge
+                        var pushLeft = other.startFrame - duration;
+                        var pushRight = other.endFrame;
+                        if (Math.abs(pushLeft - newStart) < Math.abs(pushRight - newStart)) {
+                            newStart = Math.max(0, pushLeft);
+                        } else {
+                            newStart = pushRight;
+                        }
+                        newEnd = newStart + duration;
+                    }
+                }
+            }
+
+            info.clip.startFrame = newStart;
+            info.clip.endFrame = newEnd;
         });
 
         dragTrackOffset = newTrackOffset;
@@ -2592,7 +2793,7 @@ var VideoEditTab = (function () {
         currentFrame = clamp(currentFrame, 0, totalFrames);
         updateTimecodeDisplay();
         renderPlayhead();
-        updatePreviewDebounced();
+        updatePreview();
     }
 
     // ===== Keyboard =====
@@ -2657,6 +2858,7 @@ var VideoEditTab = (function () {
             scrollOffsetX = 0;
             updateTimecodeDisplay();
             renderTimeline();
+            updatePreview();
             return;
         }
         if (e.key === 'End') {
@@ -2667,6 +2869,7 @@ var VideoEditTab = (function () {
             scrollOffsetX = Math.max(0, currentFrame * pixelsPerFrame - viewWidth + 60);
             updateTimecodeDisplay();
             renderTimeline();
+            updatePreview();
             return;
         }
     }
