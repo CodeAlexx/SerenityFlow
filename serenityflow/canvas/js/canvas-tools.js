@@ -35,6 +35,8 @@ var CanvasTools = (function () {
     var _fillThreshold = 32;
     // Brush opacity (separate from hardness)
     var _brushOpacity = 1;
+    // Last stroke endpoint for shift+click straight line mode
+    var _lastStrokeEnd = null;
     // Clipboard for copy/paste
     var _clipboard = null;
     function isDrawTool(name) {
@@ -42,7 +44,7 @@ var CanvasTools = (function () {
     }
     function getStrokeColor(toolName, brushColor) {
         if (toolName === 'mask')
-            return 'rgba(239, 68, 68, 0.5)';
+            return 'rgba(239, 68, 68, 0.8)';
         if (toolName === 'eraser')
             return '#000';
         return brushColor;
@@ -71,16 +73,39 @@ var CanvasTools = (function () {
             var t = al.data.type;
             if (t !== 'draw' && t !== 'mask' && t !== 'guidance')
                 return;
-            if (e.target && e.target.name() && (e.target.name() === 'bounding-box' || e.target.name().indexOf('handle-') === 0))
+            if (e.target && e.target.name() && e.target.name().indexOf('handle-') === 0)
                 return;
-            _drawing = true;
             var pos = ctx.getRelativePointerPosition();
+            // Shift+click: straight line from last stroke endpoint
+            if (e.evt && e.evt.shiftKey && _lastStrokeEnd) {
+                _drawing = true;
+                _currentLine = new Konva.Line({
+                    stroke: ctx.getBrushColor(),
+                    strokeWidth: ctx.getBrushSize(),
+                    globalCompositeOperation: 'source-over',
+                    lineCap: 'round',
+                    lineJoin: 'round',
+                    tension: 0.3,
+                    opacity: ctx.getBrushHardness() * _brushOpacity,
+                    points: [_lastStrokeEnd.x, _lastStrokeEnd.y, pos.x, pos.y],
+                    listening: false
+                });
+                var layer = ctx.getActiveKonvaLayer();
+                if (layer) layer.add(_currentLine);
+                _lastStrokeEnd = { x: pos.x, y: pos.y };
+                ctx.pushHistoryGrouped();
+                _drawing = false;
+                _currentLine = null;
+                return;
+            }
+            _drawing = true;
             _currentLine = new Konva.Line({
                 stroke: ctx.getBrushColor(),
                 strokeWidth: ctx.getBrushSize(),
                 globalCompositeOperation: 'source-over',
                 lineCap: 'round',
                 lineJoin: 'round',
+                tension: 0.3,
                 opacity: ctx.getBrushHardness() * _brushOpacity,
                 points: [pos.x, pos.y, pos.x, pos.y],
                 listening: false
@@ -98,8 +123,13 @@ var CanvasTools = (function () {
                 scheduleLayerDraw(layer);
         },
         onMouseUp: function (ctx) {
-            if (_drawing && _currentLine)
+            if (_drawing && _currentLine) {
+                var pts = _currentLine.points();
+                if (pts.length >= 2) {
+                    _lastStrokeEnd = { x: pts[pts.length - 2], y: pts[pts.length - 1] };
+                }
                 ctx.pushHistoryGrouped();
+            }
             _drawing = false;
             _currentLine = null;
         }
@@ -113,16 +143,39 @@ var CanvasTools = (function () {
             var al = ctx.getActiveLayer();
             if (!al || al.data.locked)
                 return;
-            if (e.target && e.target.name() && (e.target.name() === 'bounding-box' || e.target.name().indexOf('handle-') === 0))
+            if (e.target && e.target.name() && e.target.name().indexOf('handle-') === 0)
                 return;
-            _drawing = true;
             var pos = ctx.getRelativePointerPosition();
+            // Shift+click: straight line from last stroke endpoint
+            if (e.evt && e.evt.shiftKey && _lastStrokeEnd) {
+                _drawing = true;
+                _currentLine = new Konva.Line({
+                    stroke: '#000',
+                    strokeWidth: ctx.getBrushSize(),
+                    globalCompositeOperation: 'destination-out',
+                    lineCap: 'round',
+                    lineJoin: 'round',
+                    tension: 0.3,
+                    opacity: 1,
+                    points: [_lastStrokeEnd.x, _lastStrokeEnd.y, pos.x, pos.y],
+                    listening: false
+                });
+                var layer = ctx.getActiveKonvaLayer();
+                if (layer) layer.add(_currentLine);
+                _lastStrokeEnd = { x: pos.x, y: pos.y };
+                ctx.pushHistoryGrouped();
+                _drawing = false;
+                _currentLine = null;
+                return;
+            }
+            _drawing = true;
             _currentLine = new Konva.Line({
                 stroke: '#000',
                 strokeWidth: ctx.getBrushSize(),
                 globalCompositeOperation: 'destination-out',
                 lineCap: 'round',
                 lineJoin: 'round',
+                tension: 0.3,
                 opacity: 1,
                 points: [pos.x, pos.y, pos.x, pos.y],
                 listening: false
@@ -140,8 +193,13 @@ var CanvasTools = (function () {
                 scheduleLayerDraw(layer);
         },
         onMouseUp: function (ctx) {
-            if (_drawing && _currentLine)
+            if (_drawing && _currentLine) {
+                var pts = _currentLine.points();
+                if (pts.length >= 2) {
+                    _lastStrokeEnd = { x: pts[pts.length - 2], y: pts[pts.length - 1] };
+                }
                 ctx.pushHistoryGrouped();
+            }
             _drawing = false;
             _currentLine = null;
         }
@@ -155,16 +213,17 @@ var CanvasTools = (function () {
             var al = ctx.getActiveLayer();
             if (!al || al.data.locked)
                 return;
-            if (e.target && e.target.name() && (e.target.name() === 'bounding-box' || e.target.name().indexOf('handle-') === 0))
+            if (e.target && e.target.name() && e.target.name().indexOf('handle-') === 0)
                 return;
             _drawing = true;
             var pos = ctx.getRelativePointerPosition();
             _currentLine = new Konva.Line({
-                stroke: 'rgba(239, 68, 68, 0.5)',
+                stroke: 'rgba(239, 68, 68, 0.8)',
                 strokeWidth: ctx.getBrushSize(),
                 globalCompositeOperation: 'source-over',
                 lineCap: 'round',
                 lineJoin: 'round',
+                tension: 0.3,
                 opacity: ctx.getBrushHardness(),
                 points: [pos.x, pos.y, pos.x, pos.y],
                 listening: false
@@ -436,7 +495,8 @@ var CanvasTools = (function () {
         cursor: 'text',
         showsBrushCursor: false,
         onMouseDown: function (ctx, e) {
-            if (e.target && e.target.name() && (e.target.name() === 'bounding-box' || e.target.name().indexOf('handle-') === 0))
+            // Only block handle clicks, allow clicks on bounding box for text placement
+            if (e.target && e.target.name() && e.target.name().indexOf('handle-') === 0)
                 return;
             var pos = ctx.getRelativePointerPosition();
             var al = ctx.getActiveLayer();
@@ -460,6 +520,8 @@ var CanvasTools = (function () {
                 kTextNew.x(pos.x);
                 kTextNew.y(pos.y);
                 newLayer.konvaLayer.batchDraw();
+                // Auto-trigger inline edit so user can type immediately
+                kTextNew.fire('dblclick');
             }
         }
     };
@@ -613,31 +675,37 @@ var CanvasTools = (function () {
                 return;
             var pos = ctx.getRelativePointerPosition();
             // Alt+click sets source
-            if (e.evt.altKey) {
+            if (e.evt && e.evt.altKey) {
                 _cloneSource = { x: pos.x, y: pos.y };
                 _cloneOffset = null;
                 // Show crosshair at source
                 if (_cloneCrosshair)
                     _cloneCrosshair.destroy();
-                _cloneCrosshair = new Konva.Line({
+                _cloneCrosshair = new Konva.Group({ listening: false });
+                _cloneCrosshair.add(new Konva.Line({
                     points: [pos.x - 10, pos.y, pos.x + 10, pos.y],
-                    stroke: '#ff0',
-                    strokeWidth: 1.5 / ctx.stage.scaleX(),
-                    listening: false
-                });
-                var crossV = new Konva.Line({
+                    stroke: '#ff0', strokeWidth: 1.5 / ctx.stage.scaleX(), listening: false
+                }));
+                _cloneCrosshair.add(new Konva.Line({
                     points: [pos.x, pos.y - 10, pos.x, pos.y + 10],
-                    stroke: '#ff0',
-                    strokeWidth: 1.5 / ctx.stage.scaleX(),
-                    listening: false
-                });
+                    stroke: '#ff0', strokeWidth: 1.5 / ctx.stage.scaleX(), listening: false
+                }));
                 ctx.uiLayer.add(_cloneCrosshair);
-                ctx.uiLayer.add(crossV);
                 ctx.uiLayer.batchDraw();
                 return;
             }
-            if (!_cloneSource)
+            if (!_cloneSource) {
+                // Show hint
+                if (!document.getElementById('cv-clone-hint')) {
+                    var hint = document.createElement('div');
+                    hint.id = 'cv-clone-hint';
+                    hint.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.8);color:#fff;padding:10px 18px;border-radius:8px;font-size:13px;z-index:999;pointer-events:none;';
+                    hint.textContent = 'Alt + Click to set clone source point';
+                    document.body.appendChild(hint);
+                    setTimeout(function () { hint.remove(); }, 2000);
+                }
                 return;
+            }
             if (!_cloneOffset) {
                 _cloneOffset = { x: pos.x - _cloneSource.x, y: pos.y - _cloneSource.y };
             }
@@ -691,6 +759,168 @@ var CanvasTools = (function () {
             ctx.uiLayer.batchDraw();
         }
     };
+    // ── Pencil Tool (hard-edged, 1px, no smoothing) ──
+    var PencilTool = {
+        name: 'pencil',
+        cursor: 'none',
+        showsBrushCursor: true,
+        onMouseDown: function (ctx, e) {
+            var al = ctx.getActiveLayer();
+            if (!al || al.data.locked) return;
+            var t = al.data.type;
+            if (t !== 'draw' && t !== 'mask' && t !== 'guidance') return;
+            if (e.target && e.target.name() && e.target.name().indexOf('handle-') === 0) return;
+            var pos = ctx.getRelativePointerPosition();
+            // Use mask color on mask layers, brush color otherwise
+            var colorKey = t === 'mask' ? 'mask' : 'pencil';
+            // Shift+click: straight line
+            if (e.evt && e.evt.shiftKey && _lastStrokeEnd) {
+                _currentLine = new Konva.Line({
+                    stroke: getStrokeColor(colorKey, ctx.getBrushColor()),
+                    strokeWidth: 1,
+                    globalCompositeOperation: 'source-over',
+                    lineCap: 'butt', lineJoin: 'miter',
+                    tension: 0,
+                    opacity: 1,
+                    points: [_lastStrokeEnd.x, _lastStrokeEnd.y, pos.x, pos.y],
+                    listening: false
+                });
+                var layer = ctx.getActiveKonvaLayer();
+                if (layer) layer.add(_currentLine);
+                _lastStrokeEnd = { x: pos.x, y: pos.y };
+                ctx.pushHistoryGrouped();
+                _currentLine = null;
+                return;
+            }
+            _drawing = true;
+            _currentLine = new Konva.Line({
+                stroke: getStrokeColor(colorKey, ctx.getBrushColor()),
+                strokeWidth: 1,
+                globalCompositeOperation: 'source-over',
+                lineCap: 'butt', lineJoin: 'miter',
+                tension: 0,
+                opacity: 1,
+                points: [pos.x, pos.y, pos.x, pos.y],
+                listening: false
+            });
+            var layer = ctx.getActiveKonvaLayer();
+            if (layer) layer.add(_currentLine);
+        },
+        onMouseMove: function (ctx, pos) {
+            if (!_drawing || !_currentLine) return;
+            _currentLine.points(_currentLine.points().concat([pos.x, pos.y]));
+            var layer = ctx.getActiveKonvaLayer();
+            if (layer) scheduleLayerDraw(layer);
+        },
+        onMouseUp: function (ctx) {
+            if (_drawing && _currentLine) {
+                var pts = _currentLine.points();
+                if (pts.length >= 2) {
+                    _lastStrokeEnd = { x: pts[pts.length - 2], y: pts[pts.length - 1] };
+                }
+                ctx.pushHistoryGrouped();
+            }
+            _drawing = false;
+            _currentLine = null;
+        }
+    };
+    // ── Speech Bubble Tool ──
+    // Renders as flat raster image to survive undo/redo (history uses toDataURL snapshots).
+    // Text entered via prompt() before placement.
+    var SpeechBubbleTool = {
+        name: 'speechbubble',
+        cursor: 'crosshair',
+        showsBrushCursor: false,
+        onMouseDown: function (ctx, e) {
+            var al = ctx.getActiveLayer();
+            if (!al || al.data.locked) return;
+            var t = al.data.type;
+            if (t !== 'draw' && t !== 'text') return;
+            if (e.target && e.target.name() && e.target.name().indexOf('handle-') === 0) return;
+
+            var text = prompt('Speech bubble text:', 'Hello!');
+            if (!text) return;
+
+            var pos = ctx.getRelativePointerPosition();
+            var bubbleW = 180;
+            var bubbleH = 80;
+            var tailH = 20;
+            var radius = 12;
+
+            // Render to offscreen canvas then place as Konva.Image
+            var offCanvas = document.createElement('canvas');
+            offCanvas.width = bubbleW;
+            offCanvas.height = bubbleH + tailH;
+            var c = offCanvas.getContext('2d');
+
+            // Draw bubble path
+            c.fillStyle = '#fff';
+            c.strokeStyle = '#333';
+            c.lineWidth = 2;
+            c.beginPath();
+            c.moveTo(radius, 0);
+            c.lineTo(bubbleW - radius, 0);
+            c.quadraticCurveTo(bubbleW, 0, bubbleW, radius);
+            c.lineTo(bubbleW, bubbleH - radius);
+            c.quadraticCurveTo(bubbleW, bubbleH, bubbleW - radius, bubbleH);
+            c.lineTo(50, bubbleH);
+            c.lineTo(30, bubbleH + tailH);
+            c.lineTo(35, bubbleH);
+            c.lineTo(radius, bubbleH);
+            c.quadraticCurveTo(0, bubbleH, 0, bubbleH - radius);
+            c.lineTo(0, radius);
+            c.quadraticCurveTo(0, 0, radius, 0);
+            c.closePath();
+            c.fill();
+            c.stroke();
+
+            // Draw text
+            c.fillStyle = '#333';
+            c.font = '14px sans-serif';
+            c.textAlign = 'center';
+            c.textBaseline = 'middle';
+            // Word-wrap text
+            var words = text.split(' ');
+            var lines = [];
+            var line = '';
+            var maxW = bubbleW - 24;
+            for (var wi = 0; wi < words.length; wi++) {
+                var test = line + (line ? ' ' : '') + words[wi];
+                if (c.measureText(test).width > maxW && line) {
+                    lines.push(line);
+                    line = words[wi];
+                } else {
+                    line = test;
+                }
+            }
+            if (line) lines.push(line);
+            var lineH = 18;
+            var startY = bubbleH / 2 - (lines.length - 1) * lineH / 2;
+            for (var li = 0; li < lines.length; li++) {
+                c.fillText(lines[li], bubbleW / 2, startY + li * lineH);
+            }
+
+            // Place as Konva.Image (survives undo/redo)
+            var img = new Image();
+            img.onload = function () {
+                var kImg = new Konva.Image({
+                    image: img,
+                    x: pos.x - bubbleW / 2,
+                    y: pos.y - bubbleH / 2,
+                    width: bubbleW,
+                    height: bubbleH + tailH,
+                    listening: false
+                });
+                var layer = ctx.getActiveKonvaLayer();
+                if (layer) {
+                    layer.add(kImg);
+                    layer.batchDraw();
+                    ctx.pushHistory();
+                }
+            };
+            img.src = offCanvas.toDataURL();
+        }
+    };
     // ── Pan Tool ──
     var PanTool = {
         name: 'pan',
@@ -713,6 +943,8 @@ var CanvasTools = (function () {
         fill: FillTool,
         lasso: LassoTool,
         clonestamp: CloneStampTool,
+        pencil: PencilTool,
+        speechbubble: SpeechBubbleTool,
         pan: PanTool,
     };
     function registerTool(name, tool) {

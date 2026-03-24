@@ -29,6 +29,9 @@
     gap: 4px;
     padding: 10px 8px;
     border-bottom: 1px solid var(--shell-border);
+    overflow-y: auto;
+    max-height: calc(100vh - 200px);
+    scrollbar-width: thin;
 }
 
 .cv-tool-btn {
@@ -470,16 +473,16 @@
 }
 .cv-layer-type-menu {
     position: absolute;
-    top: 100%;
+    bottom: 100%;
     right: 0;
-    margin-top: 4px;
-    background: var(--shell-bg-panel);
-    border: 1px solid var(--shell-border);
+    margin-bottom: 4px;
+    background: #2a2a40;
+    border: 1px solid #4a4a65;
     border-radius: 6px;
     padding: 4px;
-    z-index: 100;
-    min-width: 140px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    z-index: 500;
+    min-width: 160px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.5);
 }
 .cv-layer-type-item {
     padding: 6px 10px;

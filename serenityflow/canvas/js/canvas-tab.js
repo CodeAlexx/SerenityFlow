@@ -146,8 +146,10 @@ var CanvasTab = (function () {
             };
         }
         function push() {
-            if (snapshotting)
+            if (snapshotting) {
+                console.log('[History] push blocked by snapshotting');
                 return;
+            }
             var snap = snapshot();
             if (!snap)
                 return;
@@ -156,6 +158,7 @@ var CanvasTab = (function () {
             if (stack.length > MAX)
                 stack.shift();
             cursor = stack.length - 1;
+            console.log('[History] push: cursor=' + cursor + ' stack.length=' + stack.length);
             updateButtons();
         }
         /** Push with stroke grouping — rapid strokes become one undo entry */
@@ -168,23 +171,33 @@ var CanvasTab = (function () {
             }, STROKE_GROUP_MS);
         }
         function undo() {
-            if (cursor <= 0 || snapshotting)
-                return;
-            // Flush any pending grouped stroke
+            // Flush any pending grouped stroke — save it as a new entry
             if (strokeGroupTimer) {
                 clearTimeout(strokeGroupTimer);
                 strokeGroupTimer = null;
-                push();
+                // Save current state (with the stroke) before undoing
+                var snap = snapshot();
+                if (snap) {
+                    stack.splice(cursor + 1); // remove any old redo entries
+                    stack.push(snap);
+                    cursor = stack.length - 1;
+                }
             }
+            if (cursor <= 0)
+                return;
             cursor--;
             restore(stack[cursor]);
+            console.log('[History] undo: cursor=' + cursor + ' stack.length=' + stack.length);
             updateButtons();
         }
         function redo() {
-            if (cursor >= stack.length - 1 || snapshotting)
+            if (cursor >= stack.length - 1) {
+                console.log('[History] redo blocked: cursor=' + cursor + ' stack.length=' + stack.length);
                 return;
+            }
             cursor++;
             restore(stack[cursor]);
+            console.log('[History] redo: cursor=' + cursor + ' stack.length=' + stack.length);
             updateButtons();
         }
         function restore(entry) {
@@ -242,6 +255,7 @@ var CanvasTab = (function () {
                             lineHeight: td.lineHeight, draggable: true,
                         });
                         konvaLayer.add(kText);
+                        attachInlineTextEdit(kText, data, konvaLayer);
                     }
                     loaded++;
                     if (loaded >= total)
@@ -466,6 +480,8 @@ var CanvasTab = (function () {
             '<button class="cv-tool-btn" data-tool="fill" title="Fill (F)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 22l1-1h3l9-9"/><path d="M3 21v-3l9-9 3 3-9 9z"/><path d="M14 6l3-3 3 3-3 3z"/><path d="M19 13c.3 1 1.5 3 0 4.5S16 19 16 19"/></svg></button>' +
             '<button class="cv-tool-btn" data-tool="text" title="Text (T)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9.5" y1="20" x2="14.5" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg></button>' +
             '<button class="cv-tool-btn" data-tool="lasso" title="Lasso (L)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 22a5 5 0 0 1-2-4"/><path d="M7 16.93c.96.43 1.96.74 2.99.91"/><path d="M3.34 14A6.8 6.8 0 0 1 2 10c0-4.42 4.48-8 10-8s10 3.58 10 8-4.48 8-10 8a12 12 0 0 1-3-.38"/><path d="M5 18a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"/></svg></button>' +
+            '<button class="cv-tool-btn" data-tool="pencil" title="Pencil (P)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></button>' +
+            '<button class="cv-tool-btn" data-tool="speechbubble" title="Speech Bubble (U)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>' +
             '<button class="cv-tool-btn" data-tool="clonestamp" title="Clone Stamp (C)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M16 8V5a1 1 0 0 0-1-1H9a1 1 0 0 0-1 1v3"/><path d="M8 16v3a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-3"/></svg></button>' +
             '<button class="cv-tool-btn" data-tool="sam" title="Select Object / SAM (S)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/><path d="M19 17v4m2-2h-4"/></svg></button>' +
             '<button class="cv-tool-btn" data-tool="colorpicker" title="Color Picker (I)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m2 22 1-1h3l9-9"/><path d="M3 21v-3l9-9 3 3-9 9z"/></svg></button>' +
@@ -815,6 +831,9 @@ var CanvasTab = (function () {
         });
         uiLayer.add(sizeLabel);
         boundingBox.on('dragmove', function () {
+            var snap = isVideoArch() ? 32 : 64;
+            boundingBox.x(Math.round(boundingBox.x() / snap) * snap);
+            boundingBox.y(Math.round(boundingBox.y() / snap) * snap);
             updateHandles();
             updateSizeLabel();
             updateVideoOverlayPosition();
@@ -887,6 +906,24 @@ var CanvasTab = (function () {
                 }
                 else if (nm.indexOf('b') >= 0) {
                     newH = handleStartBox.h + dy;
+                }
+                // Aspect ratio lock enforcement
+                if (bboxAspectLocked && bboxLockedRatio > 0) {
+                    var isCorner = nm === 'tl' || nm === 'tr' || nm === 'bl' || nm === 'br';
+                    var isHorizontal = nm === 'ml' || nm === 'mr';
+                    var isVertical = nm === 'tc' || nm === 'bc';
+                    if (isCorner) {
+                        // Use the larger change to determine the other
+                        if (Math.abs(dx) > Math.abs(dy)) {
+                            newH = Math.round(newW / bboxLockedRatio);
+                        } else {
+                            newW = Math.round(newH * bboxLockedRatio);
+                        }
+                    } else if (isHorizontal) {
+                        newH = Math.round(newW / bboxLockedRatio);
+                    } else if (isVertical) {
+                        newW = Math.round(newH * bboxLockedRatio);
+                    }
                 }
                 newW = clampDimForArch(newW);
                 newH = clampDimForArch(newH);
@@ -1098,12 +1135,24 @@ var CanvasTab = (function () {
             var result = ev.target.result;
             var img = new Image();
             img.onload = function () {
+                // Scale to fit bounding box while preserving aspect ratio
+                var bw = boundingBox.width();
+                var bh = boundingBox.height();
+                var iw = img.naturalWidth || img.width;
+                var ih = img.naturalHeight || img.height;
+                var scale = Math.min(bw / iw, bh / ih);
+                var dw = iw * scale;
+                var dh = ih * scale;
+                // Center within bounding box
+                var dx = boundingBox.x() + (bw - dw) / 2;
+                var dy = boundingBox.y() + (bh - dh) / 2;
+
                 var kImg = new Konva.Image({
                     image: img,
-                    x: boundingBox.x(),
-                    y: boundingBox.y(),
-                    width: boundingBox.width(),
-                    height: boundingBox.height(),
+                    x: dx,
+                    y: dy,
+                    width: dw,
+                    height: dh,
                     draggable: activeTool === 'select'
                 });
                 var layer = getActiveKonvaLayer();
@@ -1137,6 +1186,7 @@ var CanvasTab = (function () {
                 lineHeight: td.lineHeight, draggable: true,
             });
             konvaLayer.add(kText);
+            attachInlineTextEdit(kText, data, konvaLayer);
         }
         var cl = { data: data, konvaLayer: konvaLayer };
         canvasLayers.push(cl);
@@ -1635,6 +1685,16 @@ var CanvasTab = (function () {
                 txt.draggable(draggable || tool === 'text');
             });
         });
+        // Bbox only interactive in select mode — other tools need to click through it
+        if (boundingBox) {
+            var bboxInteractive = tool === 'select';
+            boundingBox.draggable(bboxInteractive);
+            boundingBox.listening(bboxInteractive);
+            resizeHandles.forEach(function (h) {
+                h.draggable(bboxInteractive);
+                h.listening(bboxInteractive);
+            });
+        }
         updateCursor();
     }
     function updateCursor() {
@@ -1818,6 +1878,12 @@ var CanvasTab = (function () {
                 break;
             case 'KeyC':
                 setTool('clonestamp');
+                break;
+            case 'KeyP':
+                setTool('pencil');
+                break;
+            case 'KeyU':
+                setTool('speechbubble');
                 break;
             case 'KeyI':
                 setTool('colorpicker');
@@ -2090,9 +2156,21 @@ var CanvasTab = (function () {
         var addBtn = document.getElementById('cv-layers-add-btn');
         var typeMenu = document.getElementById('cv-layer-type-menu');
         if (addBtn && typeMenu) {
+            // Move dropdown to document.body so it's not clipped by overflow:hidden parents
+            document.body.appendChild(typeMenu);
             addBtn.addEventListener('click', function (e) {
                 e.stopPropagation();
-                typeMenu.style.display = typeMenu.style.display === 'none' ? 'block' : 'none';
+                if (typeMenu.style.display !== 'none') {
+                    typeMenu.style.display = 'none';
+                    return;
+                }
+                // Position above the button
+                var btnRect = addBtn.getBoundingClientRect();
+                typeMenu.style.position = 'fixed';
+                typeMenu.style.left = btnRect.left + 'px';
+                typeMenu.style.top = 'auto';
+                typeMenu.style.bottom = (window.innerHeight - btnRect.top + 4) + 'px';
+                typeMenu.style.display = 'block';
             });
             typeMenu.addEventListener('click', function (e) {
                 var item = e.target.closest('.cv-layer-type-item');
@@ -2112,6 +2190,13 @@ var CanvasTab = (function () {
         var bboxH = document.getElementById('cv-bbox-h');
         var bboxSnap = document.getElementById('cv-bbox-snap');
         var bboxReset = document.getElementById('cv-bbox-reset');
+        function bboxKeydown(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                e.target.blur();
+            }
+        }
         if (bboxW) {
             bboxW.addEventListener('change', function () {
                 var v = clampDimForArch(parseInt(this.value) || 1024);
@@ -2119,7 +2204,10 @@ var CanvasTab = (function () {
                 boundingBox.width(v);
                 updateHandles();
                 updateSizeLabel();
+                stage.batchDraw();
+                History.push();
             });
+            bboxW.addEventListener('keydown', bboxKeydown);
         }
         if (bboxH) {
             bboxH.addEventListener('change', function () {
@@ -2128,7 +2216,10 @@ var CanvasTab = (function () {
                 boundingBox.height(v);
                 updateHandles();
                 updateSizeLabel();
+                stage.batchDraw();
+                History.push();
             });
+            bboxH.addEventListener('keydown', bboxKeydown);
         }
         if (bboxReset) {
             bboxReset.addEventListener('click', function () {
@@ -2243,6 +2334,77 @@ var CanvasTab = (function () {
         }
         canvas.style.filter = filters.length > 0 ? filters.join(' ') : '';
     }
+    // ── Inline Text Editing ──
+    function attachInlineTextEdit(kText, layerData, konvaLayer) {
+        kText.on('dblclick dbltap', function () {
+            // Hide Konva text while editing
+            kText.hide();
+            konvaLayer.batchDraw();
+
+            var stageContainer = document.getElementById('canvas-stage-container');
+            if (!stageContainer) return;
+
+            // Get screen-space bounding box of the text node
+            var box = kText.getClientRect();
+            var containerRect = stageContainer.getBoundingClientRect();
+            var scale = stage.scaleX();
+
+            var textarea = document.createElement('textarea');
+            textarea.value = kText.text();
+            textarea.style.position = 'absolute';
+            textarea.style.left = (box.x - containerRect.left) + 'px';
+            textarea.style.top = (box.y - containerRect.top) + 'px';
+            textarea.style.width = Math.max(box.width, 120) + 'px';
+            textarea.style.minHeight = Math.max(box.height, 30) + 'px';
+            textarea.style.fontSize = (kText.fontSize() * scale) + 'px';
+            textarea.style.fontFamily = kText.fontFamily();
+            textarea.style.fontStyle = kText.fontStyle();
+            textarea.style.color = kText.fill();
+            textarea.style.background = 'rgba(0,0,0,0.85)';
+            textarea.style.border = '2px solid #6c6af5';
+            textarea.style.borderRadius = '4px';
+            textarea.style.padding = '4px';
+            textarea.style.margin = '0';
+            textarea.style.outline = 'none';
+            textarea.style.resize = 'both';
+            textarea.style.overflow = 'hidden';
+            textarea.style.lineHeight = String(kText.lineHeight());
+            textarea.style.zIndex = '1000';
+            textarea.style.boxSizing = 'border-box';
+            stageContainer.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+
+            function finishEdit() {
+                var newText = textarea.value;
+                layerData.text = newText;
+                kText.text(newText);
+                kText.show();
+                konvaLayer.batchDraw();
+                textarea.remove();
+                // Sync the right panel input
+                var panelInput = document.getElementById('cv-text-content');
+                if (panelInput) panelInput.value = newText;
+                History.push();
+            }
+
+            textarea.addEventListener('blur', finishEdit);
+            textarea.addEventListener('keydown', function (ev) {
+                // Enter without shift commits; shift+enter inserts newline
+                if (ev.key === 'Enter' && !ev.shiftKey) {
+                    ev.preventDefault();
+                    textarea.blur();
+                }
+                if (ev.key === 'Escape') {
+                    textarea.value = kText.text(); // revert
+                    textarea.blur();
+                }
+                // Stop propagation so canvas shortcuts don't fire
+                ev.stopPropagation();
+            });
+        });
+    }
+
     // ── Text Panel Bindings ──
     function bindTextPanel() {
         var textContent = document.getElementById('cv-text-content');
@@ -2328,13 +2490,15 @@ var CanvasTab = (function () {
                 }
                 if (data.type === 'text') {
                     var td = data;
-                    konvaLayer.add(new Konva.Text({
+                    var kText = new Konva.Text({
                         x: td.position.x, y: td.position.y,
                         text: td.text, fontSize: td.fontSize,
                         fontFamily: td.fontFamily, fill: td.color,
                         fontStyle: td.fontWeight, align: td.alignment,
                         lineHeight: td.lineHeight, draggable: true,
-                    }));
+                    });
+                    konvaLayer.add(kText);
+                    attachInlineTextEdit(kText, data, konvaLayer);
                 }
             });
             // Restore bbox
