@@ -507,5 +507,92 @@ document.addEventListener('DOMContentLoaded', function () {
             return;
         }
     });
+    // ── Server Console ──
+    var sfConsole = document.getElementById('sf-console');
+    var sfConsoleLog = document.getElementById('sf-console-log');
+    var sfConsoleVisible = false;
+    var MAX_CONSOLE_LINES = 500;
+
+    function toggleConsole() {
+        sfConsoleVisible = !sfConsoleVisible;
+        if (sfConsole) sfConsole.style.display = sfConsoleVisible ? 'flex' : 'none';
+    }
+
+    function logToConsole(type, data) {
+        if (!sfConsoleLog) return;
+        var line = document.createElement('div');
+        line.className = 'log-line';
+        var now = new Date();
+        var ts = String(now.getHours()).padStart(2, '0') + ':' +
+                 String(now.getMinutes()).padStart(2, '0') + ':' +
+                 String(now.getSeconds()).padStart(2, '0');
+
+        var colorClass = 'log-type-' + (type || 'default');
+        var detail = '';
+        if (data) {
+            if (type === 'executing' && data.node) {
+                detail = 'node ' + data.node + (data.display_node ? ' (' + data.display_node + ')' : '');
+            } else if (type === 'progress' && data.value !== undefined) {
+                detail = data.value + '/' + data.max;
+            } else if (type === 'execution_error' && data.exception_message) {
+                detail = data.exception_message;
+            } else if (type === 'status' && data.status && data.status.exec_info) {
+                detail = 'queue: ' + data.status.exec_info.queue_remaining;
+            } else if (typeof data === 'object') {
+                try { detail = JSON.stringify(data).slice(0, 200); } catch(e) {}
+            } else {
+                detail = String(data).slice(0, 200);
+            }
+        }
+
+        line.innerHTML = '<span class="log-ts">' + ts + '</span>' +
+                         '<span class="log-type ' + colorClass + '">' + type + '</span>' +
+                         '<span>' + detail + '</span>';
+        sfConsoleLog.appendChild(line);
+
+        // Trim old lines
+        while (sfConsoleLog.children.length > MAX_CONSOLE_LINES) {
+            sfConsoleLog.removeChild(sfConsoleLog.firstChild);
+        }
+        sfConsoleLog.scrollTop = sfConsoleLog.scrollHeight;
+    }
+
+    // Hook into all WS events
+    if (typeof SerenityWS !== 'undefined') {
+        var _origEmit = SerenityWS._emit;
+        // Tap into the ws module's emit — check if it exposes onAny
+        // Fallback: listen to specific known events
+        var logEvents = [
+            'connected', 'disconnected', 'status',
+            'execution_start', 'executing', 'progress', 'executed',
+            'execution_success', 'execution_error', 'execution_cached',
+            'export_progress', 'export_complete', 'export_error',
+        ];
+        logEvents.forEach(function (evType) {
+            SerenityWS.on(evType, function (data) {
+                logToConsole(evType, data);
+            });
+        });
+    }
+
+    // Console toggle: backtick key
+    document.addEventListener('keydown', function (e) {
+        if (e.key === '`' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+            var tag = e.target.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+            e.preventDefault();
+            toggleConsole();
+        }
+    });
+
+    // Console buttons
+    var clearBtn = document.getElementById('sf-console-clear');
+    if (clearBtn) clearBtn.addEventListener('click', function () {
+        if (sfConsoleLog) sfConsoleLog.innerHTML = '';
+    });
+    var closeBtn = document.getElementById('sf-console-close');
+    if (closeBtn) closeBtn.addEventListener('click', toggleConsole);
+
+    logToConsole('connected', 'Console ready. Press ` (backtick) to toggle.');
 });
 //# sourceMappingURL=shell.js.map
