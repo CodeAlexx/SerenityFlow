@@ -6,6 +6,22 @@
  */
 var WorkflowBuilder = (function () {
     'use strict';
+    /**
+     * Parse the UI's combined scheduler value (e.g. 'dpmpp_2m_k') into
+     * separate sampler_name and scheduler for ComfyUI KSampler nodes.
+     * Values ending in '_k' use karras noise schedule.
+     */
+    function parseSamplerScheduler(combined, defaultSampler, defaultScheduler) {
+        var s = combined || defaultSampler || 'euler';
+        var sched = defaultScheduler || 'normal';
+        if (s.endsWith('_k')) {
+            s = s.slice(0, -2);
+            sched = 'karras';
+        }
+        // Map ancestral variants
+        if (s === 'euler_ancestral') { s = 'euler_ancestral'; }
+        return { sampler: s, scheduler: sched };
+    }
     function build(params) {
         var arch = ModelUtils.detectArchFromFilename(params.model);
         var workflow;
@@ -98,7 +114,7 @@ var WorkflowBuilder = (function () {
                 } },
             '7': { class_type: 'KSampler', inputs: {
                     seed: seed, steps: params.steps, cfg: params.cfg || 7.0,
-                    sampler_name: params.scheduler || 'euler', scheduler: 'normal',
+                    sampler_name: parseSamplerScheduler(params.scheduler).sampler, scheduler: parseSamplerScheduler(params.scheduler).scheduler,
                     denoise: params.denoise || 0.75,
                     model: ['1', 0], positive: ['2', 0], negative: ['3', 0], latent_image: ['6', 0]
                 } },
@@ -417,7 +433,7 @@ var WorkflowBuilder = (function () {
             '4': { class_type: 'EmptyLatentImage', inputs: { width: w, height: h, batch_size: 1 } },
             '5': { class_type: 'KSampler', inputs: {
                     seed: seed, steps: p.steps, cfg: p.cfg || 7.0,
-                    sampler_name: p.scheduler || 'euler', scheduler: 'normal', denoise: 1.0,
+                    sampler_name: parseSamplerScheduler(p.scheduler).sampler, scheduler: parseSamplerScheduler(p.scheduler).scheduler, denoise: 1.0,
                     model: ['1', 0], positive: ['2', 0], negative: ['3', 0], latent_image: ['4', 0]
                 } },
             '6': { class_type: 'VAEDecode', inputs: { samples: ['5', 0], vae: ['1', 2] } },
@@ -436,7 +452,7 @@ var WorkflowBuilder = (function () {
             '5': { class_type: 'VAEEncode', inputs: { pixels: ['4', 0], vae: ['1', 2] } },
             '6': { class_type: 'KSampler', inputs: {
                     seed: seed, steps: p.steps, cfg: p.cfg || 7.0,
-                    sampler_name: p.scheduler || 'euler', scheduler: 'normal', denoise: p.denoise || 0.75,
+                    sampler_name: parseSamplerScheduler(p.scheduler).sampler, scheduler: parseSamplerScheduler(p.scheduler).scheduler, denoise: p.denoise || 0.75,
                     model: ['1', 0], positive: ['2', 0], negative: ['3', 0], latent_image: ['5', 0]
                 } },
             '7': { class_type: 'VAEDecode', inputs: { samples: ['6', 0], vae: ['1', 2] } },
@@ -455,7 +471,7 @@ var WorkflowBuilder = (function () {
             '4': { class_type: 'EmptyLatentImage', inputs: { width: w, height: h, batch_size: 1 } },
             '5': { class_type: 'KSampler', inputs: {
                     seed: seed, steps: p.steps, cfg: p.cfg || 7.0,
-                    sampler_name: p.scheduler || 'euler', scheduler: 'normal', denoise: 1.0,
+                    sampler_name: parseSamplerScheduler(p.scheduler).sampler, scheduler: parseSamplerScheduler(p.scheduler).scheduler, denoise: 1.0,
                     model: ['1', 0], positive: ['2', 0], negative: ['3', 0], latent_image: ['4', 0]
                 } },
             '6': { class_type: 'VAEDecode', inputs: { samples: ['5', 0], vae: ['1', 2] } },
@@ -474,7 +490,7 @@ var WorkflowBuilder = (function () {
             '5': { class_type: 'VAEEncode', inputs: { pixels: ['4', 0], vae: ['1', 2] } },
             '6': { class_type: 'KSampler', inputs: {
                     seed: seed, steps: p.steps, cfg: p.cfg || 7.0,
-                    sampler_name: p.scheduler || 'euler', scheduler: 'normal', denoise: p.denoise || 0.75,
+                    sampler_name: parseSamplerScheduler(p.scheduler).sampler, scheduler: parseSamplerScheduler(p.scheduler).scheduler, denoise: p.denoise || 0.75,
                     model: ['1', 0], positive: ['2', 0], negative: ['3', 0], latent_image: ['5', 0]
                 } },
             '7': { class_type: 'VAEDecode', inputs: { samples: ['6', 0], vae: ['1', 2] } },

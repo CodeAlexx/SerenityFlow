@@ -56,7 +56,7 @@ var ModelUtils = (function () {
             return 'zimage';
         if (f.includes('flux') || f.includes('flex') || f.includes('f1d') || f.includes('f1s'))
             return 'flux';
-        if (f.includes('sd3') || f.includes('stable-diffusion-3') || f.includes('sd_3'))
+        if (f.includes('sd3') || f.includes('stable-diffusion-3') || f.includes('sd_3') || f.includes('stablediffusion3'))
             return 'sd3';
         if (f.includes('sdxl') || f.includes('xl') || f.includes('pony') || f.includes('illustrious'))
             return 'sdxl';
