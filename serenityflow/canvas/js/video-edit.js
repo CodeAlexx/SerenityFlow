@@ -154,6 +154,11 @@ var VideoEditTab = (function () {
     var propsPanelClipId = null;
     var addEffectDropdownEl = null;
 
+    // --- V7 State: RIFE Interpolation ---
+    var activeRifeJobId = null;
+    var rifeProcessingClipId = null;
+    var rifeProgressPercent = 0;
+
     // --- Default project data ---
     var project = {
         fps: 30,
@@ -529,6 +534,9 @@ var VideoEditTab = (function () {
             showTakeSwitcher(contextTargetClipId);
         } else if (action === 'fill-gap') {
             showBridgePanel(contextTargetTrackId, contextClickFrame);
+        } else if (action === 'rife-2x' || action === 'rife-4x') {
+            var multi = action === 'rife-2x' ? 2 : 4;
+            startRifeInterpolation(contextTargetClipId, multi);
         }
     }
 
@@ -1616,6 +1624,8 @@ var VideoEditTab = (function () {
                     '<input type="number" id="ve-exp-fps" value="' + FPS + '" min="1" max="60" style="width:60px"></div>' +
                 '<div class="ve-export-row"><label>Quality</label>' +
                     '<select id="ve-exp-quality"><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option><option value="lossless">Lossless</option></select></div>' +
+                '<div class="ve-export-row"><label>Color Grade</label>' +
+                    '<select id="ve-exp-lut"><option value="">None</option></select></div>' +
                 '<div class="ve-export-row"><label>Audio</label>' +
                     '<input type="checkbox" id="ve-exp-audio" checked> <span style="font-size:12px;color:#aaa">Include audio</span></div>' +
                 '<div class="ve-export-radio-group">' +
@@ -1633,6 +1643,23 @@ var VideoEditTab = (function () {
             '</div>';
 
         document.body.appendChild(exportDialogEl);
+
+        // Populate LUT dropdown in export dialog
+        (function () {
+            var sel = document.getElementById('ve-exp-lut');
+            if (!sel) return;
+            fetch(getApiBase() + '/video_edit/luts')
+                .then(function (r) { return r.json(); })
+                .then(function (luts) {
+                    luts.forEach(function (lut) {
+                        var opt = document.createElement('option');
+                        opt.value = lut.path;
+                        opt.textContent = lut.name;
+                        sel.appendChild(opt);
+                    });
+                })
+                .catch(function () {});
+        })();
 
         document.getElementById('ve-exp-cancel').addEventListener('click', function () {
             if (isExporting && exportId) {
@@ -1682,6 +1709,8 @@ var VideoEditTab = (function () {
         var fps = parseInt(document.getElementById('ve-exp-fps').value) || 30;
         var quality = document.getElementById('ve-exp-quality').value;
         var includeAudio = document.getElementById('ve-exp-audio').checked;
+        var lutSel = document.getElementById('ve-exp-lut');
+        var lutPath = lutSel ? lutSel.value : '';
         var rangeRadio = document.querySelector('input[name="ve-exp-range"]:checked');
         var rangeFull = !rangeRadio || rangeRadio.value === 'full';
 
@@ -1698,6 +1727,7 @@ var VideoEditTab = (function () {
             include_audio: includeAudio,
             output_filename: filename,
         };
+        if (lutPath) body.lut_path = lutPath;
 
         if (!rangeFull && selectedClipIds.size > 0) {
             // Use selection range
@@ -2113,6 +2143,131 @@ var VideoEditTab = (function () {
         };
         panel.appendChild(addBtn);
 
+        // LUT / Color Grade section
+        var lutSection = document.createElement('div');
+        lutSection.className = 've-lut-section';
+        var lutLabel = document.createElement('div');
+        lutLabel.className = 've-section-label';
+        lutLabel.textContent = 'Color Grade (LUT)';
+        lutSection.appendChild(lutLabel);
+
+        var lutSelect = document.createElement('select');
+        lutSelect.className = 've-lut-select';
+        var noneOpt = document.createElement('option');
+        noneOpt.value = '';
+        noneOpt.textContent = 'None';
+        lutSelect.appendChild(noneOpt);
+        lutSection.appendChild(lutSelect);
+
+        // Populate LUT dropdown
+        (function (sel, c) {
+            fetch(getApiBase() + '/video_edit/luts')
+                .then(function (r) { return r.json(); })
+                .then(function (luts) {
+                    luts.forEach(function (lut) {
+                        var opt = document.createElement('option');
+                        opt.value = lut.path;
+                        opt.textContent = lut.name;
+                        if (c.lut_path === lut.path) opt.selected = true;
+                        sel.appendChild(opt);
+                    });
+                })
+                .catch(function () {});
+        })(lutSelect, clip);
+
+        lutSelect.onchange = function () {
+            pushUndo();
+            if (lutSelect.value) {
+                clip.lut_path = lutSelect.value;
+                clip.lut_name = lutSelect.options[lutSelect.selectedIndex].textContent;
+            } else {
+                clip.lut_path = null;
+                clip.lut_name = null;
+            }
+            renderTimeline();
+            scheduleAutosave();
+        };
+
+        // Upload new .cube file
+        var uploadBtn = document.createElement('button');
+        uploadBtn.className = 've-lut-upload-btn';
+        uploadBtn.textContent = 'Upload New .cube\u2026';
+        uploadBtn.onclick = function () {
+            var fi = document.createElement('input');
+            fi.type = 'file';
+            fi.accept = '.cube';
+            fi.onchange = function () {
+                if (!fi.files || !fi.files[0]) return;
+                var fd = new FormData();
+                fd.append('file', fi.files[0]);
+                fetch(getApiBase() + '/video_edit/luts/upload', { method: 'POST', body: fd })
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data.error) { alert(data.error); return; }
+                        // Select the new LUT
+                        clip.lut_path = data.path;
+                        clip.lut_name = data.name;
+                        renderPropertiesPanelContent(panel, clip);
+                        renderTimeline();
+                        scheduleAutosave();
+                    })
+                    .catch(function (e) { alert('Upload failed: ' + e); });
+            };
+            fi.click();
+        };
+        lutSection.appendChild(uploadBtn);
+
+        // Preview row (original vs graded)
+        if (clip.lut_path && clip.source_path) {
+            var previewRow = document.createElement('div');
+            previewRow.className = 've-lut-preview-row';
+
+            var origCol = document.createElement('div');
+            var origImg = document.createElement('img');
+            origImg.alt = 'Original';
+            var origLabel = document.createElement('div');
+            origLabel.className = 've-lut-preview-label';
+            origLabel.textContent = 'Original';
+            origCol.appendChild(origImg);
+            origCol.appendChild(origLabel);
+
+            var gradedCol = document.createElement('div');
+            var gradedImg = document.createElement('img');
+            gradedImg.alt = 'Graded';
+            var gradedLabel = document.createElement('div');
+            gradedLabel.className = 've-lut-preview-label';
+            gradedLabel.textContent = 'Graded';
+            gradedCol.appendChild(gradedImg);
+            gradedCol.appendChild(gradedLabel);
+
+            previewRow.appendChild(origCol);
+            previewRow.appendChild(gradedCol);
+            lutSection.appendChild(previewRow);
+
+            // Fetch original frame
+            var seekSec = (clip.source_start || 0) / FPS;
+            fetch(getApiBase() + '/video_edit/preview_effect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source_path: clip.source_path, effects: [], seek_sec: seekSec }),
+            })
+            .then(function (r) { return r.blob(); })
+            .then(function (blob) { origImg.src = URL.createObjectURL(blob); })
+            .catch(function () {});
+
+            // Fetch graded frame
+            fetch(getApiBase() + '/video_edit/luts/preview', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source_path: clip.source_path, lut_path: clip.lut_path, seek_sec: seekSec }),
+            })
+            .then(function (r) { return r.blob(); })
+            .then(function (blob) { gradedImg.src = URL.createObjectURL(blob); })
+            .catch(function () {});
+        }
+
+        panel.appendChild(lutSection);
+
         // Transition section
         var transLabel = document.createElement('div');
         transLabel.className = 've-section-label';
@@ -2257,6 +2412,100 @@ var VideoEditTab = (function () {
         setTimeout(function () {
             document.addEventListener('mousedown', closeHandler);
         }, 0);
+    }
+
+    // ===== V7: RIFE Frame Interpolation =====
+
+    function startRifeInterpolation(clipId, multiplier) {
+        fetch(getApiBase() + '/video_edit/rife/status')
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (!data.available) {
+                    alert('RIFE model not found.\n\nPlace flownet.pkl from Practical-RIFE v4.25 into:\n' + data.model_path);
+                    return;
+                }
+                if (data.processing) {
+                    alert('RIFE is already processing another clip. Please wait.');
+                    return;
+                }
+                if (!confirm('Interpolate this clip ' + multiplier + '\u00D7 using RIFE?\nThis may take a few minutes depending on clip length.')) {
+                    return;
+                }
+                fetch(getApiBase() + '/video_edit/rife/interpolate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        project_id: projectId,
+                        clip_id: clipId,
+                        multiplier: multiplier,
+                        replace_source: true,
+                    }),
+                })
+                .then(function (r) { return r.json(); })
+                .then(function (res) {
+                    if (res.error) {
+                        alert('RIFE error: ' + res.error);
+                        return;
+                    }
+                    activeRifeJobId = res.job_id;
+                    rifeProcessingClipId = clipId;
+                    rifeProgressPercent = 0;
+                    renderTimeline();
+
+                    // Subscribe to WS events
+                    if (typeof SerenityWS !== 'undefined') {
+                        SerenityWS.on('rife_progress', onRifeProgress);
+                        SerenityWS.on('rife_complete', onRifeComplete);
+                        SerenityWS.on('rife_error', onRifeError);
+                    }
+                })
+                .catch(function (err) { alert('RIFE request failed: ' + err); });
+            })
+            .catch(function (err) { alert('Could not check RIFE status: ' + err); });
+    }
+
+    function onRifeProgress(msg) {
+        var d = msg.data || msg;
+        if (activeRifeJobId && d.job_id !== activeRifeJobId) return;
+        rifeProgressPercent = d.percent || 0;
+        renderTimeline();
+    }
+
+    function onRifeComplete(msg) {
+        var d = msg.data || msg;
+        if (activeRifeJobId && d.job_id !== activeRifeJobId) return;
+
+        // Update clip source in memory if replace_source was true
+        if (d.replace_source !== false && d.clip_id && d.output_path) {
+            var info = findClipById(d.clip_id);
+            if (info) {
+                info.clip.source_path = d.output_path;
+                info.clip.rife_multiplier = d.multiplier || 2;
+            }
+        }
+
+        cleanupRifeState();
+        renderTimeline();
+        scheduleAutosave();
+    }
+
+    function onRifeError(msg) {
+        var d = msg.data || msg;
+        if (activeRifeJobId && d.job_id !== activeRifeJobId) return;
+        cleanupRifeState();
+        renderTimeline();
+        alert('RIFE interpolation failed: ' + (d.error || 'Unknown error'));
+    }
+
+    function cleanupRifeState() {
+        activeRifeJobId = null;
+        rifeProcessingClipId = null;
+        rifeProgressPercent = 0;
+        if (typeof SerenityWS !== 'undefined') {
+            SerenityWS.off('rife_progress', onRifeProgress);
+            SerenityWS.off('rife_complete', onRifeComplete);
+            SerenityWS.off('rife_error', onRifeError);
+        }
     }
 
     function renderTracks() {
@@ -2451,19 +2700,88 @@ var VideoEditTab = (function () {
                     }
 
                     // V6: Effects badge
+                    var badgeOffsetX = 4;
                     if (clip.effects && clip.effects.length > 0) {
                         var fxBadgeW = 22;
                         group.add(new Konva.Rect({
-                            x: 4 - rectOffset, y: clipH - 14,
+                            x: badgeOffsetX - rectOffset, y: clipH - 14,
                             width: fxBadgeW, height: 12,
                             fill: 'rgba(0,0,0,0.55)', cornerRadius: 3,
                             listening: false,
                         }));
                         group.add(new Konva.Text({
-                            x: 6 - rectOffset, y: clipH - 13,
+                            x: badgeOffsetX + 2 - rectOffset, y: clipH - 13,
                             text: 'FX',
                             fontSize: 9, fill: '#7c6ff0', fontFamily: 'sans-serif',
                             fontStyle: 'bold', listening: false,
+                        }));
+                        badgeOffsetX += fxBadgeW + 3;
+                    }
+
+                    // V7: LUT badge
+                    if (clip.lut_path) {
+                        var lutBadgeW = 26;
+                        group.add(new Konva.Rect({
+                            x: badgeOffsetX - rectOffset, y: clipH - 14,
+                            width: lutBadgeW, height: 12,
+                            fill: 'rgba(0,0,0,0.55)', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        group.add(new Konva.Text({
+                            x: badgeOffsetX + 2 - rectOffset, y: clipH - 13,
+                            text: 'LUT',
+                            fontSize: 9, fill: '#e8a040', fontFamily: 'sans-serif',
+                            fontStyle: 'bold', listening: false,
+                        }));
+                    }
+
+                    // V7: RIFE multiplier badge (after interpolation completes)
+                    if (clip.rife_multiplier && !rifeProcessingClipId) {
+                        var rifeBadgeText = clip.rife_multiplier + '\u00D7';
+                        var rifeBadgeW = rifeBadgeText.length * 6 + 8;
+                        group.add(new Konva.Rect({
+                            x: badgeOffsetX - rectOffset, y: clipH - 14,
+                            width: rifeBadgeW, height: 12,
+                            fill: 'rgba(0,0,0,0.55)', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        group.add(new Konva.Text({
+                            x: badgeOffsetX + 2 - rectOffset, y: clipH - 13,
+                            text: rifeBadgeText,
+                            fontSize: 9, fill: '#50c878', fontFamily: 'sans-serif',
+                            fontStyle: 'bold', listening: false,
+                        }));
+                    }
+
+                    // V7: RIFE processing overlay
+                    if (rifeProcessingClipId === clip.id) {
+                        group.add(new Konva.Rect({
+                            x: -rectOffset, y: 0,
+                            width: clipW, height: clipH,
+                            fill: '#7c6ff0', opacity: 0.18,
+                            cornerRadius: 4, listening: false,
+                        }));
+                        // Progress bar
+                        var barY = clipH / 2 - 3;
+                        var barW = Math.max(20, clipW - 20);
+                        group.add(new Konva.Rect({
+                            x: 10 - rectOffset, y: barY,
+                            width: barW, height: 6,
+                            fill: 'rgba(0,0,0,0.5)', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        var fillW = Math.max(0, barW * rifeProgressPercent / 100);
+                        group.add(new Konva.Rect({
+                            x: 10 - rectOffset, y: barY,
+                            width: fillW, height: 6,
+                            fill: '#7c6ff0', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        group.add(new Konva.Text({
+                            x: clipW / 2 - rectOffset - 30, y: barY + 9,
+                            text: 'RIFE ' + rifeProgressPercent + '%',
+                            fontSize: 9, fill: '#ccc', fontFamily: 'sans-serif',
+                            listening: false,
                         }));
                     }
 
@@ -2905,6 +3223,12 @@ var VideoEditTab = (function () {
                 }
                 menuItems.push({ separator: true });
                 menuItems.push({ label: 'Delete', action: 'delete' });
+                // RIFE interpolation (video clips only)
+                if (clipInfo && clipInfo.track && clipInfo.track.type === 'video' && clipInfo.clip.source_path) {
+                    menuItems.push({ separator: true });
+                    menuItems.push({ label: 'Interpolate 2\u00D7 (RIFE)', action: 'rife-2x' });
+                    menuItems.push({ label: 'Interpolate 4\u00D7 (RIFE)', action: 'rife-4x' });
+                }
                 menuItems.push({ separator: true });
                 menuItems.push({ label: 'Properties...', action: 'properties' });
 

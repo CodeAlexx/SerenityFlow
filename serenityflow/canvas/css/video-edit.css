@@ -696,3 +696,83 @@
     padding: 4px 8px;
     font-size: 12px;
 }
+
+/* ===== V7: LUT / Color Grading ===== */
+.ve-lut-section {
+    margin-top: 12px;
+    padding-top: 8px;
+    border-top: 1px solid #3a3a5c;
+}
+.ve-lut-select {
+    width: 100%;
+    background: #2a2a40;
+    border: 1px solid #555;
+    border-radius: 4px;
+    color: #e0e0e0;
+    padding: 5px 8px;
+    font-size: 13px;
+    margin-top: 4px;
+}
+.ve-lut-preview-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+}
+.ve-lut-preview-row > div {
+    flex: 1;
+    min-width: 0;
+}
+.ve-lut-preview-row img {
+    width: 100%;
+    height: auto;
+    border-radius: 4px;
+    border: 1px solid #3a3a5c;
+}
+.ve-lut-preview-label {
+    font-size: 10px;
+    color: #888;
+    text-align: center;
+    margin-top: 2px;
+}
+.ve-lut-upload-btn {
+    background: none;
+    border: none;
+    color: #7c6ff0;
+    font-size: 12px;
+    cursor: pointer;
+    padding: 4px 0;
+    margin-top: 4px;
+    display: block;
+}
+.ve-lut-upload-btn:hover { text-decoration: underline; }
+
+/* ===== V7: RIFE Interpolation ===== */
+.ve-rife-overlay {
+    position: absolute;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    border-radius: 3px;
+}
+.ve-rife-bar {
+    width: 80%;
+    height: 6px;
+    background: #333;
+    border-radius: 3px;
+    overflow: hidden;
+}
+.ve-rife-bar-fill {
+    height: 100%;
+    background: #7c6ff0;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+.ve-rife-label {
+    font-size: 10px;
+    color: #ccc;
+    margin-top: 3px;
+    text-align: center;
+}

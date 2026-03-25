@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -23,6 +24,13 @@ log = logging.getLogger(__name__)
 def _projects_dir() -> str:
     from serenityflow.server.app import state
     d = os.path.join(os.path.realpath(state.output_dir), "video_projects")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _luts_dir() -> str:
+    from serenityflow.server.app import state
+    d = os.path.join(os.path.realpath(state.output_dir), "luts")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -689,6 +697,13 @@ def register_video_edit_routes(app: FastAPI):
         range_start = body.get("range_start_frame")
         range_end = body.get("range_end_frame")
         output_filename = body.get("output_filename", f"export_{pid}.mp4")
+        global_lut_path = body.get("lut_path") or None
+        # Validate global LUT path is inside luts_dir
+        if global_lut_path:
+            real_glut = os.path.realpath(global_lut_path)
+            real_ldir = os.path.realpath(_luts_dir())
+            if not real_glut.startswith(real_ldir + os.sep):
+                global_lut_path = None
 
         path = _project_path(pid)
         if not path or not os.path.isfile(path):
@@ -710,13 +725,15 @@ def register_video_edit_routes(app: FastAPI):
         # Run export in background
         loop.run_in_executor(
             None, _run_export, proj, export_id, fmt, width, height, fps,
-            quality, include_audio, range_start, range_end, output_filename, loop
+            quality, include_audio, range_start, range_end, output_filename,
+            loop, global_lut_path
         )
 
         return JSONResponse({"export_id": export_id, "status": "started"})
 
     def _run_export(proj, export_id, fmt, width, height, fps, quality,
-                    include_audio, range_start, range_end, output_filename, loop=None):
+                    include_audio, range_start, range_end, output_filename,
+                    loop=None, global_lut_path=None):
         from serenityflow.server.app import state
 
         tracks = proj.get("tracks", [])
@@ -765,6 +782,7 @@ def register_video_edit_routes(app: FastAPI):
                     "src": src, "source_offset": source_offset,
                     "timeline_offset": timeline_offset, "duration": clip_dur,
                     "effects": clip.get("effects", []),
+                    "lut_path": clip.get("lut_path"),
                 }
                 if ttype == "video":
                     video_inputs.append(entry)
@@ -777,7 +795,8 @@ def register_video_edit_routes(app: FastAPI):
         try:
             cmd = _build_export_cmd(
                 video_inputs, audio_inputs, width, height, fps,
-                duration_sec, fmt, quality, include_audio, output_path
+                duration_sec, fmt, quality, include_audio, output_path,
+                global_lut_path
             )
 
             process = subprocess.Popen(
@@ -872,7 +891,8 @@ def register_video_edit_routes(app: FastAPI):
         return ','.join(parts)
 
     def _build_export_cmd(video_inputs, audio_inputs, width, height, fps,
-                          duration, fmt, quality, include_audio, output_path):
+                          duration, fmt, quality, include_audio, output_path,
+                          global_lut_path=None):
         """Build ffmpeg command with filter_complex for multi-track compositing."""
         cmd = ["ffmpeg", "-y"]
         filter_parts = []
@@ -892,6 +912,12 @@ def register_video_edit_routes(app: FastAPI):
             # Build per-clip effect filter chain
             effect_str = _build_effect_filters(vi.get("effects", []))
             effect_segment = f",{effect_str}" if effect_str else ""
+            # Per-clip LUT (after effects, before final setpts)
+            clip_lut = vi.get("lut_path")
+            if clip_lut and os.path.isfile(clip_lut) and \
+                    os.path.realpath(clip_lut).startswith(os.path.realpath(_luts_dir()) + os.sep):
+                escaped = clip_lut.replace("'", "'\\''")
+                effect_segment += f",lut3d='{escaped}'"
             # Extract speed rate from effects for combined setpts
             speed_rate = 1.0
             for eff in vi.get("effects", []):
@@ -943,13 +969,20 @@ def register_video_edit_routes(app: FastAPI):
         if not v_labels:
             filter_parts.append(f"[base]copy[vout]")
 
+        # Global LUT (project-wide color grade, applied last on composited video)
+        vout_label = "vout"
+        if global_lut_path and os.path.isfile(global_lut_path):
+            escaped = global_lut_path.replace("'", "'\\''")
+            filter_parts.append(f"[vout]lut3d='{escaped}'[vout_graded]")
+            vout_label = "vout_graded"
+
         # Audio mix
         if a_labels and include_audio:
             amix_in = "".join(f"[{al}]" for al in a_labels)
             filter_parts.append(f"{amix_in}amix=inputs={len(a_labels)}:dropout_transition=0[aout]")
-            map_args = ["-map", "[vout]", "-map", "[aout]"]
+            map_args = ["-map", f"[{vout_label}]", "-map", "[aout]"]
         else:
-            map_args = ["-map", "[vout]"]
+            map_args = ["-map", f"[{vout_label}]"]
 
         cmd += ["-filter_complex", ";".join(filter_parts)]
         cmd += map_args
@@ -1436,3 +1469,331 @@ def register_video_edit_routes(app: FastAPI):
                 if ef > max_f:
                     max_f = ef
         return f"{max_f}/{fps}"
+
+    # --- V7: LUT / Color Grading ---
+
+    def _ensure_default_luts():
+        """Create a few basic .cube LUTs if none exist."""
+        d = _luts_dir()
+        if any(f.lower().endswith(".cube") for f in os.listdir(d)):
+            return
+
+        size = 17
+
+        def write_lut(name, transform_fn):
+            path = os.path.join(d, name)
+            if os.path.exists(path):
+                return
+            with open(path, "w") as f:
+                f.write(f"# Generated by SerenityFlow\n")
+                f.write(f"LUT_3D_SIZE {size}\n\n")
+                for bi in range(size):
+                    for gi in range(size):
+                        for ri in range(size):
+                            r, g, b = ri / (size - 1), gi / (size - 1), bi / (size - 1)
+                            ro, go, bo = transform_fn(r, g, b)
+                            f.write(f"{ro:.6f} {go:.6f} {bo:.6f}\n")
+
+        write_lut("Warm Cinematic.cube", lambda r, g, b: (
+            min(1.0, r * 1.08 + 0.02),
+            g * 0.98,
+            max(0.0, b * 0.92 - 0.01),
+        ))
+
+        write_lut("Cool Moonlight.cube", lambda r, g, b: (
+            r * 0.9,
+            g * 0.95,
+            min(1.0, b * 1.1 + 0.03),
+        ))
+
+        def _bw_transform(r, g, b):
+            luma = r * 0.299 + g * 0.587 + b * 0.114
+            v = min(1.0, max(0.0, (luma - 0.5) * 1.4 + 0.5))
+            return (v, v, v)
+
+        write_lut("High Contrast BW.cube", _bw_transform)
+
+    _ensure_default_luts()
+
+    @app.get("/video_edit/luts")
+    async def list_luts():
+        d = _luts_dir()
+        luts = []
+        for fname in sorted(os.listdir(d)):
+            if fname.lower().endswith(".cube"):
+                luts.append({
+                    "name": fname,
+                    "path": os.path.join(d, fname),
+                })
+        return JSONResponse(luts)
+
+    @app.post("/video_edit/luts/upload")
+    async def upload_lut(file: UploadFile = File(...)):
+        name = os.path.basename(file.filename or "untitled.cube")
+        if not name.lower().endswith(".cube"):
+            return JSONResponse({"error": "Only .cube files accepted"}, status_code=400)
+
+        # Sanitize filename
+        safe_name = re.sub(r'[^\w\s.\-]', '_', name)
+        if not safe_name.lower().endswith(".cube"):
+            safe_name += ".cube"
+
+        content = await file.read()
+        if len(content) > 10 * 1024 * 1024:
+            return JSONResponse({"error": "File too large (10MB max)"}, status_code=400)
+
+        # Basic validation: look for LUT_3D_SIZE in first 50 non-comment lines
+        text = content.decode("utf-8", errors="replace")
+        has_size = False
+        for line in text.splitlines()[:50]:
+            stripped = line.strip()
+            if stripped.startswith("#") or not stripped:
+                continue
+            if "LUT_3D_SIZE" in stripped:
+                has_size = True
+                break
+        if not has_size:
+            return JSONResponse({"error": "Invalid .cube file (no LUT_3D_SIZE found)"}, status_code=400)
+
+        d = _luts_dir()
+        dest = os.path.join(d, safe_name)
+        counter = 1
+        base, ext = os.path.splitext(safe_name)
+        while os.path.exists(dest):
+            dest = os.path.join(d, f"{base}_{counter}{ext}")
+            counter += 1
+
+        with open(dest, "wb") as f:
+            f.write(content)
+
+        return JSONResponse({
+            "id": os.path.splitext(os.path.basename(dest))[0],
+            "name": os.path.basename(dest),
+            "path": dest,
+        })
+
+    @app.delete("/video_edit/luts/{name:path}")
+    async def delete_lut(name: str):
+        safe = os.path.basename(name)
+        d = _luts_dir()
+        path = os.path.realpath(os.path.join(d, safe))
+        if not path.startswith(os.path.realpath(d) + os.sep):
+            return JSONResponse({"error": "Invalid path"}, status_code=400)
+        if not os.path.isfile(path):
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        os.remove(path)
+        return JSONResponse({"status": "deleted"})
+
+    @app.post("/video_edit/luts/preview")
+    async def preview_lut(request: Request):
+        body = await request.json()
+        src = body.get("source_path", "")
+        lut = body.get("lut_path", "")
+        seek = float(body.get("seek_sec", 0))
+
+        if not os.path.isfile(src):
+            return JSONResponse({"error": "Source not found"}, status_code=404)
+
+        # Validate source_path is within project media directory
+        real_src = os.path.realpath(src)
+        projects_base = os.path.realpath(_projects_dir())
+        if not real_src.startswith(projects_base + os.sep):
+            return JSONResponse({"error": "Source path not within project directory"}, status_code=400)
+
+        if not os.path.isfile(lut):
+            return JSONResponse({"error": "LUT file not found"}, status_code=404)
+
+        # Verify lut is inside luts_dir
+        real_lut = os.path.realpath(lut)
+        real_dir = os.path.realpath(_luts_dir())
+        if not real_lut.startswith(real_dir + os.sep):
+            return JSONResponse({"error": "Invalid LUT path"}, status_code=400)
+
+        # Escape single quotes in path for ffmpeg filter string
+        escaped_lut = real_lut.replace("'", "'\\''")
+        cmd = [
+            "ffmpeg", "-y", "-ss", str(max(0, seek)),
+            "-i", src,
+            "-vf", f"lut3d='{escaped_lut}'",
+            "-frames:v", "1",
+            "-f", "image2", "-c:v", "mjpeg", "-q:v", "3",
+            "pipe:1",
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0 or not stdout:
+                return JSONResponse({"error": "Preview failed"}, status_code=500)
+            return Response(content=stdout, media_type="image/jpeg")
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    # --- V7: RIFE Frame Interpolation ---
+
+    _rife_active_jobs: dict[str, threading.Event] = {}
+
+    def _rife_model_dir() -> str:
+        from serenityflow.server.app import state
+        d = os.path.join(os.path.realpath(state.output_dir), "models", "rife", "v4.25")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    @app.get("/video_edit/rife/status")
+    async def rife_status():
+        model_dir = _rife_model_dir()
+        weights = os.path.join(model_dir, "flownet.pkl")
+        return JSONResponse({
+            "available": os.path.isfile(weights),
+            "model_path": model_dir,
+            "model_version": "v4.25",
+            "processing": len(_rife_active_jobs) > 0,
+        })
+
+    @app.post("/video_edit/rife/interpolate")
+    async def rife_interpolate(request: Request):
+        body = await request.json()
+        pid = body.get("project_id", "")
+        clip_id = body.get("clip_id", "")
+        multiplier = int(body.get("multiplier", 2))
+        replace_source = body.get("replace_source", True)
+
+        if multiplier not in (2, 4):
+            return JSONResponse({"error": "multiplier must be 2 or 4"}, status_code=400)
+
+        # Check model availability
+        model_dir = _rife_model_dir()
+        weights = os.path.join(model_dir, "flownet.pkl")
+        if not os.path.isfile(weights):
+            return JSONResponse({
+                "error": f"RIFE model not found. Place flownet.pkl in {model_dir}",
+            }, status_code=404)
+
+        # Check not already processing
+        if _rife_active_jobs:
+            return JSONResponse({
+                "error": "RIFE is already processing another clip",
+            }, status_code=409)
+
+        # Load project and find clip
+        path = _project_path(pid)
+        if not path or not os.path.isfile(path):
+            return JSONResponse({"error": "Project not found"}, status_code=404)
+
+        with open(path, "r") as f:
+            proj = json.load(f)
+
+        # Find clip across all tracks
+        clip_data = None
+        for track in proj.get("tracks", []):
+            for clip in track.get("clips", []):
+                if clip.get("id") == clip_id:
+                    clip_data = clip
+                    break
+            if clip_data:
+                break
+
+        if not clip_data:
+            return JSONResponse({"error": "Clip not found"}, status_code=404)
+
+        source_path = clip_data.get("source_path", "")
+        if not source_path or not os.path.isfile(source_path):
+            return JSONResponse({"error": "Clip source file not found"}, status_code=404)
+
+        job_id = str(uuid.uuid4())[:12]
+        cancel_event = threading.Event()
+        _rife_active_jobs[job_id] = cancel_event
+
+        loop = asyncio.get_running_loop()
+
+        def _run_rife():
+            from serenityflow.server.app import state
+            try:
+                from serenityflow.server.rife_interpolator import RIFEInterpolator
+                interp = RIFEInterpolator(model_dir=model_dir, device="cuda", fp16=True)
+
+                # Determine output path
+                stem, ext = os.path.splitext(source_path)
+                output_path = f"{stem}_rife{multiplier}x{ext or '.mp4'}"
+
+                def on_progress(frame, total):
+                    pct = min(100, int(frame / max(1, total) * 100))
+                    _send_rife_event(state, job_id, "rife_progress", {
+                        "frame": frame, "total": total, "percent": pct,
+                        "clip_id": clip_id,
+                    }, loop)
+
+                ok = interp.interpolate_video(
+                    input_path=source_path,
+                    output_path=output_path,
+                    multiplier=multiplier,
+                    progress_callback=on_progress,
+                    cancel_event=cancel_event,
+                )
+
+                if not ok:
+                    if cancel_event.is_set():
+                        _send_rife_event(state, job_id, "rife_error", {
+                            "error": "Cancelled", "clip_id": clip_id,
+                        }, loop)
+                    else:
+                        _send_rife_event(state, job_id, "rife_error", {
+                            "error": "Interpolation failed", "clip_id": clip_id,
+                        }, loop)
+                    return
+
+                # Update project if replace_source — re-read from disk to
+                # avoid overwriting edits the user made during processing
+                if replace_source:
+                    with open(path, "r") as f:
+                        fresh_proj = json.load(f)
+                    for trk in fresh_proj.get("tracks", []):
+                        for clp in trk.get("clips", []):
+                            if clp.get("id") == clip_id:
+                                clp["source_path"] = output_path
+                                clp["rife_multiplier"] = multiplier
+                                break
+                    with open(path, "w") as f:
+                        json.dump(fresh_proj, f, indent=2)
+
+                _send_rife_event(state, job_id, "rife_complete", {
+                    "output_path": output_path,
+                    "clip_id": clip_id,
+                    "multiplier": multiplier,
+                    "replace_source": replace_source,
+                }, loop)
+
+            except Exception as e:
+                log.exception("RIFE error")
+                _send_rife_event(state, job_id, "rife_error", {
+                    "error": str(e), "clip_id": clip_id,
+                }, loop)
+            finally:
+                _rife_active_jobs.pop(job_id, None)
+
+        loop.run_in_executor(None, _run_rife)
+        return JSONResponse({"job_id": job_id, "status": "started"})
+
+    @app.post("/video_edit/rife/cancel/{job_id}")
+    async def rife_cancel(job_id: str):
+        ev = _rife_active_jobs.get(job_id)
+        if ev:
+            ev.set()
+            return JSONResponse({"status": "cancelling"})
+        return JSONResponse({"status": "not_found"}, status_code=404)
+
+    def _send_rife_event(state, job_id, event_type, data, loop=None):
+        data["job_id"] = job_id
+        if loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _async_send_rife(state, event_type, data), loop
+            )
+        except Exception:
+            pass
+
+    async def _async_send_rife(state, event_type, data):
+        from serenityflow.server.websocket import send_event
+        await send_event(state, event_type, data)
