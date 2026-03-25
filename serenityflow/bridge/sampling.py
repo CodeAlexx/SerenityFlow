@@ -300,7 +300,13 @@ def _run_sampling(
 
     is_qwen = _is_qwen_transformer(model)
     is_zimage = _is_zimage_transformer(model)
-    is_flux = not is_qwen and not is_zimage and hasattr(model, "config") and hasattr(model.config, "joint_attention_dim")
+    # SD3 uses SD3Transformer2DModel; Flux uses FluxTransformer2DModel — both have joint_attention_dim
+    is_sd3 = (not is_qwen and not is_zimage and
+              model.__class__.__name__ in ("SD3Transformer2DModel",) or
+              prediction_type == "flow" and hasattr(model, "config") and
+              hasattr(model.config, "sample_size") and not hasattr(model.config, "in_channels_condition"))
+    is_flux = (not is_qwen and not is_zimage and not is_sd3 and
+               hasattr(model, "config") and hasattr(model.config, "joint_attention_dim"))
     is_flux2 = bool(getattr(model, "_serenity_flux2", False))
     is_flux1 = is_flux and not is_flux2
 
@@ -367,7 +373,7 @@ def _run_sampling(
         model_dtype = torch.float32
 
     log_sigmas = None
-    if not is_flux and not is_qwen and not is_zimage:
+    if not is_flux and not is_qwen and not is_zimage and not is_sd3:
         betas = torch.linspace(0.00085 ** 0.5, 0.012 ** 0.5, 1000) ** 2
         alphas = 1.0 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
@@ -528,6 +534,12 @@ def _run_sampling(
                     device=device,
                     dtype=torch.float32,
                 )
+        elif is_sd3:
+            # SD3 uses pooled_projections directly (not added_cond_kwargs)
+            if pooled is not None:
+                kwargs["pooled_projections"] = pooled.to(dtype=model_dtype, device=device)
+            else:
+                kwargs["pooled_projections"] = torch.zeros(1, 2048, device=device, dtype=model_dtype)
         elif pooled is not None:
             pooled_t = pooled.to(dtype=model_dtype, device=device)
             kwargs["added_cond_kwargs"] = {
@@ -561,6 +573,10 @@ def _run_sampling(
 
     def call_model(inp, timestep, **kwargs):
         """Call the underlying model with family-specific timestep handling."""
+        if is_sd3:
+            # SD3 uses continuous timestep (sigma * 1000)
+            sd3_t = (timestep * 1000.0).to(device=device, dtype=model_dtype)
+            return _invoke_with_retry(model, inp, timestep=sd3_t, **kwargs)
         if is_flux:
             return _invoke_with_retry(model, inp, timestep=timestep, **kwargs)
         if is_qwen:
@@ -592,6 +608,8 @@ def _run_sampling(
         return out[:, :channels, ...]
 
     use_cfg = (not is_flux1) and uncond_tensor is not None and cfg > 1.0
+    logger.info("CFG decision: use_cfg=%s, is_flux1=%s, uncond_tensor=%s, cfg=%.1f, is_sd3=%s",
+                use_cfg, is_flux1, uncond_tensor is not None, cfg, is_sd3)
 
     def denoise_fn(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         model_input = prediction.calculate_input(sigma, x)
