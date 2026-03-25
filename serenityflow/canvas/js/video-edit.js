@@ -21,6 +21,40 @@ var VideoEditTab = (function () {
     var MAX_UNDO = 50;
     var AUTOSAVE_DELAY = 2000;    // ms
 
+    // --- V6: Effect Registry ---
+    var EFFECT_REGISTRY = {
+        brightness: { name: 'Brightness', category: 'color', defaults: { value: 0 }, range: { value: [-1, 1, 0.05] } },
+        contrast:   { name: 'Contrast',   category: 'color', defaults: { value: 1 }, range: { value: [0.2, 3, 0.05] } },
+        saturation: { name: 'Saturation', category: 'color', defaults: { value: 1 }, range: { value: [0, 3, 0.05] } },
+        hue:        { name: 'Hue Shift',  category: 'color', defaults: { degrees: 0 }, range: { degrees: [-180, 180, 1] } },
+        gamma:      { name: 'Gamma',      category: 'color', defaults: { value: 1 }, range: { value: [0.1, 4, 0.05] } },
+        blur:       { name: 'Blur',       category: 'stylize', defaults: { radius: 5 }, range: { radius: [0, 30, 1] } },
+        sharpen:    { name: 'Sharpen',    category: 'stylize', defaults: { amount: 1 }, range: { amount: [0, 5, 0.1] } },
+        denoise:    { name: 'Denoise',    category: 'stylize', defaults: { strength: 4 }, range: { strength: [1, 15, 1] } },
+        glow:       { name: 'Glow',       category: 'stylize', defaults: { radius: 10 }, range: { radius: [1, 40, 1] } },
+        vignette:   { name: 'Vignette',   category: 'stylize', defaults: { angle: 0.4 }, range: { angle: [0, 1, 0.05] } },
+        speed:      { name: 'Speed',      category: 'utility', defaults: { rate: 1 }, range: { rate: [0.25, 4, 0.25] } },
+        opacity:    { name: 'Opacity',    category: 'utility', defaults: { value: 1 }, range: { value: [0, 1, 0.05] } },
+        flip_h:     { name: 'Flip H',     category: 'utility', defaults: {}, range: {} },
+        flip_v:     { name: 'Flip V',     category: 'utility', defaults: {}, range: {} },
+    };
+
+    var TRANSITION_TYPES = [
+        { type: 'none', name: 'None' },
+        { type: 'fade', name: 'Fade' },
+        { type: 'dissolve', name: 'Dissolve' },
+        { type: 'wipeleft', name: 'Wipe Left' },
+        { type: 'wiperight', name: 'Wipe Right' },
+        { type: 'wipeup', name: 'Wipe Up' },
+        { type: 'wipedown', name: 'Wipe Down' },
+        { type: 'slideleft', name: 'Slide Left' },
+        { type: 'slideright', name: 'Slide Right' },
+        { type: 'circleopen', name: 'Circle Open' },
+        { type: 'circleclose', name: 'Circle Close' },
+        { type: 'fadeblack', name: 'Fade Black' },
+        { type: 'fadewhite', name: 'Fade White' },
+    ];
+
     // --- State ---
     var stage = null;
     var rulerLayer = null;
@@ -114,6 +148,11 @@ var VideoEditTab = (function () {
     // Hidden file inputs for SRT/XML import
     var srtFileInput = null;
     var xmlFileInput = null;
+
+    // --- V6 State: Effects & Properties Panel ---
+    var propsPanelEl = null;
+    var propsPanelClipId = null;
+    var addEffectDropdownEl = null;
 
     // --- Default project data ---
     var project = {
@@ -224,6 +263,7 @@ var VideoEditTab = (function () {
         selectedClipIds.clear();
         recalcTotalFrames();
         renderTimeline();
+        refreshPropertiesPanel();
         scheduleAutosave();
     }
 
@@ -234,6 +274,7 @@ var VideoEditTab = (function () {
         selectedClipIds.clear();
         recalcTotalFrames();
         renderTimeline();
+        refreshPropertiesPanel();
         scheduleAutosave();
     }
 
@@ -477,8 +518,7 @@ var VideoEditTab = (function () {
         } else if (action === 'duplicate') {
             duplicateClip(contextTargetClipId, contextTargetTrackId);
         } else if (action === 'properties') {
-            var info = findClipById(contextTargetClipId);
-            if (info) console.log('Clip properties:', info.clip);
+            openPropertiesPanel(contextTargetClipId);
         } else if (action === 'add-track') {
             addTrack();
         } else if (action === 'add-clip') {
@@ -496,6 +536,10 @@ var VideoEditTab = (function () {
 
     function deleteSelectedClips() {
         if (selectedClipIds.size === 0) return;
+        // Close properties panel if its clip is being deleted
+        if (propsPanelClipId && selectedClipIds.has(propsPanelClipId)) {
+            closePropertiesPanel();
+        }
         pushUndo();
         project.tracks.forEach(function (track) {
             track.clips = track.clips.filter(function (clip) {
@@ -521,7 +565,9 @@ var VideoEditTab = (function () {
             startFrame: currentFrame,
             endFrame: clip.endFrame,
             label: clip.label + ' (R)',
-            color: clip.color
+            color: clip.color,
+            effects: clip.effects ? JSON.parse(JSON.stringify(clip.effects)) : [],
+            transition_in: null,
         };
         clip.endFrame = currentFrame;
         clip.label = clip.label.replace(/ \([LR]\)$/, '') + ' (L)';
@@ -541,7 +587,9 @@ var VideoEditTab = (function () {
             startFrame: clip.endFrame,
             endFrame: clip.endFrame + duration,
             label: clip.label + ' copy',
-            color: clip.color
+            color: clip.color,
+            effects: clip.effects ? JSON.parse(JSON.stringify(clip.effects)) : [],
+            transition_in: clip.transition_in ? JSON.parse(JSON.stringify(clip.transition_in)) : null,
         };
         info.track.clips.push(newClip);
         recalcTotalFrames();
@@ -576,7 +624,9 @@ var VideoEditTab = (function () {
             startFrame: Math.max(0, frame),
             endFrame: Math.max(0, frame) + duration,
             label: 'New Clip',
-            color: track.type === 'audio' ? '#2a9d5c' : track.type === 'text' ? '#d4a72c' : '#4a7dff'
+            color: track.type === 'audio' ? '#2a9d5c' : track.type === 'text' ? '#d4a72c' : '#4a7dff',
+            effects: [],
+            transition_in: null,
         });
         recalcTotalFrames();
         renderTimeline();
@@ -1884,6 +1934,331 @@ var VideoEditTab = (function () {
         rulerLayer.batchDraw();
     }
 
+    // ===== V6: Effects & Properties Panel =====
+
+    function openPropertiesPanel(clipId) {
+        var info = findClipById(clipId);
+        if (!info) return;
+
+        // Don't open for text/subtitle or audio-only clips
+        if (info.track.type === 'text' || info.track.type === 'audio') return;
+
+        propsPanelClipId = clipId;
+        var clip = info.clip;
+
+        // Initialize effects array if missing
+        if (!clip.effects) clip.effects = [];
+        if (!clip.transition_in) clip.transition_in = null;
+
+        // Remove existing panel
+        closePropertiesPanel();
+
+        var panel = document.createElement('div');
+        panel.className = 've-props-panel';
+        propsPanelEl = panel;
+
+        renderPropertiesPanelContent(panel, clip);
+
+        var container = document.getElementById('panel-video-edit');
+        container.appendChild(panel);
+    }
+
+    function refreshPropertiesPanel() {
+        if (!propsPanelEl || !propsPanelClipId) return;
+        var info = findClipById(propsPanelClipId);
+        if (!info) {
+            // Clip was removed by undo
+            closePropertiesPanel();
+            return;
+        }
+        renderPropertiesPanelContent(propsPanelEl, info.clip);
+    }
+
+    function closePropertiesPanel() {
+        if (propsPanelEl && propsPanelEl.parentNode) {
+            propsPanelEl.parentNode.removeChild(propsPanelEl);
+        }
+        propsPanelEl = null;
+        propsPanelClipId = null;
+        if (addEffectDropdownEl && addEffectDropdownEl.parentNode) {
+            addEffectDropdownEl.parentNode.removeChild(addEffectDropdownEl);
+        }
+        addEffectDropdownEl = null;
+    }
+
+    function renderPropertiesPanelContent(panel, clip) {
+        panel.innerHTML = '';
+
+        // Header
+        var header = document.createElement('h3');
+        header.textContent = 'Clip Properties';
+        panel.appendChild(header);
+
+        var closeBtn = document.createElement('span');
+        closeBtn.className = 've-props-close';
+        closeBtn.textContent = '\u00D7';
+        closeBtn.onclick = function () { closePropertiesPanel(); };
+        panel.appendChild(closeBtn);
+
+        // Label input
+        var labelRow = document.createElement('div');
+        labelRow.className = 've-props-row';
+        var labelLbl = document.createElement('label');
+        labelLbl.textContent = 'Label';
+        var labelInput = document.createElement('input');
+        labelInput.type = 'text';
+        labelInput.value = clip.label || '';
+        labelInput.onchange = function () {
+            pushUndo();
+            clip.label = labelInput.value;
+            renderTimeline();
+            scheduleAutosave();
+        };
+        labelRow.appendChild(labelLbl);
+        labelRow.appendChild(labelInput);
+        panel.appendChild(labelRow);
+
+        // Effects section
+        var effectsLabel = document.createElement('div');
+        effectsLabel.className = 've-section-label';
+        effectsLabel.textContent = 'Effects';
+        panel.appendChild(effectsLabel);
+
+        // Effect cards
+        (clip.effects || []).forEach(function (eff, idx) {
+            var reg = EFFECT_REGISTRY[eff.type];
+            if (!reg) return;
+
+            var card = document.createElement('div');
+            card.className = 've-effect-card';
+
+            var cardHeader = document.createElement('div');
+            cardHeader.className = 've-effect-card-header';
+
+            var lbl = document.createElement('label');
+            var cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = eff.enabled !== false;
+            cb.onchange = function () {
+                pushUndo();
+                eff.enabled = cb.checked;
+                scheduleAutosave();
+            };
+            lbl.appendChild(cb);
+            lbl.appendChild(document.createTextNode(' ' + reg.name));
+
+            var delBtn = document.createElement('span');
+            delBtn.className = 've-effect-delete';
+            delBtn.textContent = '\u2715';
+            delBtn.onclick = function () {
+                pushUndo();
+                clip.effects.splice(idx, 1);
+                renderPropertiesPanelContent(panel, clip);
+                renderTimeline();
+                scheduleAutosave();
+            };
+
+            cardHeader.appendChild(lbl);
+            cardHeader.appendChild(delBtn);
+            card.appendChild(cardHeader);
+
+            // Param sliders
+            var paramKeys = Object.keys(reg.range || {});
+            paramKeys.forEach(function (key) {
+                var range = reg.range[key]; // [min, max, step]
+                var row = document.createElement('div');
+                row.className = 've-effect-slider-row';
+
+                var paramLabel = document.createElement('span');
+                paramLabel.className = 've-param-label';
+                paramLabel.textContent = key;
+
+                var slider = document.createElement('input');
+                slider.type = 'range';
+                slider.min = range[0];
+                slider.max = range[1];
+                slider.step = range[2];
+                slider.value = eff.params[key] !== undefined ? eff.params[key] : reg.defaults[key];
+
+                var valDisplay = document.createElement('span');
+                valDisplay.className = 've-val';
+                valDisplay.textContent = parseFloat(slider.value).toFixed(range[2] < 1 ? 2 : 0);
+
+                slider.oninput = function () {
+                    var v = parseFloat(slider.value);
+                    eff.params[key] = v;
+                    valDisplay.textContent = v.toFixed(range[2] < 1 ? 2 : 0);
+                };
+                slider.onchange = function () {
+                    pushUndo();
+                    scheduleAutosave();
+                };
+
+                row.appendChild(paramLabel);
+                row.appendChild(slider);
+                row.appendChild(valDisplay);
+                card.appendChild(row);
+            });
+
+            panel.appendChild(card);
+        });
+
+        // Add Effect button
+        var addBtn = document.createElement('div');
+        addBtn.className = 've-add-effect-btn';
+        addBtn.textContent = '+ Add Effect';
+        addBtn.onclick = function (e) {
+            e.stopPropagation();
+            showAddEffectDropdown(panel, clip, addBtn);
+        };
+        panel.appendChild(addBtn);
+
+        // Transition section
+        var transLabel = document.createElement('div');
+        transLabel.className = 've-section-label';
+        transLabel.textContent = 'Transition In';
+        panel.appendChild(transLabel);
+
+        var transRow = document.createElement('div');
+        transRow.className = 've-props-row';
+        var transLbl = document.createElement('label');
+        transLbl.textContent = 'Type';
+        var transSelect = document.createElement('select');
+        var currentTrans = (clip.transition_in && clip.transition_in.type) || 'none';
+        TRANSITION_TYPES.forEach(function (tt) {
+            var opt = document.createElement('option');
+            opt.value = tt.type;
+            opt.textContent = tt.name;
+            if (tt.type === currentTrans) opt.selected = true;
+            transSelect.appendChild(opt);
+        });
+        transSelect.onchange = function () {
+            pushUndo();
+            if (transSelect.value === 'none') {
+                clip.transition_in = null;
+            } else {
+                clip.transition_in = {
+                    type: transSelect.value,
+                    duration: (clip.transition_in && clip.transition_in.duration) || 15,
+                };
+            }
+            renderPropertiesPanelContent(panel, clip);
+            renderTimeline();
+            scheduleAutosave();
+        };
+        transRow.appendChild(transLbl);
+        transRow.appendChild(transSelect);
+        panel.appendChild(transRow);
+
+        // Transition duration slider (only if transition active)
+        if (clip.transition_in && clip.transition_in.type !== 'none') {
+            var durRow = document.createElement('div');
+            durRow.className = 've-effect-slider-row';
+            var durLabel = document.createElement('span');
+            durLabel.className = 've-param-label';
+            durLabel.textContent = 'Duration';
+            var durSlider = document.createElement('input');
+            durSlider.type = 'range';
+            durSlider.min = 5;
+            durSlider.max = 60;
+            durSlider.step = 1;
+            durSlider.value = clip.transition_in.duration || 15;
+            var durVal = document.createElement('span');
+            durVal.className = 've-val';
+            durVal.textContent = durSlider.value + 'f';
+            durSlider.oninput = function () {
+                clip.transition_in.duration = parseInt(durSlider.value);
+                durVal.textContent = durSlider.value + 'f';
+            };
+            durSlider.onchange = function () {
+                pushUndo();
+                scheduleAutosave();
+            };
+            durRow.appendChild(durLabel);
+            durRow.appendChild(durSlider);
+            durRow.appendChild(durVal);
+            panel.appendChild(durRow);
+
+            var transNote = document.createElement('div');
+            transNote.style.cssText = 'font-size:10px;color:#666;margin-top:4px;';
+            transNote.textContent = 'Transitions applied on export (V2)';
+            panel.appendChild(transNote);
+        }
+    }
+
+    function showAddEffectDropdown(panel, clip, anchorEl) {
+        // Remove existing dropdown
+        if (addEffectDropdownEl && addEffectDropdownEl.parentNode) {
+            addEffectDropdownEl.parentNode.removeChild(addEffectDropdownEl);
+            addEffectDropdownEl = null;
+            return; // toggle off
+        }
+
+        var dropdown = document.createElement('div');
+        dropdown.className = 've-add-effect-dropdown';
+        addEffectDropdownEl = dropdown;
+
+        var categories = {};
+        var keys = Object.keys(EFFECT_REGISTRY);
+        keys.forEach(function (key) {
+            var reg = EFFECT_REGISTRY[key];
+            if (!categories[reg.category]) categories[reg.category] = [];
+            categories[reg.category].push({ key: key, reg: reg });
+        });
+
+        Object.keys(categories).forEach(function (cat) {
+            var catLabel = document.createElement('div');
+            catLabel.className = 've-add-effect-category';
+            catLabel.textContent = cat;
+            dropdown.appendChild(catLabel);
+
+            categories[cat].forEach(function (item) {
+                var itemEl = document.createElement('div');
+                itemEl.className = 've-add-effect-item';
+                itemEl.textContent = item.reg.name;
+                itemEl.onclick = function (e) {
+                    e.stopPropagation();
+                    pushUndo();
+                    var newEff = {
+                        id: 'eff_' + Math.random().toString(16).substr(2, 8),
+                        type: item.key,
+                        enabled: true,
+                        params: JSON.parse(JSON.stringify(item.reg.defaults)),
+                    };
+                    clip.effects.push(newEff);
+                    // Remove dropdown
+                    if (addEffectDropdownEl && addEffectDropdownEl.parentNode) {
+                        addEffectDropdownEl.parentNode.removeChild(addEffectDropdownEl);
+                    }
+                    addEffectDropdownEl = null;
+                    renderPropertiesPanelContent(panel, clip);
+                    renderTimeline();
+                    scheduleAutosave();
+                };
+                dropdown.appendChild(itemEl);
+            });
+        });
+
+        // Position below the add button
+        var rect = anchorEl.getBoundingClientRect();
+        var panelRect = panel.getBoundingClientRect();
+        dropdown.style.left = (rect.left - panelRect.left) + 'px';
+        dropdown.style.top = (rect.bottom - panelRect.top + 2) + 'px';
+        panel.appendChild(dropdown);
+
+        // Close on outside click
+        var closeHandler = function (e) {
+            if (!dropdown.contains(e.target) && e.target !== anchorEl) {
+                if (dropdown.parentNode) dropdown.parentNode.removeChild(dropdown);
+                addEffectDropdownEl = null;
+                document.removeEventListener('mousedown', closeHandler);
+            }
+        };
+        setTimeout(function () {
+            document.addEventListener('mousedown', closeHandler);
+        }, 0);
+    }
+
     function renderTracks() {
         timelineLayer.destroyChildren();
 
@@ -2071,6 +2446,33 @@ var VideoEditTab = (function () {
                             x: clipW / 2 - rectOffset - 30, y: clipH / 2 - 5,
                             text: 'Generating...',
                             fontSize: 10, fill: '#ff8c42', fontFamily: 'sans-serif',
+                            listening: false,
+                        }));
+                    }
+
+                    // V6: Effects badge
+                    if (clip.effects && clip.effects.length > 0) {
+                        var fxBadgeW = 22;
+                        group.add(new Konva.Rect({
+                            x: 4 - rectOffset, y: clipH - 14,
+                            width: fxBadgeW, height: 12,
+                            fill: 'rgba(0,0,0,0.55)', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        group.add(new Konva.Text({
+                            x: 6 - rectOffset, y: clipH - 13,
+                            text: 'FX',
+                            fontSize: 9, fill: '#7c6ff0', fontFamily: 'sans-serif',
+                            fontStyle: 'bold', listening: false,
+                        }));
+                    }
+
+                    // V6: Transition-in indicator
+                    if (clip.transition_in && clip.transition_in.type !== 'none') {
+                        group.add(new Konva.Text({
+                            x: -rectOffset + 2, y: 1,
+                            text: '\u25B6',
+                            fontSize: 8, fill: 'rgba(124,111,240,0.7)',
                             listening: false,
                         }));
                     }
@@ -2834,6 +3236,7 @@ var VideoEditTab = (function () {
         // Escape — deselect / close context menu
         if (e.key === 'Escape') {
             hideContextMenu();
+            if (propsPanelEl) { closePropertiesPanel(); return; }
             if (retakeMode) exitRetakeMode();
             if (bridgePanelEl) bridgePanelEl.style.display = 'none';
             if (takeDropdownEl) takeDropdownEl.style.display = 'none';

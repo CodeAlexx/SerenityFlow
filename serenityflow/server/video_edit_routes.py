@@ -764,6 +764,7 @@ def register_video_edit_routes(app: FastAPI):
                 entry = {
                     "src": src, "source_offset": source_offset,
                     "timeline_offset": timeline_offset, "duration": clip_dur,
+                    "effects": clip.get("effects", []),
                 }
                 if ttype == "video":
                     video_inputs.append(entry)
@@ -817,6 +818,59 @@ def register_video_edit_routes(app: FastAPI):
             _active_exports.pop(export_id, None)
             _send_export_event(state, export_id, "export_error", {"error": str(e)}, loop)
 
+    def _build_effect_filters(effects: list) -> str:
+        """Convert clip effects array to ffmpeg filter chain segment."""
+        parts = []
+        for eff in effects:
+            if not eff.get('enabled', True):
+                continue
+            t = eff.get('type', '')
+            p = eff.get('params', {})
+
+            if t == 'brightness':
+                v = float(p.get('value', 0))
+                parts.append(f"eq=brightness={v:.3f}")
+            elif t == 'contrast':
+                v = float(p.get('value', 1))
+                parts.append(f"eq=contrast={v:.3f}")
+            elif t == 'saturation':
+                v = float(p.get('value', 1))
+                parts.append(f"eq=saturation={v:.3f}")
+            elif t == 'hue':
+                v = float(p.get('degrees', 0))
+                parts.append(f"hue=h={v:.1f}")
+            elif t == 'gamma':
+                v = float(p.get('value', 1))
+                parts.append(f"eq=gamma={v:.3f}")
+            elif t == 'blur':
+                r = max(1, int(p.get('radius', 5)))
+                parts.append(f"boxblur={r}:{r}")
+            elif t == 'sharpen':
+                amt = float(p.get('amount', 1))
+                parts.append(f"unsharp=5:5:{amt:.2f}:5:5:{amt:.2f}")
+            elif t == 'denoise':
+                s = max(1, int(p.get('strength', 4)))
+                parts.append(f"hqdn3d={s}")
+            elif t == 'glow':
+                r = max(1, int(p.get('radius', 10)))
+                parts.append(f"gblur=sigma={r},eq=brightness=0.12:gamma=0.85")
+            elif t == 'vignette':
+                v = float(p.get('angle', 0.4))
+                parts.append(f"vignette=a={v:.3f}")
+            elif t == 'speed':
+                # Speed is handled specially in _build_export_cmd via setpts
+                # Store as marker; actual PTS scaling applied in the final setpts
+                pass
+            elif t == 'opacity':
+                v = float(p.get('value', 1))
+                parts.append(f"colorchannelmixer=aa={v:.3f}")
+            elif t == 'flip_h':
+                parts.append("hflip")
+            elif t == 'flip_v':
+                parts.append("vflip")
+
+        return ','.join(parts)
+
     def _build_export_cmd(video_inputs, audio_inputs, width, height, fps,
                           duration, fmt, quality, include_audio, output_path):
         """Build ffmpeg command with filter_complex for multi-track compositing."""
@@ -835,13 +889,25 @@ def register_video_edit_routes(app: FastAPI):
         for vi in video_inputs:
             cmd += ["-i", vi["src"]]
             label = f"v{input_idx}"
+            # Build per-clip effect filter chain
+            effect_str = _build_effect_filters(vi.get("effects", []))
+            effect_segment = f",{effect_str}" if effect_str else ""
+            # Extract speed rate from effects for combined setpts
+            speed_rate = 1.0
+            for eff in vi.get("effects", []):
+                if eff.get("type") == "speed" and eff.get("enabled", True):
+                    r = float(eff.get("params", {}).get("rate", 1))
+                    if r > 0:
+                        speed_rate = r
+            speed_expr = f"{1/speed_rate:.4f}*" if speed_rate != 1.0 else ""
             filter_parts.append(
                 f"[{input_idx}:v]"
                 f"trim=start={vi['source_offset']:.4f}:duration={vi['duration']:.4f},"
                 f"setpts=PTS-STARTPTS,"
                 f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
-                f"setpts=PTS+{vi['timeline_offset']:.4f}/TB"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+                f"{effect_segment},"
+                f"setpts={speed_expr}PTS+{vi['timeline_offset']:.4f}/TB"
                 f"[{label}]"
             )
             v_labels.append((label, vi["timeline_offset"]))
@@ -915,6 +981,47 @@ def register_video_edit_routes(app: FastAPI):
             proc.kill()
             return JSONResponse({"status": "cancelled"})
         return JSONResponse({"status": "not_found"}, status_code=404)
+
+    @app.post("/video_edit/preview_effect")
+    async def preview_effect(request: Request):
+        """Render a single frame with effects applied, return JPEG."""
+        body = await request.json()
+        source_path = body.get("source_path", "")
+        effects = body.get("effects", [])
+        seek_sec = float(body.get("seek_sec", 0))
+
+        if not source_path or not os.path.isfile(source_path):
+            return JSONResponse({"error": "Source not found"}, status_code=404)
+
+        # Validate source_path is within project media directory
+        real_path = os.path.realpath(source_path)
+        projects_base = os.path.realpath(_projects_dir())
+        if not real_path.startswith(projects_base + os.sep):
+            return JSONResponse({"error": "Source path not within project directory"}, status_code=400)
+
+        filter_str = _build_effect_filters(effects)
+        vf_args = ["-vf", filter_str] if filter_str else []
+
+        try:
+            cmd = [
+                "ffmpeg", "-ss", f"{seek_sec:.3f}",
+                "-i", source_path,
+            ] + vf_args + [
+                "-frames:v", "1",
+                "-f", "image2",
+                "-c:v", "mjpeg",
+                "-q:v", "3",
+                "pipe:1",
+            ]
+            result = subprocess.run(cmd, capture_output=True, timeout=15)
+            if result.returncode != 0:
+                err = result.stderr.decode("utf-8", errors="replace")[-300:]
+                return JSONResponse({"error": f"ffmpeg error: {err}"}, status_code=500)
+            return Response(content=result.stdout, media_type="image/jpeg")
+        except subprocess.TimeoutExpired:
+            return JSONResponse({"error": "Timeout rendering preview"}, status_code=504)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     # --- V5: SRT Import/Export ---
 
