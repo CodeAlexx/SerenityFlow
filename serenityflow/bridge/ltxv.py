@@ -1812,7 +1812,7 @@ def load_ltxv_model(
 
 def _stagehand_config_te(gemma_root: str = ""):
     """Stagehand config for Gemma 3 12B text encoder."""
-    from stagehand import StagehandConfig
+    from serenityflow.memory.stagehand import StagehandConfig
     is_fp4 = "fp4" in gemma_root.lower()
     return StagehandConfig(
         pinned_pool_mb=3072 if is_fp4 else 4096,
@@ -1828,7 +1828,7 @@ def _stagehand_config_te(gemma_root: str = ""):
 
 def _stagehand_config_xfm():
     """Stagehand config for 22B transformer (48 blocks, ~800MB each in bf16)."""
-    from stagehand import StagehandConfig
+    from serenityflow.memory.stagehand import StagehandConfig
     return StagehandConfig(
         pinned_pool_mb=6400,  # 8 slabs × 800MB (fits both FP8 ~400MB and bf16 ~800MB blocks)
         pinned_slab_mb=800,
@@ -2101,7 +2101,7 @@ def _encode_ltx_prompts_with_stagehand(
 ):
     """Run Gemma LM prompt encoding on GPU via Stagehand while keeping weights resident on CPU."""
     from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaEncoderOutput
-    from stagehand import StagehandRuntime
+    from serenityflow.memory.stagehand import StagehandRuntime
 
     block_container = _get_gemma_block_module(text_encoder)
     _move_gemma_text_encoder_non_blocks_to_device(text_encoder, block_container, device)
@@ -2249,7 +2249,7 @@ def sample_ltxv(
     Returns {"video": [B,C,T,H,W] tensor, "audio": tensor or None}.
     """
     import gc
-    from stagehand import StagehandRuntime
+    from serenityflow.memory.stagehand import StagehandRuntime
     from ltx_core.components.diffusion_steps import EulerDiffusionStep
     from ltx_core.components.noisers import GaussianNoiser
     from ltx_core.model.audio_vae import decode_audio as vae_decode_audio, encode_audio as vae_encode_audio

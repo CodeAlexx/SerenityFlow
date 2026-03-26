@@ -63,7 +63,7 @@ def _canny(image: np.ndarray, low: int = 100, high: int = 200) -> np.ndarray:
 def _depth(image: np.ndarray) -> np.ndarray:
     """Depth estimation via DepthAnything v2 or Stagehand."""
     try:
-        from stagehand import Stagehand
+        from serenityflow.memory.stagehand import Stagehand
         sh = Stagehand.get_instance()
         model = sh.load_model("depth_anything_v2", category="preprocessor")
         result = model(image)
@@ -95,7 +95,7 @@ def _lineart(image: np.ndarray) -> np.ndarray:
 def _pose(image: np.ndarray) -> np.ndarray:
     """OpenPose estimation."""
     try:
-        from stagehand import Stagehand
+        from serenityflow.memory.stagehand import Stagehand
         sh = Stagehand.get_instance()
         model = sh.load_model("openpose", category="preprocessor")
         return model(image)
@@ -136,7 +136,7 @@ def _tile(image: np.ndarray, blur_radius: int = 64) -> np.ndarray:
 def _normal(image: np.ndarray) -> np.ndarray:
     """Surface normal estimation."""
     try:
-        from stagehand import Stagehand
+        from serenityflow.memory.stagehand import Stagehand
         sh = Stagehand.get_instance()
         model = sh.load_model("normal_bae", category="preprocessor")
         return model(image)

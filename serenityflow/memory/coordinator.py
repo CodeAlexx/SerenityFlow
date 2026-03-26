@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Generator, Optional
 import torch
 
 try:
-    from stagehand import BlockState, PinnedPool, StagehandConfig, StagehandRuntime
+    from serenityflow.memory.stagehand import BlockState, PinnedPool, StagehandConfig, StagehandRuntime
 except ImportError:
     BlockState = None
     PinnedPool = None

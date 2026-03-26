@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 try:
-    from stagehand.model_resolver import get_resolver as _get_unified_resolver
+    from serenityflow.memory.stagehand.model_resolver import get_resolver as _get_unified_resolver
     _HAS_UNIFIED = True
 except ImportError:
     _HAS_UNIFIED = False

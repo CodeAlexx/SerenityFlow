@@ -38,7 +38,7 @@ def _load_sam(model_name: str = "sam3") -> Any:
 
     # 1. Try Stagehand
     try:
-        from stagehand import Stagehand
+        from serenityflow.memory.stagehand import Stagehand
         sh = Stagehand.get_instance()
         _sam_predictor = sh.load_model(model_name, category="segmentation")
         _sam_model_name = model_name
