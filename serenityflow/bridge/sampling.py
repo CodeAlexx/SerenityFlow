@@ -639,6 +639,23 @@ def _run_sampling(
         uncond_denoised = prediction.calculate_denoised(sigma, uncond_out, x)
         return s["apply_cfg"](cond_denoised, uncond_denoised, cfg)
 
+    # Wrap denoise_fn with Stagehand managed_forward() if the model has a runtime.
+    # This gives async prefetch with pinned pool instead of synchronous per-block hooks.
+    _stagehand_rt = getattr(model, '_stagehand_runtime', None)
+    if _stagehand_rt is not None:
+        _base_denoise_fn = denoise_fn
+        _step_counter = [0]
+
+        def denoise_fn(x, sigma):
+            _stagehand_rt.begin_step(_step_counter[0])
+            with _stagehand_rt.managed_forward():
+                result = _base_denoise_fn(x, sigma)
+            _stagehand_rt.end_step()
+            _step_counter[0] += 1
+            return result
+
+        logger.info("Sampling with Stagehand managed_forward (async prefetch)")
+
     step_callback = _make_step_callback(preview_interval=3)
 
     # Wrap with pipeline counters if available.
@@ -664,6 +681,26 @@ def _run_sampling(
     if _sampling_counters is not None:
         _sampling_counters.finalize()
         logger.info("Sampling perf:\n%s", _sampling_counters.report())
+
+    # After sampling, evict all Stagehand-managed blocks from GPU so VAE decode
+    # has VRAM headroom.
+    if _stagehand_rt is not None:
+        try:
+            from serenityflow.memory.coordinator import get_coordinator
+            coord = get_coordinator()
+            if coord is not None:
+                coord.release_model(id(model))
+            model._stagehand_runtime = None
+            # Move entire model to CPU and free GPU memory
+            for p in model.parameters():
+                if p.data.device.type == "cuda":
+                    p.data = torch.empty(0, device="cpu")
+            torch.cuda.empty_cache()
+            free_after = torch.cuda.mem_get_info()[0]
+            logger.info("Stagehand: evicted transformer, VRAM free: %.1f GB",
+                        free_after / (1024**3))
+        except Exception:
+            logger.debug("Stagehand cleanup failed", exc_info=True)
 
     if is_flux and result.ndim == 3 and flux_h is not None and flux_w is not None:
         if is_flux2 and flux_patch_h is not None and flux_patch_w is not None:

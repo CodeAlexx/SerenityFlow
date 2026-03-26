@@ -254,18 +254,54 @@ def load_diffusion_model(path: str, dtype: str = "default") -> nn.Module:
             model_size / (1024**3), free_vram / (1024**3),
             gpu_budget / (1024**3), headroom / (1024**3),
         )
-        _enable_layer_offloading(model)
-        # Move as much as fits within budget
-        from serenity.inference.memory.manager import ModelManager
-        manager = _get_model_manager()
-        lm = manager.load(model, budget=gpu_budget)
-        if lm.offloaded_size > 0:
-            logger.info(
-                "Loaded %.1f GB to GPU, %.1f GB offloaded to CPU (per-layer streaming)",
-                lm.loaded_size / (1024**3), lm.offloaded_size / (1024**3),
-            )
+
+        # Try Stagehand coordinator first (async prefetch with pinned pool).
+        # Stagehand and legacy hooks are mutually exclusive — never both.
+        stagehand_runtime = None
+        if model_size > gpu_budget:
+            try:
+                from serenityflow.memory.coordinator import get_coordinator
+                coord = get_coordinator()
+                if coord is not None:
+                    stagehand_runtime = coord.get_or_create_runtime(model)
+            except Exception:
+                logger.debug("Stagehand coordinator not available", exc_info=True)
+
+        if stagehand_runtime is not None:
+            # Stagehand manages this model — attach runtime for sampling to find.
+            # Blocks stay on CPU; managed_forward() handles per-block GPU streaming.
+            # But non-block params (embeddings, projections, norms) must be on GPU.
+            blocks = _find_transformer_blocks(model)
+            block_param_ids = set()
+            for block in blocks:
+                for p in block.parameters():
+                    block_param_ids.add(id(p))
+            non_block_bytes = 0
+            device = torch.device("cuda")
+            for p in model.parameters():
+                if id(p) not in block_param_ids:
+                    non_block_bytes += p.data.nbytes
+                    p.data = p.data.to(device, non_blocking=True)
+            logger.info("Moved %.1f MB of non-block params to GPU for Stagehand",
+                        non_block_bytes / (1024**2))
+
+            model._stagehand_runtime = stagehand_runtime
+            model._stagehand_checkpoint_path = path
+            logger.info("Model managed by Stagehand (async prefetch, %d-block lookahead)",
+                        stagehand_runtime._config.prefetch_window_blocks)
         else:
-            logger.info("Fully loaded to GPU (%.1f GB)", lm.loaded_size / (1024**3))
+            # Legacy fallback: synchronous per-block hooks (no prefetch)
+            _enable_layer_offloading(model)
+            from serenity.inference.memory.manager import ModelManager
+            manager = _get_model_manager()
+            lm = manager.load(model, budget=gpu_budget)
+            if lm.offloaded_size > 0:
+                logger.info(
+                    "Loaded %.1f GB to GPU, %.1f GB offloaded to CPU (legacy per-layer streaming)",
+                    lm.loaded_size / (1024**3), lm.offloaded_size / (1024**3),
+                )
+            else:
+                logger.info("Fully loaded to GPU (%.1f GB)", lm.loaded_size / (1024**3))
 
     return model
 

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Multi-architecture block patterns
 BLOCK_PATTERNS: dict[str, dict] = {
     "flux": {
-        "patterns": [r"^double_blocks\.\d+$", r"^single_blocks\.\d+$"],
+        "patterns": [r"^transformer_blocks\.\d+$", r"^single_transformer_blocks\.\d+$"],
         "min_blocks": 10,
         "require_all": True,
     },
@@ -40,12 +40,12 @@ BLOCK_PATTERNS: dict[str, dict] = {
         "require_all": True,
     },
     "sdxl": {
-        "patterns": [r"^input_blocks\.\d+$", r"^output_blocks\.\d+$"],
-        "min_blocks": 6,
+        "patterns": [r"^down_blocks\.\d+$", r"^up_blocks\.\d+$"],
+        "min_blocks": 4,
         "require_all": True,
     },
     "sd3": {
-        "patterns": [r"^joint_blocks\.\d+$"],
+        "patterns": [r"^transformer_blocks\.\d+$"],
         "min_blocks": 6,
         "require_all": False,
     },
@@ -323,4 +323,21 @@ class StagehandCoordinator:
         logger.info("StagehandCoordinator shutdown complete")
 
 
-__all__ = ["StagehandCoordinator", "BLOCK_PATTERNS"]
+# ---------------------------------------------------------------------------
+# Module-level singleton accessor so bridge/loading.py can reach the
+# coordinator without threading it through node function signatures.
+# ---------------------------------------------------------------------------
+
+_coordinator: StagehandCoordinator | None = None
+
+
+def set_coordinator(c: StagehandCoordinator | None) -> None:
+    global _coordinator
+    _coordinator = c
+
+
+def get_coordinator() -> StagehandCoordinator | None:
+    return _coordinator
+
+
+__all__ = ["StagehandCoordinator", "BLOCK_PATTERNS", "set_coordinator", "get_coordinator"]

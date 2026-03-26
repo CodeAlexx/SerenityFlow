@@ -112,6 +112,11 @@ def run_workflow(args):
         except Exception as e:
             log.warning("Stagehand init failed: %s", e)
 
+    # Make coordinator accessible to bridge/loading.py
+    if coordinator is not None:
+        from serenityflow.memory.coordinator import set_coordinator
+        set_coordinator(coordinator)
+
     # Create runner
     runner = WorkflowRunner(registry, coordinator=coordinator)
 
