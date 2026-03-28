@@ -1797,3 +1797,746 @@ def register_video_edit_routes(app: FastAPI):
     async def _async_send_rife(state, event_type, data):
         from serenityflow.server.websocket import send_event
         await send_event(state, event_type, data)
+
+    # --- V8: CodeFormer Face Restoration ---
+
+    _face_active_jobs: dict[str, threading.Event] = {}
+
+    def _facetools_model_dir() -> str:
+        from serenityflow.server.app import state
+        d = os.path.join(os.path.realpath(state.output_dir), "models", "facetools")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    @app.get("/video_edit/facetools/status")
+    async def facetools_status():
+        from serenityflow.server.face_restorer import FaceRestorer
+        model_dir = _facetools_model_dir()
+        restorer = FaceRestorer(model_dir=model_dir)
+        models = restorer.check_models()
+        return JSONResponse({
+            "available": all(models.values()),
+            "models": models,
+            "model_dir": model_dir,
+            "processing": len(_face_active_jobs) > 0,
+        })
+
+    @app.post("/video_edit/facetools/restore")
+    async def facetools_restore(request: Request):
+        body = await request.json()
+        pid = body.get("project_id", "")
+        clip_id = body.get("clip_id", "")
+        fidelity = float(body.get("fidelity", 0.7))
+        fidelity = max(0.0, min(1.0, fidelity))
+
+        # Check models
+        model_dir = _facetools_model_dir()
+        from serenityflow.server.face_restorer import FaceRestorer
+        restorer = FaceRestorer(model_dir=model_dir)
+        if not restorer.all_models_present():
+            missing = [k for k, v in restorer.check_models().items() if not v]
+            return JSONResponse({
+                "error": f"Missing model files: {', '.join(missing)}. Place them in {model_dir}",
+            }, status_code=404)
+
+        # Check not already processing
+        if _face_active_jobs:
+            return JSONResponse({
+                "error": "Face restoration is already processing another clip",
+            }, status_code=409)
+
+        # Load project and find clip
+        path = _project_path(pid)
+        if not path or not os.path.isfile(path):
+            return JSONResponse({"error": "Project not found"}, status_code=404)
+
+        with open(path, "r") as f:
+            proj = json.load(f)
+
+        clip_data = None
+        for track in proj.get("tracks", []):
+            for clip in track.get("clips", []):
+                if clip.get("id") == clip_id:
+                    clip_data = clip
+                    break
+            if clip_data:
+                break
+
+        if not clip_data:
+            return JSONResponse({"error": "Clip not found"}, status_code=404)
+
+        source_path = clip_data.get("source_path", "")
+        if not source_path or not os.path.isfile(source_path):
+            return JSONResponse({"error": "Clip source file not found"}, status_code=404)
+
+        job_id = str(uuid.uuid4())[:12]
+        cancel_event = threading.Event()
+        _face_active_jobs[job_id] = cancel_event
+
+        loop = asyncio.get_running_loop()
+
+        def _run_face_restore():
+            from serenityflow.server.app import state as app_state
+            try:
+                from serenityflow.server.face_restorer import FaceRestorer as FR
+                fr = FR(model_dir=model_dir, device="cuda")
+
+                stem, ext = os.path.splitext(source_path)
+                output_path = f"{stem}_facefix{ext or '.mp4'}"
+
+                def on_progress(frame, total):
+                    pct = min(100, int(frame / max(1, total) * 100))
+                    _send_face_event(app_state, job_id, "face_restore_progress", {
+                        "frame": frame, "total": total, "percent": pct,
+                        "clip_id": clip_id,
+                    }, loop)
+
+                ok = fr.process_video(
+                    input_path=source_path,
+                    output_path=output_path,
+                    fidelity=fidelity,
+                    progress_callback=on_progress,
+                    cancel_event=cancel_event,
+                )
+
+                if not ok:
+                    if cancel_event.is_set():
+                        _send_face_event(app_state, job_id, "face_restore_error", {
+                            "error": "Cancelled", "clip_id": clip_id,
+                        }, loop)
+                    else:
+                        _send_face_event(app_state, job_id, "face_restore_error", {
+                            "error": "Face restoration failed", "clip_id": clip_id,
+                        }, loop)
+                    return
+
+                # Update project — re-read to avoid overwriting edits
+                with open(path, "r") as f:
+                    fresh_proj = json.load(f)
+                for trk in fresh_proj.get("tracks", []):
+                    for clp in trk.get("clips", []):
+                        if clp.get("id") == clip_id:
+                            clp["source_path"] = output_path
+                            clp["face_restored"] = True
+                            clp["face_fidelity"] = fidelity
+                            break
+                with open(path, "w") as f:
+                    json.dump(fresh_proj, f, indent=2)
+
+                _send_face_event(app_state, job_id, "face_restore_complete", {
+                    "output_path": output_path,
+                    "clip_id": clip_id,
+                    "fidelity": fidelity,
+                }, loop)
+
+            except Exception as e:
+                log.exception("Face restore error")
+                _send_face_event(app_state, job_id, "face_restore_error", {
+                    "error": str(e), "clip_id": clip_id,
+                }, loop)
+            finally:
+                _face_active_jobs.pop(job_id, None)
+
+        loop.run_in_executor(None, _run_face_restore)
+        return JSONResponse({"job_id": job_id, "status": "started"})
+
+    @app.post("/video_edit/facetools/cancel/{job_id}")
+    async def facetools_cancel(job_id: str):
+        ev = _face_active_jobs.get(job_id)
+        if ev:
+            ev.set()
+            return JSONResponse({"status": "cancelling"})
+        return JSONResponse({"status": "not_found"}, status_code=404)
+
+    def _resolve_clip_source(project_id: str, clip_id: str) -> str | None:
+        """Resolve source_path for a clip from the project JSON (avoids path traversal)."""
+        path = _project_path(project_id)
+        if not path or not os.path.isfile(path):
+            return None
+        with open(path, "r") as f:
+            proj = json.load(f)
+        for track in proj.get("tracks", []):
+            for clip in track.get("clips", []):
+                if clip.get("id") == clip_id:
+                    sp = clip.get("source_path", "")
+                    return sp if sp and os.path.isfile(sp) else None
+        return None
+
+    @app.post("/video_edit/facetools/preview")
+    async def facetools_preview(request: Request):
+        body = await request.json()
+        source_path = _resolve_clip_source(
+            body.get("project_id", ""), body.get("clip_id", ""),
+        )
+        seek_sec = float(body.get("seek_sec", 0))
+        fidelity = float(body.get("fidelity", 0.7))
+        fidelity = max(0.0, min(1.0, fidelity))
+
+        if not source_path or not os.path.isfile(source_path):
+            return JSONResponse({"error": "Source file not found"}, status_code=404)
+
+        model_dir = _facetools_model_dir()
+        from serenityflow.server.face_restorer import FaceRestorer as FR
+        fr = FR(model_dir=model_dir, device="cuda")
+        if not fr.all_models_present():
+            return JSONResponse({"error": "Model files missing"}, status_code=404)
+
+        loop = asyncio.get_running_loop()
+        jpeg_bytes = await loop.run_in_executor(
+            None, fr.preview_frame, source_path, seek_sec, fidelity
+        )
+        if jpeg_bytes is None:
+            return JSONResponse({"error": "Could not extract frame"}, status_code=500)
+
+        return Response(content=jpeg_bytes, media_type="image/jpeg")
+
+    def _send_face_event(state, job_id, event_type, data, loop=None):
+        data["job_id"] = job_id
+        if loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _async_send_face(state, event_type, data), loop
+            )
+        except Exception:
+            pass
+
+    async def _async_send_face(state, event_type, data):
+        from serenityflow.server.websocket import send_event
+        await send_event(state, event_type, data)
+
+    # --- V9: Real-ESRGAN Super-Resolution ---
+
+    _esrgan_active_jobs: dict[str, threading.Event] = {}
+
+    def _esrgan_model_dir() -> str:
+        from serenityflow.server.app import state
+        d = os.path.join(os.path.realpath(state.output_dir), "models", "esrgan")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    @app.get("/video_edit/esrgan/status")
+    async def esrgan_status():
+        from serenityflow.server.esrgan_upscaler import ESRGANUpscaler
+        model_dir = _esrgan_model_dir()
+        up = ESRGANUpscaler(model_dir=model_dir)
+        return JSONResponse({
+            "available": up.model_present(),
+            "model_path": os.path.join(model_dir, up.MODEL_FILE),
+            "processing": len(_esrgan_active_jobs) > 0,
+        })
+
+    @app.post("/video_edit/esrgan/upscale")
+    async def esrgan_upscale(request: Request):
+        body = await request.json()
+        pid = body.get("project_id", "")
+        clip_id = body.get("clip_id", "")
+        scale = int(body.get("scale", 4))
+        tile_size = int(body.get("tile_size", 512))
+
+        if scale not in (2, 4):
+            return JSONResponse({"error": "Scale must be 2 or 4"}, status_code=400)
+        if tile_size not in (0, 256, 512):
+            tile_size = 512
+
+        model_dir = _esrgan_model_dir()
+        from serenityflow.server.esrgan_upscaler import ESRGANUpscaler
+        up = ESRGANUpscaler(model_dir=model_dir)
+        if not up.model_present():
+            return JSONResponse({
+                "error": f"Model file missing. Place RealESRGAN_x4plus.pth in {model_dir}",
+            }, status_code=404)
+
+        if _esrgan_active_jobs:
+            return JSONResponse({
+                "error": "ESRGAN is already processing another clip",
+            }, status_code=409)
+
+        path = _project_path(pid)
+        if not path or not os.path.isfile(path):
+            return JSONResponse({"error": "Project not found"}, status_code=404)
+
+        with open(path, "r") as f:
+            proj = json.load(f)
+
+        clip_data = None
+        for track in proj.get("tracks", []):
+            for clip in track.get("clips", []):
+                if clip.get("id") == clip_id:
+                    clip_data = clip
+                    break
+            if clip_data:
+                break
+
+        if not clip_data:
+            return JSONResponse({"error": "Clip not found"}, status_code=404)
+
+        source_path = clip_data.get("source_path", "")
+        if not source_path or not os.path.isfile(source_path):
+            return JSONResponse({"error": "Clip source file not found"}, status_code=404)
+
+        job_id = str(uuid.uuid4())[:12]
+        cancel_event = threading.Event()
+        _esrgan_active_jobs[job_id] = cancel_event
+
+        loop = asyncio.get_running_loop()
+
+        def _run_esrgan_upscale():
+            from serenityflow.server.app import state as app_state
+            try:
+                from serenityflow.server.esrgan_upscaler import ESRGANUpscaler as EU
+                eu = EU(model_dir=model_dir, device="cuda")
+
+                stem, ext = os.path.splitext(source_path)
+                output_path = f"{stem}_{scale}x{ext or '.mp4'}"
+
+                def on_progress(frame, total):
+                    pct = min(100, int(frame / max(1, total) * 100))
+                    _send_esrgan_event(app_state, job_id, "esrgan_progress", {
+                        "frame": frame, "total": total, "percent": pct,
+                        "clip_id": clip_id,
+                    }, loop)
+
+                ok = eu.process_video(
+                    input_path=source_path,
+                    output_path=output_path,
+                    outscale=scale,
+                    tile_size=tile_size,
+                    progress_callback=on_progress,
+                    cancel_event=cancel_event,
+                )
+
+                if not ok:
+                    if cancel_event.is_set():
+                        _send_esrgan_event(app_state, job_id, "esrgan_error", {
+                            "error": "Cancelled", "clip_id": clip_id,
+                        }, loop)
+                    else:
+                        _send_esrgan_event(app_state, job_id, "esrgan_error", {
+                            "error": "Upscale failed", "clip_id": clip_id,
+                        }, loop)
+                    return
+
+                # Update project — re-read to avoid overwriting edits
+                with open(path, "r") as f:
+                    fresh_proj = json.load(f)
+                for trk in fresh_proj.get("tracks", []):
+                    for clp in trk.get("clips", []):
+                        if clp.get("id") == clip_id:
+                            clp["source_path"] = output_path
+                            clp["esrgan_scale"] = scale
+                            clp["esrgan_output"] = output_path
+                            break
+                with open(path, "w") as f:
+                    json.dump(fresh_proj, f, indent=2)
+
+                _send_esrgan_event(app_state, job_id, "esrgan_complete", {
+                    "output_path": output_path,
+                    "clip_id": clip_id,
+                    "scale": scale,
+                }, loop)
+
+            except Exception as e:
+                log.exception("ESRGAN upscale error")
+                _send_esrgan_event(app_state, job_id, "esrgan_error", {
+                    "error": str(e), "clip_id": clip_id,
+                }, loop)
+            finally:
+                _esrgan_active_jobs.pop(job_id, None)
+
+        loop.run_in_executor(None, _run_esrgan_upscale)
+        return JSONResponse({"job_id": job_id, "status": "started"})
+
+    @app.post("/video_edit/esrgan/cancel/{job_id}")
+    async def esrgan_cancel(job_id: str):
+        ev = _esrgan_active_jobs.get(job_id)
+        if ev:
+            ev.set()
+            return JSONResponse({"status": "cancelling"})
+        return JSONResponse({"status": "not_found"}, status_code=404)
+
+    @app.post("/video_edit/esrgan/preview")
+    async def esrgan_preview(request: Request):
+        body = await request.json()
+        source_path = _resolve_clip_source(
+            body.get("project_id", ""), body.get("clip_id", ""),
+        )
+        seek_sec = float(body.get("seek_sec", 0))
+        scale = int(body.get("scale", 4))
+        tile_size = int(body.get("tile_size", 512))
+
+        if scale not in (2, 4):
+            scale = 4
+        if tile_size not in (0, 256, 512):
+            tile_size = 512
+
+        if not source_path or not os.path.isfile(source_path):
+            return JSONResponse({"error": "Source file not found"}, status_code=404)
+
+        model_dir = _esrgan_model_dir()
+        from serenityflow.server.esrgan_upscaler import ESRGANUpscaler as EU
+        eu = EU(model_dir=model_dir, device="cuda")
+        if not eu.model_present():
+            return JSONResponse({"error": "Model file missing"}, status_code=404)
+
+        loop = asyncio.get_running_loop()
+        jpeg_bytes = await loop.run_in_executor(
+            None, eu.preview_frame, source_path, seek_sec, scale, tile_size
+        )
+        if jpeg_bytes is None:
+            return JSONResponse({"error": "Could not extract frame"}, status_code=500)
+
+        return Response(content=jpeg_bytes, media_type="image/jpeg")
+
+    def _send_esrgan_event(state, job_id, event_type, data, loop=None):
+        data["job_id"] = job_id
+        if loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _async_send_esrgan(state, event_type, data), loop
+            )
+        except Exception:
+            pass
+
+    async def _async_send_esrgan(state, event_type, data):
+        from serenityflow.server.websocket import send_event
+        await send_event(state, event_type, data)
+
+    # --- V10: Deflicker / Temporal Consistency ---
+
+    _deflicker_active_jobs: dict[str, threading.Event] = {}
+
+    @app.post("/video_edit/deflicker")
+    async def deflicker_start(request: Request):
+        body = await request.json()
+        pid = body.get("project_id", "")
+        clip_id = body.get("clip_id", "")
+        mode = body.get("mode", "light")
+        if mode not in ("light", "medium", "heavy"):
+            return JSONResponse({"error": "Mode must be light, medium, or heavy"}, status_code=400)
+
+        if _deflicker_active_jobs:
+            return JSONResponse({
+                "error": "Deflicker is already processing another clip",
+            }, status_code=409)
+
+        path = _project_path(pid)
+        if not path or not os.path.isfile(path):
+            return JSONResponse({"error": "Project not found"}, status_code=404)
+
+        with open(path, "r") as f:
+            proj = json.load(f)
+
+        clip_data = None
+        for track in proj.get("tracks", []):
+            for clip in track.get("clips", []):
+                if clip.get("id") == clip_id:
+                    clip_data = clip
+                    break
+            if clip_data:
+                break
+
+        if not clip_data:
+            return JSONResponse({"error": "Clip not found"}, status_code=404)
+
+        source_path = clip_data.get("source_path", "")
+        if not source_path or not os.path.isfile(source_path):
+            return JSONResponse({"error": "Clip source file not found"}, status_code=404)
+
+        # Mode-specific params
+        window = max(3, min(15, int(body.get("window", 5))))
+        strength = max(0.0, min(1.0, float(body.get("strength", 0.7))))
+        ema_decay = max(0.5, min(0.99, float(body.get("ema_decay", 0.85))))
+        blend_alpha = max(0.05, min(0.3, float(body.get("blend_alpha", 0.15))))
+
+        job_id = str(uuid.uuid4())[:12]
+        cancel_event = threading.Event()
+        _deflicker_active_jobs[job_id] = cancel_event
+
+        loop = asyncio.get_running_loop()
+
+        def _run_deflicker():
+            from serenityflow.server.app import state as app_state
+            try:
+                from serenityflow.server.deflicker import Deflicker
+                df = Deflicker()
+
+                stem, ext = os.path.splitext(source_path)
+                output_path = f"{stem}_deflicker{ext or '.mp4'}"
+
+                def on_progress(frame, total):
+                    pct = min(100, int(frame / max(1, total) * 100))
+                    _send_deflicker_event(app_state, job_id, "deflicker_progress", {
+                        "frame": frame, "total": total, "percent": pct,
+                        "clip_id": clip_id,
+                    }, loop)
+
+                if mode == "light":
+                    ok = df.process_light(
+                        source_path, output_path, window=window,
+                        progress_callback=on_progress,
+                        cancel_event=cancel_event,
+                    )
+                elif mode == "medium":
+                    ok = df.process_medium(
+                        source_path, output_path, strength=strength,
+                        ema_decay=ema_decay, progress_callback=on_progress,
+                        cancel_event=cancel_event,
+                    )
+                else:
+                    ok = df.process_heavy(
+                        source_path, output_path, blend_alpha=blend_alpha,
+                        progress_callback=on_progress, cancel_event=cancel_event,
+                    )
+
+                if not ok:
+                    if cancel_event.is_set():
+                        _send_deflicker_event(app_state, job_id, "deflicker_error", {
+                            "error": "Cancelled", "clip_id": clip_id,
+                        }, loop)
+                    else:
+                        _send_deflicker_event(app_state, job_id, "deflicker_error", {
+                            "error": "Deflicker failed", "clip_id": clip_id,
+                        }, loop)
+                    return
+
+                # Update project
+                with open(path, "r") as f:
+                    fresh_proj = json.load(f)
+                for trk in fresh_proj.get("tracks", []):
+                    for clp in trk.get("clips", []):
+                        if clp.get("id") == clip_id:
+                            clp["source_path"] = output_path
+                            clp["deflickered"] = mode
+                            break
+                with open(path, "w") as f:
+                    json.dump(fresh_proj, f, indent=2)
+
+                _send_deflicker_event(app_state, job_id, "deflicker_complete", {
+                    "output_path": output_path,
+                    "clip_id": clip_id,
+                    "mode": mode,
+                }, loop)
+
+            except Exception as e:
+                log.exception("Deflicker error")
+                _send_deflicker_event(app_state, job_id, "deflicker_error", {
+                    "error": str(e), "clip_id": clip_id,
+                }, loop)
+            finally:
+                _deflicker_active_jobs.pop(job_id, None)
+
+        loop.run_in_executor(None, _run_deflicker)
+        return JSONResponse({"job_id": job_id, "status": "started"})
+
+    @app.post("/video_edit/deflicker/cancel/{job_id}")
+    async def deflicker_cancel(job_id: str):
+        ev = _deflicker_active_jobs.get(job_id)
+        if ev:
+            ev.set()
+            return JSONResponse({"status": "cancelling"})
+        return JSONResponse({"status": "not_found"}, status_code=404)
+
+    def _send_deflicker_event(state, job_id, event_type, data, loop=None):
+        data["job_id"] = job_id
+        if loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _async_send_deflicker(state, event_type, data), loop
+            )
+        except Exception:
+            pass
+
+    async def _async_send_deflicker(state, event_type, data):
+        from serenityflow.server.websocket import send_event
+        await send_event(state, event_type, data)
+
+    # --- V11: Audio Enhancement ---
+
+    _audio_active_jobs: dict[str, threading.Event] = {}
+
+    @app.get("/video_edit/audio/presets")
+    async def audio_presets():
+        from serenityflow.server.audio_enhancer import FFMPEG_PRESETS, deepfilter_available
+        ffmpeg_info = {
+            k: {"name": v["name"], "description": v["description"]}
+            for k, v in FFMPEG_PRESETS.items()
+        }
+        return JSONResponse({
+            "ffmpeg": ffmpeg_info,
+            "deepfilter": {
+                "available": deepfilter_available(),
+                "description": "AI speech enhancement (DeepFilterNet)",
+            },
+        })
+
+    @app.post("/video_edit/audio/enhance")
+    async def audio_enhance(request: Request):
+        body = await request.json()
+        pid = body.get("project_id", "")
+        clip_id = body.get("clip_id", "")
+        mode = body.get("mode", "ffmpeg")
+        preset = body.get("preset", "normalize")
+
+        if mode not in ("ffmpeg", "deepfilter"):
+            return JSONResponse({"error": "Mode must be ffmpeg or deepfilter"}, status_code=400)
+
+        if _audio_active_jobs:
+            return JSONResponse({
+                "error": "Audio enhancement is already processing another clip",
+            }, status_code=409)
+
+        path = _project_path(pid)
+        if not path or not os.path.isfile(path):
+            return JSONResponse({"error": "Project not found"}, status_code=404)
+
+        with open(path, "r") as f:
+            proj = json.load(f)
+
+        clip_data = None
+        for track in proj.get("tracks", []):
+            for clip in track.get("clips", []):
+                if clip.get("id") == clip_id:
+                    clip_data = clip
+                    break
+            if clip_data:
+                break
+
+        if not clip_data:
+            return JSONResponse({"error": "Clip not found"}, status_code=404)
+
+        source_path = clip_data.get("source_path", "")
+        if not source_path or not os.path.isfile(source_path):
+            return JSONResponse({"error": "Clip source file not found"}, status_code=404)
+
+        job_id = str(uuid.uuid4())[:12]
+        cancel_event = threading.Event()
+        _audio_active_jobs[job_id] = cancel_event
+
+        loop = asyncio.get_running_loop()
+
+        def _run_audio_enhance():
+            from serenityflow.server.app import state as app_state
+            try:
+                from serenityflow.server.audio_enhancer import AudioEnhancer
+                ae = AudioEnhancer()
+
+                stem, ext = os.path.splitext(source_path)
+                suffix = f"_{preset}" if mode == "ffmpeg" else "_deepfilter"
+                output_path = f"{stem}{suffix}{ext or '.mp4'}"
+
+                def on_progress(step, total):
+                    pct = min(100, int(step / max(1, total) * 100))
+                    _send_audio_event(app_state, job_id, "audio_enhance_progress", {
+                        "step": step, "total": total, "percent": pct,
+                        "clip_id": clip_id,
+                    }, loop)
+
+                if mode == "ffmpeg":
+                    ok, err = ae.process_ffmpeg(
+                        source_path, output_path, preset=preset,
+                        cancel_event=cancel_event,
+                    )
+                else:
+                    ok, err = ae.process_deepfilter(
+                        source_path, output_path,
+                        progress_callback=on_progress,
+                        cancel_event=cancel_event,
+                    )
+
+                if not ok:
+                    if cancel_event.is_set():
+                        _send_audio_event(app_state, job_id, "audio_enhance_error", {
+                            "error": "Cancelled", "clip_id": clip_id,
+                        }, loop)
+                    else:
+                        _send_audio_event(app_state, job_id, "audio_enhance_error", {
+                            "error": err or "Audio enhancement failed",
+                            "clip_id": clip_id,
+                        }, loop)
+                    if os.path.exists(output_path):
+                        os.unlink(output_path)
+                    return
+
+                # Update project
+                with open(path, "r") as f:
+                    fresh_proj = json.load(f)
+                for trk in fresh_proj.get("tracks", []):
+                    for clp in trk.get("clips", []):
+                        if clp.get("id") == clip_id:
+                            clp["source_path"] = output_path
+                            clp["audio_enhanced"] = preset if mode == "ffmpeg" else "deepfilter"
+                            break
+                with open(path, "w") as f:
+                    json.dump(fresh_proj, f, indent=2)
+
+                # Send 100% for ffmpeg mode (no progress during processing)
+                if mode == "ffmpeg":
+                    on_progress(1, 1)
+
+                _send_audio_event(app_state, job_id, "audio_enhance_complete", {
+                    "output_path": output_path,
+                    "clip_id": clip_id,
+                    "mode": mode,
+                    "preset": preset if mode == "ffmpeg" else "deepfilter",
+                }, loop)
+
+            except Exception as e:
+                log.exception("Audio enhance error")
+                _send_audio_event(app_state, job_id, "audio_enhance_error", {
+                    "error": str(e), "clip_id": clip_id,
+                }, loop)
+            finally:
+                _audio_active_jobs.pop(job_id, None)
+
+        loop.run_in_executor(None, _run_audio_enhance)
+        return JSONResponse({"job_id": job_id, "status": "started"})
+
+    @app.post("/video_edit/audio/cancel/{job_id}")
+    async def audio_cancel(job_id: str):
+        ev = _audio_active_jobs.get(job_id)
+        if ev:
+            ev.set()
+            return JSONResponse({"status": "cancelling"})
+        return JSONResponse({"status": "not_found"}, status_code=404)
+
+    @app.post("/video_edit/audio/preview")
+    async def audio_preview(request: Request):
+        body = await request.json()
+        source_path = _resolve_clip_source(
+            body.get("project_id", ""), body.get("clip_id", ""),
+        )
+        preset = body.get("preset", "normalize")
+        duration = min(10.0, max(1.0, float(body.get("duration", 5))))
+
+        if not source_path or not os.path.isfile(source_path):
+            return JSONResponse({"error": "Source file not found"}, status_code=404)
+
+        from serenityflow.server.audio_enhancer import AudioEnhancer
+        ae = AudioEnhancer()
+
+        loop = asyncio.get_running_loop()
+        mp3_bytes = await loop.run_in_executor(
+            None, ae.preview_ffmpeg, source_path, preset, duration
+        )
+        if mp3_bytes is None:
+            return JSONResponse({"error": "Could not generate audio preview"}, status_code=500)
+
+        return Response(content=mp3_bytes, media_type="audio/mpeg")
+
+    def _send_audio_event(state, job_id, event_type, data, loop=None):
+        data["job_id"] = job_id
+        if loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _async_send_audio(state, event_type, data), loop
+            )
+        except Exception:
+            pass
+
+    async def _async_send_audio(state, event_type, data):
+        from serenityflow.server.websocket import send_event
+        await send_event(state, event_type, data)

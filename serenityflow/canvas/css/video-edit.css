@@ -776,3 +776,351 @@
     margin-top: 3px;
     text-align: center;
 }
+
+/* ===== V8: Face Restoration Dialog ===== */
+.ve-face-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.ve-face-dialog {
+    background: var(--shell-bg-panel, #1f1f2e);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 12px;
+    padding: 0;
+    width: 380px;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+}
+.ve-face-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--shell-text, #e8e8f0);
+    border-bottom: 1px solid var(--shell-border, #2a2a3a);
+}
+.ve-face-close {
+    cursor: pointer;
+    font-size: 18px;
+    color: #888;
+    line-height: 1;
+}
+.ve-face-close:hover { color: #fff; }
+.ve-face-body {
+    padding: 16px;
+}
+.ve-face-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+.ve-face-slider-row label {
+    font-size: 12px;
+    color: var(--shell-text-muted, #6b6b80);
+    min-width: 50px;
+}
+.ve-face-slider-row input[type="range"] {
+    flex: 1;
+    accent-color: #f07c6f;
+}
+.ve-face-val {
+    font-size: 12px;
+    color: #aaa;
+    min-width: 32px;
+    text-align: right;
+}
+.ve-face-hint {
+    font-size: 10px;
+    color: var(--shell-text-muted, #6b6b80);
+    text-align: center;
+    margin-bottom: 12px;
+}
+.ve-face-preview-area {
+    margin: 10px 0;
+    text-align: center;
+}
+.ve-face-preview-img {
+    max-width: 100%;
+    max-height: 200px;
+    border-radius: 6px;
+    border: 1px solid var(--shell-border, #2a2a3a);
+}
+.ve-face-license {
+    font-size: 10px;
+    color: var(--shell-text-muted, #6b6b80);
+    margin-top: 8px;
+}
+.ve-face-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--shell-border, #2a2a3a);
+}
+.ve-face-btn {
+    padding: 7px 14px;
+    border: none;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+}
+.ve-face-btn-primary {
+    background: #f07c6f;
+    color: #fff;
+}
+.ve-face-btn-primary:hover { background: #f09080; }
+.ve-face-btn-secondary {
+    background: transparent;
+    color: var(--shell-text-muted, #6b6b80);
+    border: 1px solid var(--shell-border, #2a2a3a);
+}
+.ve-face-btn-secondary:hover { background: var(--shell-bg-hover, #252538); }
+.ve-face-btn-preview {
+    background: var(--shell-bg-hover, #252538);
+    color: var(--shell-text, #e8e8f0);
+    border: 1px solid var(--shell-border, #2a2a3a);
+}
+.ve-face-btn-preview:hover { background: #353548; }
+.ve-face-btn-preview:disabled { opacity: 0.5; cursor: default; }
+
+/* V9: ESRGAN Upscale Dialog */
+.ve-esrgan-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6); z-index: 600;
+    display: flex; align-items: center; justify-content: center;
+}
+.ve-esrgan-dialog {
+    background: var(--shell-bg-panel, #1f1f2e);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 12px; width: 380px;
+    box-shadow: 0 12px 36px rgba(0,0,0,0.6);
+    color: var(--shell-text, #e0e0e0);
+}
+.ve-esrgan-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--shell-border, #2a2a3a);
+    font-weight: 600; font-size: 14px;
+}
+.ve-esrgan-close {
+    cursor: pointer; font-size: 18px; color: #888;
+    line-height: 1;
+}
+.ve-esrgan-close:hover { color: #fff; }
+.ve-esrgan-body {
+    padding: 16px;
+}
+.ve-esrgan-radio-row {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 10px;
+}
+.ve-esrgan-radio-row label {
+    font-size: 13px; cursor: pointer;
+}
+.ve-esrgan-output-info {
+    font-size: 12px; color: #aaa; margin-bottom: 10px;
+}
+.ve-esrgan-out-dims {
+    color: #6fc8f0; font-weight: 600;
+}
+.ve-esrgan-quality-row {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 10px;
+}
+.ve-esrgan-quality-row label {
+    font-size: 13px; min-width: 55px;
+}
+.ve-esrgan-quality {
+    flex: 1; padding: 4px 6px; font-size: 12px;
+    background: var(--shell-bg-hover, #252538);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 4px; color: var(--shell-text, #e0e0e0);
+}
+.ve-esrgan-warning {
+    font-size: 11px; color: #c8a060; margin-bottom: 12px;
+}
+.ve-esrgan-preview-area {
+    margin-bottom: 12px; text-align: center;
+}
+.ve-esrgan-preview-img {
+    max-width: 100%; max-height: 200px; border-radius: 6px;
+    border: 1px solid var(--shell-border, #2a2a3a);
+}
+.ve-esrgan-actions {
+    display: flex; justify-content: flex-end; gap: 8px;
+}
+.ve-esrgan-btn {
+    padding: 7px 14px; border-radius: 6px; border: none;
+    font-size: 13px; cursor: pointer;
+}
+.ve-esrgan-btn-primary {
+    background: #6fc8f0; color: #111;
+}
+.ve-esrgan-btn-primary:hover { background: #8dd4f4; }
+.ve-esrgan-btn-secondary {
+    background: var(--shell-bg-hover, #252538);
+    color: var(--shell-text, #e0e0e0);
+    border: 1px solid var(--shell-border, #2a2a3a);
+}
+.ve-esrgan-btn-secondary:hover { background: var(--shell-bg-hover, #252538); }
+.ve-esrgan-btn-preview {
+    background: var(--shell-bg-hover, #252538);
+    color: var(--shell-text, #e0e0e0);
+    border: 1px solid var(--shell-border, #2a2a3a);
+}
+.ve-esrgan-btn-preview:hover { background: #353548; }
+.ve-esrgan-btn-preview:disabled { opacity: 0.5; cursor: default; }
+
+/* V10: Deflicker Dialog */
+.ve-deflicker-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6); z-index: 600;
+    display: flex; align-items: center; justify-content: center;
+}
+.ve-deflicker-dialog {
+    background: var(--shell-bg-panel, #1f1f2e);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 12px; width: 400px;
+    box-shadow: 0 12px 36px rgba(0,0,0,0.6);
+    color: var(--shell-text, #e0e0e0);
+}
+.ve-deflicker-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--shell-border, #2a2a3a);
+    font-weight: 600; font-size: 14px;
+}
+.ve-deflicker-close {
+    cursor: pointer; font-size: 18px; color: #888;
+    line-height: 1;
+}
+.ve-deflicker-close:hover { color: #fff; }
+.ve-deflicker-body { padding: 16px; }
+.ve-deflicker-mode-row {
+    display: flex; flex-direction: column; gap: 6px;
+    margin-bottom: 14px;
+}
+.ve-deflicker-mode-row label {
+    font-size: 13px; cursor: pointer;
+}
+.ve-deflicker-settings { margin-bottom: 12px; }
+.ve-deflicker-slider-row {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 6px;
+}
+.ve-deflicker-slider-row label {
+    font-size: 12px; min-width: 75px; color: #aaa;
+}
+.ve-deflicker-slider-row input[type="range"] {
+    flex: 1;
+}
+.ve-deflicker-val {
+    font-size: 12px; min-width: 32px; text-align: right;
+    color: #a0d468; font-weight: 600;
+}
+.ve-deflicker-actions {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--shell-border, #2a2a3a);
+}
+.ve-deflicker-btn {
+    padding: 7px 14px; border-radius: 6px; border: none;
+    font-size: 13px; cursor: pointer;
+}
+.ve-deflicker-btn-primary {
+    background: #a0d468; color: #111;
+}
+.ve-deflicker-btn-primary:hover { background: #b4e07c; }
+.ve-deflicker-btn-secondary {
+    background: var(--shell-bg-hover, #252538);
+    color: var(--shell-text, #e0e0e0);
+    border: 1px solid var(--shell-border, #2a2a3a);
+}
+.ve-deflicker-btn-secondary:hover { background: #353548; }
+
+/* V11: Audio Enhancement Dialog */
+.ve-audio-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6); z-index: 600;
+    display: flex; align-items: center; justify-content: center;
+}
+.ve-audio-dialog {
+    background: var(--shell-bg-panel, #1f1f2e);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 12px; width: 380px;
+    box-shadow: 0 12px 36px rgba(0,0,0,0.6);
+    color: var(--shell-text, #e0e0e0);
+}
+.ve-audio-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--shell-border, #2a2a3a);
+    font-weight: 600; font-size: 14px;
+}
+.ve-audio-close {
+    cursor: pointer; font-size: 18px; color: #888;
+    line-height: 1;
+}
+.ve-audio-close:hover { color: #fff; }
+.ve-audio-body { padding: 16px; }
+.ve-audio-mode-row {
+    display: flex; gap: 16px; margin-bottom: 12px;
+}
+.ve-audio-mode-row label {
+    font-size: 13px; cursor: pointer;
+}
+.ve-audio-preset-row {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 8px;
+}
+.ve-audio-preset-row label {
+    font-size: 12px; min-width: 50px; color: #aaa;
+}
+.ve-audio-preset {
+    flex: 1; padding: 4px 6px; font-size: 12px;
+    background: var(--shell-bg-hover, #252538);
+    border: 1px solid var(--shell-border, #2a2a3a);
+    border-radius: 4px; color: var(--shell-text, #e0e0e0);
+}
+.ve-audio-desc {
+    font-size: 11px; color: #aaa; margin-bottom: 12px;
+    line-height: 1.4;
+}
+.ve-audio-desc code {
+    background: rgba(255,255,255,0.08); padding: 2px 5px;
+    border-radius: 3px; font-size: 11px;
+}
+.ve-audio-actions {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--shell-border, #2a2a3a);
+}
+.ve-audio-btn {
+    padding: 7px 14px; border-radius: 6px; border: none;
+    font-size: 13px; cursor: pointer;
+}
+.ve-audio-btn-primary {
+    background: #d4a0e8; color: #111;
+}
+.ve-audio-btn-primary:hover { background: #deb4f0; }
+.ve-audio-btn-secondary {
+    background: var(--shell-bg-hover, #252538);
+    color: var(--shell-text, #e0e0e0);
+    border: 1px solid var(--shell-border, #2a2a3a);
+}
+.ve-audio-btn-secondary:hover { background: #353548; }
+.ve-audio-btn-preview {
+    background: var(--shell-bg-hover, #252538);
+    color: var(--shell-text, #e0e0e0);
+    border: 1px solid var(--shell-border, #2a2a3a);
+}
+.ve-audio-btn-preview:hover { background: #353548; }
+.ve-audio-btn-preview:disabled { opacity: 0.5; cursor: default; }

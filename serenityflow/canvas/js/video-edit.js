@@ -159,6 +159,31 @@ var VideoEditTab = (function () {
     var rifeProcessingClipId = null;
     var rifeProgressPercent = 0;
 
+    // --- V8 State: Face Restoration ---
+    var activeFaceJobId = null;
+    var faceProcessingClipId = null;
+    var faceProgressPercent = 0;
+    var faceDialogEl = null;
+
+    // --- V9 State: ESRGAN Upscale ---
+    var activeEsrganJobId = null;
+    var esrganProcessingClipId = null;
+    var esrganProgressPercent = 0;
+    var esrganDialogEl = null;
+
+    // --- V10 State: Deflicker ---
+    var activeDeflickerJobId = null;
+    var deflickerProcessingClipId = null;
+    var deflickerProgressPercent = 0;
+    var deflickerDialogEl = null;
+
+    // --- V11 State: Audio Enhancement ---
+    var activeAudioJobId = null;
+    var audioProcessingClipId = null;
+    var audioProgressPercent = 0;
+    var audioDialogEl = null;
+    var audioPresetsCache = null;
+
     // --- Default project data ---
     var project = {
         fps: 30,
@@ -537,6 +562,14 @@ var VideoEditTab = (function () {
         } else if (action === 'rife-2x' || action === 'rife-4x') {
             var multi = action === 'rife-2x' ? 2 : 4;
             startRifeInterpolation(contextTargetClipId, multi);
+        } else if (action === 'face-restore') {
+            showFaceRestoreDialog(contextTargetClipId);
+        } else if (action === 'esrgan-upscale') {
+            showEsrganDialog(contextTargetClipId);
+        } else if (action === 'deflicker') {
+            showDeflickerDialog(contextTargetClipId);
+        } else if (action === 'audio-enhance') {
+            showAudioEnhanceDialog(contextTargetClipId);
         }
     }
 
@@ -2508,6 +2541,792 @@ var VideoEditTab = (function () {
         }
     }
 
+    // ===== V8: Face Restoration (CodeFormer) =====
+
+    function showFaceRestoreDialog(clipId) {
+        fetch(getApiBase() + '/video_edit/facetools/status')
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (!data.available) {
+                    var missing = [];
+                    if (data.models) {
+                        for (var k in data.models) {
+                            if (!data.models[k]) missing.push(k);
+                        }
+                    }
+                    alert('Face restoration models not found.\n\nMissing: ' + missing.join(', ') +
+                        '\n\nPlace model files in:\n' + data.model_dir);
+                    return;
+                }
+                if (data.processing) {
+                    alert('Face restoration is already processing another clip. Please wait.');
+                    return;
+                }
+                _buildFaceDialog(clipId);
+            })
+            .catch(function (err) { alert('Could not check face restore status: ' + err); });
+    }
+
+    function _buildFaceDialog(clipId) {
+        // Remove existing dialog
+        if (faceDialogEl) {
+            faceDialogEl.remove();
+            faceDialogEl = null;
+        }
+
+        var clipInfo = findClipById(clipId);
+        var sourcePath = clipInfo ? clipInfo.clip.source_path : '';
+
+        var overlay = document.createElement('div');
+        overlay.className = 've-face-overlay';
+        overlay.innerHTML =
+            '<div class="ve-face-dialog">' +
+                '<div class="ve-face-header">' +
+                    '<span>Restore Faces (CodeFormer)</span>' +
+                    '<span class="ve-face-close">\u00D7</span>' +
+                '</div>' +
+                '<div class="ve-face-body">' +
+                    '<div class="ve-face-slider-row">' +
+                        '<label>Fidelity</label>' +
+                        '<input type="range" min="0" max="1" step="0.05" value="0.7" class="ve-face-fidelity">' +
+                        '<span class="ve-face-val">0.70</span>' +
+                    '</div>' +
+                    '<div class="ve-face-hint">' +
+                        '\u2190 Higher quality &nbsp;&nbsp;&nbsp;&nbsp; Higher fidelity \u2192' +
+                    '</div>' +
+                    '<div class="ve-face-preview-area" style="display:none;">' +
+                        '<img class="ve-face-preview-img" alt="Preview">' +
+                    '</div>' +
+                    '<div class="ve-face-license">' +
+                        '\u2139 Non-commercial license (S-Lab 1.0)' +
+                    '</div>' +
+                '</div>' +
+                '<div class="ve-face-actions">' +
+                    '<button class="ve-face-btn ve-face-btn-preview">Preview</button>' +
+                    '<div style="flex:1"></div>' +
+                    '<button class="ve-face-btn ve-face-btn-secondary ve-face-btn-cancel">Cancel</button>' +
+                    '<button class="ve-face-btn ve-face-btn-primary ve-face-btn-start">Start</button>' +
+                '</div>' +
+            '</div>';
+
+        document.getElementById('panel-video-edit').appendChild(overlay);
+        faceDialogEl = overlay;
+
+        var slider = overlay.querySelector('.ve-face-fidelity');
+        var valLabel = overlay.querySelector('.ve-face-val');
+        var previewArea = overlay.querySelector('.ve-face-preview-area');
+        var previewImg = overlay.querySelector('.ve-face-preview-img');
+
+        slider.addEventListener('input', function () {
+            valLabel.textContent = parseFloat(slider.value).toFixed(2);
+        });
+
+        overlay.querySelector('.ve-face-close').addEventListener('click', function () {
+            overlay.remove();
+            faceDialogEl = null;
+        });
+
+        overlay.querySelector('.ve-face-btn-cancel').addEventListener('click', function () {
+            overlay.remove();
+            faceDialogEl = null;
+        });
+
+        overlay.querySelector('.ve-face-btn-preview').addEventListener('click', function () {
+            if (!sourcePath) { alert('No source path for this clip'); return; }
+            var btn = overlay.querySelector('.ve-face-btn-preview');
+            btn.textContent = 'Loading...';
+            btn.disabled = true;
+            fetch(getApiBase() + '/video_edit/facetools/preview', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: projectId,
+                    clip_id: clipId,
+                    seek_sec: 2.0,
+                    fidelity: parseFloat(slider.value),
+                }),
+            })
+            .then(function (r) {
+                if (!r.ok) throw new Error('Preview failed');
+                return r.blob();
+            })
+            .then(function (blob) {
+                var url = URL.createObjectURL(blob);
+                previewImg.src = url;
+                previewArea.style.display = 'block';
+                btn.textContent = 'Preview';
+                btn.disabled = false;
+            })
+            .catch(function (err) {
+                alert('Preview failed: ' + err);
+                btn.textContent = 'Preview';
+                btn.disabled = false;
+            });
+        });
+
+        overlay.querySelector('.ve-face-btn-start').addEventListener('click', function () {
+            var fidelity = parseFloat(slider.value);
+            overlay.remove();
+            faceDialogEl = null;
+            startFaceRestore(clipId, fidelity);
+        });
+    }
+
+    function startFaceRestore(clipId, fidelity) {
+        fetch(getApiBase() + '/video_edit/facetools/restore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                project_id: projectId,
+                clip_id: clipId,
+                fidelity: fidelity,
+            }),
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+            if (res.error) {
+                alert('Face restore error: ' + res.error);
+                return;
+            }
+            activeFaceJobId = res.job_id;
+            faceProcessingClipId = clipId;
+            faceProgressPercent = 0;
+            renderTimeline();
+
+            if (typeof SerenityWS !== 'undefined') {
+                SerenityWS.on('face_restore_progress', onFaceProgress);
+                SerenityWS.on('face_restore_complete', onFaceComplete);
+                SerenityWS.on('face_restore_error', onFaceError);
+            }
+        })
+        .catch(function (err) { alert('Face restore request failed: ' + err); });
+    }
+
+    function onFaceProgress(msg) {
+        var d = msg.data || msg;
+        if (activeFaceJobId && d.job_id !== activeFaceJobId) return;
+        faceProgressPercent = d.percent || 0;
+        renderTimeline();
+    }
+
+    function onFaceComplete(msg) {
+        var d = msg.data || msg;
+        if (activeFaceJobId && d.job_id !== activeFaceJobId) return;
+
+        if (d.clip_id && d.output_path) {
+            var info = findClipById(d.clip_id);
+            if (info) {
+                info.clip.source_path = d.output_path;
+                info.clip.face_restored = true;
+            }
+        }
+
+        cleanupFaceState();
+        renderTimeline();
+        scheduleAutosave();
+    }
+
+    function onFaceError(msg) {
+        var d = msg.data || msg;
+        if (activeFaceJobId && d.job_id !== activeFaceJobId) return;
+        cleanupFaceState();
+        renderTimeline();
+        alert('Face restoration failed: ' + (d.error || 'Unknown error'));
+    }
+
+    function cleanupFaceState() {
+        activeFaceJobId = null;
+        faceProcessingClipId = null;
+        faceProgressPercent = 0;
+        if (typeof SerenityWS !== 'undefined') {
+            SerenityWS.off('face_restore_progress', onFaceProgress);
+            SerenityWS.off('face_restore_complete', onFaceComplete);
+            SerenityWS.off('face_restore_error', onFaceError);
+        }
+    }
+
+    // ===== V9: Real-ESRGAN Upscale =====
+
+    function showEsrganDialog(clipId) {
+        fetch(getApiBase() + '/video_edit/esrgan/status')
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (!data.available) {
+                    alert('Real-ESRGAN model not found.\nPlace RealESRGAN_x4plus.pth in:\n' + (data.model_path || 'models/esrgan/'));
+                    return;
+                }
+                if (data.processing) {
+                    alert('ESRGAN is already processing another clip.');
+                    return;
+                }
+                _buildEsrganDialog(clipId);
+            })
+            .catch(function (err) { alert('Could not check ESRGAN status: ' + err); });
+    }
+
+    function _buildEsrganDialog(clipId) {
+        if (esrganDialogEl) esrganDialogEl.remove();
+
+        var info = findClipById(clipId);
+        var srcW = info && info.clip.source_width ? info.clip.source_width : '?';
+        var srcH = info && info.clip.source_height ? info.clip.source_height : '?';
+
+        var overlay = document.createElement('div');
+        overlay.className = 've-esrgan-overlay';
+        overlay.innerHTML =
+            '<div class="ve-esrgan-dialog">' +
+                '<div class="ve-esrgan-header">' +
+                    '<span>Upscale with Real-ESRGAN</span>' +
+                    '<span class="ve-esrgan-close">\u00D7</span>' +
+                '</div>' +
+                '<div class="ve-esrgan-body">' +
+                    '<div class="ve-esrgan-radio-row">' +
+                        '<label>Scale:</label>' +
+                        '<label><input type="radio" name="esrgan-scale" value="2" checked /> 2\u00D7</label>' +
+                        '<label><input type="radio" name="esrgan-scale" value="4" /> 4\u00D7</label>' +
+                    '</div>' +
+                    '<div class="ve-esrgan-output-info">Output: ' + srcW + '\u00D7' + srcH + ' \u2192 <span class="ve-esrgan-out-dims">' + (srcW !== '?' ? srcW * 2 : '?') + '\u00D7' + (srcH !== '?' ? srcH * 2 : '?') + '</span></div>' +
+                    '<div class="ve-esrgan-quality-row">' +
+                        '<label>Quality:</label>' +
+                        '<select class="ve-esrgan-quality">' +
+                            '<option value="0">Fast (whole frame)</option>' +
+                            '<option value="512" selected>Balanced (512 tile)</option>' +
+                            '<option value="256">Safe (256 tile)</option>' +
+                        '</select>' +
+                    '</div>' +
+                    '<div class="ve-esrgan-warning">\u26A0 Output file will be larger. 4\u00D7 upscale is slow (~2-5 sec/frame).</div>' +
+                    '<div class="ve-esrgan-preview-area"><img class="ve-esrgan-preview-img" style="display:none" /></div>' +
+                    '<div class="ve-esrgan-actions">' +
+                        '<button class="ve-esrgan-btn ve-esrgan-btn-preview">Preview</button>' +
+                        '<button class="ve-esrgan-btn ve-esrgan-btn-secondary ve-esrgan-btn-cancel">Cancel</button>' +
+                        '<button class="ve-esrgan-btn ve-esrgan-btn-primary ve-esrgan-btn-start">Start</button>' +
+                    '</div>' +
+                '</div>' +
+            '</div>';
+
+        document.body.appendChild(overlay);
+        esrganDialogEl = overlay;
+
+        // Update output dimensions when scale changes
+        var radios = overlay.querySelectorAll('input[name="esrgan-scale"]');
+        var outDims = overlay.querySelector('.ve-esrgan-out-dims');
+        radios.forEach(function (r) {
+            r.addEventListener('change', function () {
+                var s = parseInt(r.value);
+                if (srcW !== '?' && srcH !== '?') {
+                    outDims.textContent = (srcW * s) + '\u00D7' + (srcH * s);
+                }
+            });
+        });
+
+        overlay.querySelector('.ve-esrgan-close').addEventListener('click', function () {
+            overlay.remove();
+            esrganDialogEl = null;
+        });
+
+        overlay.querySelector('.ve-esrgan-btn-cancel').addEventListener('click', function () {
+            overlay.remove();
+            esrganDialogEl = null;
+        });
+
+        overlay.querySelector('.ve-esrgan-btn-preview').addEventListener('click', function () {
+            var scale = parseInt(overlay.querySelector('input[name="esrgan-scale"]:checked').value);
+            var tile = parseInt(overlay.querySelector('.ve-esrgan-quality').value);
+            var btn = overlay.querySelector('.ve-esrgan-btn-preview');
+            btn.textContent = 'Loading...';
+            btn.disabled = true;
+            fetch(getApiBase() + '/video_edit/esrgan/preview', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: projectId,
+                    clip_id: clipId,
+                    seek_sec: 0,
+                    scale: scale,
+                    tile_size: tile,
+                }),
+            })
+            .then(function (r) {
+                if (!r.ok) throw new Error('Preview failed');
+                return r.blob();
+            })
+            .then(function (blob) {
+                var img = overlay.querySelector('.ve-esrgan-preview-img');
+                if (img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+                img.src = URL.createObjectURL(blob);
+                img.style.display = 'block';
+                btn.textContent = 'Preview';
+                btn.disabled = false;
+            })
+            .catch(function (err) {
+                btn.textContent = 'Preview';
+                btn.disabled = false;
+                alert('Preview failed: ' + err);
+            });
+        });
+
+        overlay.querySelector('.ve-esrgan-btn-start').addEventListener('click', function () {
+            var scale = parseInt(overlay.querySelector('input[name="esrgan-scale"]:checked').value);
+            var tile = parseInt(overlay.querySelector('.ve-esrgan-quality').value);
+            overlay.remove();
+            esrganDialogEl = null;
+            startEsrganUpscale(clipId, scale, tile);
+        });
+    }
+
+    function startEsrganUpscale(clipId, scale, tileSize) {
+        fetch(getApiBase() + '/video_edit/esrgan/upscale', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                project_id: projectId,
+                clip_id: clipId,
+                scale: scale,
+                tile_size: tileSize,
+            }),
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+            if (res.error) {
+                alert('ESRGAN error: ' + res.error);
+                return;
+            }
+            activeEsrganJobId = res.job_id;
+            esrganProcessingClipId = clipId;
+            esrganProgressPercent = 0;
+            renderTimeline();
+
+            if (typeof SerenityWS !== 'undefined') {
+                SerenityWS.on('esrgan_progress', onEsrganProgress);
+                SerenityWS.on('esrgan_complete', onEsrganComplete);
+                SerenityWS.on('esrgan_error', onEsrganError);
+            }
+        })
+        .catch(function (err) { alert('ESRGAN request failed: ' + err); });
+    }
+
+    function onEsrganProgress(msg) {
+        var d = msg.data || msg;
+        if (activeEsrganJobId && d.job_id !== activeEsrganJobId) return;
+        esrganProgressPercent = d.percent || 0;
+        renderTimeline();
+    }
+
+    function onEsrganComplete(msg) {
+        var d = msg.data || msg;
+        if (activeEsrganJobId && d.job_id !== activeEsrganJobId) return;
+
+        if (d.clip_id && d.output_path) {
+            var info = findClipById(d.clip_id);
+            if (info) {
+                info.clip.source_path = d.output_path;
+                info.clip.esrgan_scale = d.scale;
+                info.clip.esrgan_output = d.output_path;
+            }
+        }
+
+        cleanupEsrganState();
+        renderTimeline();
+        scheduleAutosave();
+    }
+
+    function onEsrganError(msg) {
+        var d = msg.data || msg;
+        if (activeEsrganJobId && d.job_id !== activeEsrganJobId) return;
+        cleanupEsrganState();
+        renderTimeline();
+        alert('Upscale failed: ' + (d.error || 'Unknown error'));
+    }
+
+    function cleanupEsrganState() {
+        activeEsrganJobId = null;
+        esrganProcessingClipId = null;
+        esrganProgressPercent = 0;
+        if (typeof SerenityWS !== 'undefined') {
+            SerenityWS.off('esrgan_progress', onEsrganProgress);
+            SerenityWS.off('esrgan_complete', onEsrganComplete);
+            SerenityWS.off('esrgan_error', onEsrganError);
+        }
+    }
+
+    // ===== V10: Deflicker =====
+
+    function showDeflickerDialog(clipId) {
+        if (deflickerDialogEl) deflickerDialogEl.remove();
+
+        var overlay = document.createElement('div');
+        overlay.className = 've-deflicker-overlay';
+        overlay.innerHTML =
+            '<div class="ve-deflicker-dialog">' +
+                '<div class="ve-deflicker-header">' +
+                    '<span>Deflicker</span>' +
+                    '<span class="ve-deflicker-close">\u00D7</span>' +
+                '</div>' +
+                '<div class="ve-deflicker-body">' +
+                    '<div class="ve-deflicker-mode-row">' +
+                        '<label><input type="radio" name="df-mode" value="light" checked /> Light \u2014 ffmpeg filter, instant</label>' +
+                        '<label><input type="radio" name="df-mode" value="medium" /> Medium \u2014 histogram matching, fast</label>' +
+                        '<label><input type="radio" name="df-mode" value="heavy" /> Heavy \u2014 optical flow blend, slow</label>' +
+                    '</div>' +
+                    '<div class="ve-deflicker-settings ve-deflicker-light-settings">' +
+                        '<div class="ve-deflicker-slider-row"><label>Window:</label>' +
+                            '<input type="range" class="df-window" min="3" max="15" step="2" value="5" />' +
+                            '<span class="ve-deflicker-val df-window-val">5</span>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="ve-deflicker-settings ve-deflicker-medium-settings" style="display:none">' +
+                        '<div class="ve-deflicker-slider-row"><label>Strength:</label>' +
+                            '<input type="range" class="df-strength" min="0" max="1" step="0.05" value="0.7" />' +
+                            '<span class="ve-deflicker-val df-strength-val">0.70</span>' +
+                        '</div>' +
+                        '<div class="ve-deflicker-slider-row"><label>EMA Decay:</label>' +
+                            '<input type="range" class="df-ema" min="0.5" max="0.99" step="0.01" value="0.85" />' +
+                            '<span class="ve-deflicker-val df-ema-val">0.85</span>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="ve-deflicker-settings ve-deflicker-heavy-settings" style="display:none">' +
+                        '<div class="ve-deflicker-slider-row"><label>Blend Alpha:</label>' +
+                            '<input type="range" class="df-alpha" min="0.05" max="0.3" step="0.01" value="0.15" />' +
+                            '<span class="ve-deflicker-val df-alpha-val">0.15</span>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="ve-deflicker-actions">' +
+                        '<button class="ve-deflicker-btn ve-deflicker-btn-secondary ve-deflicker-btn-cancel">Cancel</button>' +
+                        '<button class="ve-deflicker-btn ve-deflicker-btn-primary ve-deflicker-btn-start">Start</button>' +
+                    '</div>' +
+                '</div>' +
+            '</div>';
+
+        document.body.appendChild(overlay);
+        deflickerDialogEl = overlay;
+
+        // Wire mode radio to show/hide settings
+        var radios = overlay.querySelectorAll('input[name="df-mode"]');
+        radios.forEach(function (r) {
+            r.addEventListener('change', function () {
+                overlay.querySelector('.ve-deflicker-light-settings').style.display = r.value === 'light' ? '' : 'none';
+                overlay.querySelector('.ve-deflicker-medium-settings').style.display = r.value === 'medium' ? '' : 'none';
+                overlay.querySelector('.ve-deflicker-heavy-settings').style.display = r.value === 'heavy' ? '' : 'none';
+            });
+        });
+
+        // Wire sliders to value display
+        var windowSlider = overlay.querySelector('.df-window');
+        windowSlider.addEventListener('input', function () {
+            overlay.querySelector('.df-window-val').textContent = windowSlider.value;
+        });
+        var strengthSlider = overlay.querySelector('.df-strength');
+        strengthSlider.addEventListener('input', function () {
+            overlay.querySelector('.df-strength-val').textContent = parseFloat(strengthSlider.value).toFixed(2);
+        });
+        var emaSlider = overlay.querySelector('.df-ema');
+        emaSlider.addEventListener('input', function () {
+            overlay.querySelector('.df-ema-val').textContent = parseFloat(emaSlider.value).toFixed(2);
+        });
+        var alphaSlider = overlay.querySelector('.df-alpha');
+        alphaSlider.addEventListener('input', function () {
+            overlay.querySelector('.df-alpha-val').textContent = parseFloat(alphaSlider.value).toFixed(2);
+        });
+
+        overlay.querySelector('.ve-deflicker-close').addEventListener('click', function () {
+            overlay.remove(); deflickerDialogEl = null;
+        });
+        overlay.querySelector('.ve-deflicker-btn-cancel').addEventListener('click', function () {
+            overlay.remove(); deflickerDialogEl = null;
+        });
+
+        overlay.querySelector('.ve-deflicker-btn-start').addEventListener('click', function () {
+            var mode = overlay.querySelector('input[name="df-mode"]:checked').value;
+            var params = { mode: mode };
+            if (mode === 'light') params.window = parseInt(windowSlider.value);
+            if (mode === 'medium') {
+                params.strength = parseFloat(strengthSlider.value);
+                params.ema_decay = parseFloat(emaSlider.value);
+            }
+            if (mode === 'heavy') params.blend_alpha = parseFloat(alphaSlider.value);
+            overlay.remove(); deflickerDialogEl = null;
+            startDeflicker(clipId, params);
+        });
+    }
+
+    function startDeflicker(clipId, params) {
+        var body = {
+            project_id: projectId,
+            clip_id: clipId,
+        };
+        for (var k in params) body[k] = params[k];
+
+        fetch(getApiBase() + '/video_edit/deflicker', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+            if (res.error) {
+                alert('Deflicker error: ' + res.error);
+                return;
+            }
+            activeDeflickerJobId = res.job_id;
+            deflickerProcessingClipId = clipId;
+            deflickerProgressPercent = 0;
+            renderTimeline();
+
+            if (typeof SerenityWS !== 'undefined') {
+                SerenityWS.on('deflicker_progress', onDeflickerProgress);
+                SerenityWS.on('deflicker_complete', onDeflickerComplete);
+                SerenityWS.on('deflicker_error', onDeflickerError);
+            }
+        })
+        .catch(function (err) { alert('Deflicker request failed: ' + err); });
+    }
+
+    function onDeflickerProgress(msg) {
+        var d = msg.data || msg;
+        if (activeDeflickerJobId && d.job_id !== activeDeflickerJobId) return;
+        deflickerProgressPercent = d.percent || 0;
+        renderTimeline();
+    }
+
+    function onDeflickerComplete(msg) {
+        var d = msg.data || msg;
+        if (activeDeflickerJobId && d.job_id !== activeDeflickerJobId) return;
+
+        if (d.clip_id && d.output_path) {
+            var info = findClipById(d.clip_id);
+            if (info) {
+                info.clip.source_path = d.output_path;
+                info.clip.deflickered = d.mode;
+            }
+        }
+
+        cleanupDeflickerState();
+        renderTimeline();
+        scheduleAutosave();
+    }
+
+    function onDeflickerError(msg) {
+        var d = msg.data || msg;
+        if (activeDeflickerJobId && d.job_id !== activeDeflickerJobId) return;
+        cleanupDeflickerState();
+        renderTimeline();
+        alert('Deflicker failed: ' + (d.error || 'Unknown error'));
+    }
+
+    function cleanupDeflickerState() {
+        activeDeflickerJobId = null;
+        deflickerProcessingClipId = null;
+        deflickerProgressPercent = 0;
+        if (typeof SerenityWS !== 'undefined') {
+            SerenityWS.off('deflicker_progress', onDeflickerProgress);
+            SerenityWS.off('deflicker_complete', onDeflickerComplete);
+            SerenityWS.off('deflicker_error', onDeflickerError);
+        }
+    }
+
+    // ===== V11: Audio Enhancement =====
+
+    function showAudioEnhanceDialog(clipId) {
+        if (audioDialogEl) audioDialogEl.remove();
+
+        function buildDialog(presets) {
+            var overlay = document.createElement('div');
+            overlay.className = 've-audio-overlay';
+
+            var ffKeys = Object.keys(presets.ffmpeg);
+            var optionsHtml = ffKeys.map(function (k) {
+                return '<option value="' + k + '"' + (k === 'clean_speech' ? ' selected' : '') + '>' + presets.ffmpeg[k].name + '</option>';
+            }).join('');
+
+            var dfAvail = presets.deepfilter && presets.deepfilter.available;
+
+            overlay.innerHTML =
+                '<div class="ve-audio-dialog">' +
+                    '<div class="ve-audio-header">' +
+                        '<span>Enhance Audio</span>' +
+                        '<span class="ve-audio-close">\u00D7</span>' +
+                    '</div>' +
+                    '<div class="ve-audio-body">' +
+                        '<div class="ve-audio-mode-row">' +
+                            '<label><input type="radio" name="audio-mode" value="ffmpeg" checked /> ffmpeg Presets</label>' +
+                            '<label><input type="radio" name="audio-mode" value="deepfilter" ' + (dfAvail ? '' : 'disabled') + ' /> AI (DeepFilter)' + (dfAvail ? '' : ' <span style="color:#888">(not installed)</span>') + '</label>' +
+                        '</div>' +
+                        '<div class="ve-audio-settings ve-audio-ffmpeg-settings">' +
+                            '<div class="ve-audio-preset-row">' +
+                                '<label>Preset:</label>' +
+                                '<select class="ve-audio-preset">' + optionsHtml + '</select>' +
+                            '</div>' +
+                            '<div class="ve-audio-desc">' + (presets.ffmpeg.clean_speech ? presets.ffmpeg.clean_speech.description : '') + '</div>' +
+                        '</div>' +
+                        '<div class="ve-audio-settings ve-audio-df-settings" style="display:none">' +
+                            '<div class="ve-audio-desc">AI-powered speech enhancement. Removes background noise, reverb, and non-speech sounds while preserving voice quality.' + (dfAvail ? '' : '<br><br><code>pip install deepfilternet</code>') + '</div>' +
+                        '</div>' +
+                        '<div class="ve-audio-actions">' +
+                            '<button class="ve-audio-btn ve-audio-btn-preview">Preview 5s</button>' +
+                            '<button class="ve-audio-btn ve-audio-btn-secondary ve-audio-btn-cancel">Cancel</button>' +
+                            '<button class="ve-audio-btn ve-audio-btn-primary ve-audio-btn-apply">Apply</button>' +
+                        '</div>' +
+                    '</div>' +
+                '</div>';
+
+            document.body.appendChild(overlay);
+            audioDialogEl = overlay;
+
+            // Mode toggle
+            var radios = overlay.querySelectorAll('input[name="audio-mode"]');
+            radios.forEach(function (r) {
+                r.addEventListener('change', function () {
+                    overlay.querySelector('.ve-audio-ffmpeg-settings').style.display = r.value === 'ffmpeg' ? '' : 'none';
+                    overlay.querySelector('.ve-audio-df-settings').style.display = r.value === 'deepfilter' ? '' : 'none';
+                });
+            });
+
+            // Preset change updates description
+            var presetSelect = overlay.querySelector('.ve-audio-preset');
+            var descEl = overlay.querySelector('.ve-audio-ffmpeg-settings .ve-audio-desc');
+            presetSelect.addEventListener('change', function () {
+                var p = presets.ffmpeg[presetSelect.value];
+                descEl.textContent = p ? p.description : '';
+            });
+
+            overlay.querySelector('.ve-audio-close').addEventListener('click', function () {
+                overlay.remove(); audioDialogEl = null;
+            });
+            overlay.querySelector('.ve-audio-btn-cancel').addEventListener('click', function () {
+                overlay.remove(); audioDialogEl = null;
+            });
+
+            // Preview 5s
+            overlay.querySelector('.ve-audio-btn-preview').addEventListener('click', function () {
+                var btn = overlay.querySelector('.ve-audio-btn-preview');
+                btn.textContent = 'Loading...';
+                btn.disabled = true;
+                fetch(getApiBase() + '/video_edit/audio/preview', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        project_id: projectId,
+                        clip_id: clipId,
+                        preset: presetSelect.value,
+                        duration: 5,
+                    }),
+                })
+                .then(function (r) {
+                    if (!r.ok) throw new Error('Preview failed');
+                    return r.blob();
+                })
+                .then(function (blob) {
+                    var url = URL.createObjectURL(blob);
+                    var audio = new Audio(url);
+                    audio.addEventListener('ended', function () { URL.revokeObjectURL(url); });
+                    audio.play();
+                    btn.textContent = 'Preview 5s';
+                    btn.disabled = false;
+                })
+                .catch(function (err) {
+                    btn.textContent = 'Preview 5s';
+                    btn.disabled = false;
+                    alert('Preview failed: ' + err);
+                });
+            });
+
+            // Apply
+            overlay.querySelector('.ve-audio-btn-apply').addEventListener('click', function () {
+                var mode = overlay.querySelector('input[name="audio-mode"]:checked').value;
+                var preset = presetSelect.value;
+                overlay.remove(); audioDialogEl = null;
+                startAudioEnhance(clipId, mode, preset);
+            });
+        }
+
+        // Fetch presets (cache after first load)
+        if (audioPresetsCache) {
+            buildDialog(audioPresetsCache);
+        } else {
+            fetch(getApiBase() + '/video_edit/audio/presets')
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    audioPresetsCache = data;
+                    buildDialog(data);
+                })
+                .catch(function (err) { alert('Could not load audio presets: ' + err); });
+        }
+    }
+
+    function startAudioEnhance(clipId, mode, preset) {
+        fetch(getApiBase() + '/video_edit/audio/enhance', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                project_id: projectId,
+                clip_id: clipId,
+                mode: mode,
+                preset: preset,
+            }),
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+            if (res.error) {
+                alert('Audio enhance error: ' + res.error);
+                return;
+            }
+            activeAudioJobId = res.job_id;
+            audioProcessingClipId = clipId;
+            audioProgressPercent = 0;
+            renderTimeline();
+
+            if (typeof SerenityWS !== 'undefined') {
+                SerenityWS.on('audio_enhance_progress', onAudioProgress);
+                SerenityWS.on('audio_enhance_complete', onAudioComplete);
+                SerenityWS.on('audio_enhance_error', onAudioError);
+            }
+        })
+        .catch(function (err) { alert('Audio enhance request failed: ' + err); });
+    }
+
+    function onAudioProgress(msg) {
+        var d = msg.data || msg;
+        if (activeAudioJobId && d.job_id !== activeAudioJobId) return;
+        audioProgressPercent = d.percent || 0;
+        renderTimeline();
+    }
+
+    function onAudioComplete(msg) {
+        var d = msg.data || msg;
+        if (activeAudioJobId && d.job_id !== activeAudioJobId) return;
+
+        if (d.clip_id && d.output_path) {
+            var info = findClipById(d.clip_id);
+            if (info) {
+                info.clip.source_path = d.output_path;
+                info.clip.audio_enhanced = d.preset;
+            }
+        }
+
+        cleanupAudioState();
+        renderTimeline();
+        scheduleAutosave();
+    }
+
+    function onAudioError(msg) {
+        var d = msg.data || msg;
+        if (activeAudioJobId && d.job_id !== activeAudioJobId) return;
+        cleanupAudioState();
+        renderTimeline();
+        alert('Audio enhancement failed: ' + (d.error || 'Unknown error'));
+    }
+
+    function cleanupAudioState() {
+        activeAudioJobId = null;
+        audioProcessingClipId = null;
+        audioProgressPercent = 0;
+        if (typeof SerenityWS !== 'undefined') {
+            SerenityWS.off('audio_enhance_progress', onAudioProgress);
+            SerenityWS.off('audio_enhance_complete', onAudioComplete);
+            SerenityWS.off('audio_enhance_error', onAudioError);
+        }
+    }
+
     function renderTracks() {
         timelineLayer.destroyChildren();
 
@@ -2783,6 +3602,203 @@ var VideoEditTab = (function () {
                             fontSize: 9, fill: '#ccc', fontFamily: 'sans-serif',
                             listening: false,
                         }));
+                    }
+
+                    // V8: Face restoration processing overlay
+                    if (faceProcessingClipId === clip.id) {
+                        group.add(new Konva.Rect({
+                            x: -rectOffset, y: 0,
+                            width: clipW, height: clipH,
+                            fill: '#f07c6f', opacity: 0.18,
+                            cornerRadius: 4, listening: false,
+                        }));
+                        var fBarY = clipH / 2 - 3;
+                        var fBarW = Math.max(20, clipW - 20);
+                        group.add(new Konva.Rect({
+                            x: 10 - rectOffset, y: fBarY,
+                            width: fBarW, height: 6,
+                            fill: 'rgba(0,0,0,0.5)', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        var fFillW = Math.max(0, fBarW * faceProgressPercent / 100);
+                        group.add(new Konva.Rect({
+                            x: 10 - rectOffset, y: fBarY,
+                            width: fFillW, height: 6,
+                            fill: '#f07c6f', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        group.add(new Konva.Text({
+                            x: clipW / 2 - rectOffset - 40, y: fBarY + 9,
+                            text: 'Faces ' + faceProgressPercent + '%',
+                            fontSize: 9, fill: '#ccc', fontFamily: 'sans-serif',
+                            listening: false,
+                        }));
+                    }
+
+                    // V8: Face restored badge
+                    if (clip.face_restored && faceProcessingClipId !== clip.id) {
+                        var faceBadgeW = 30;
+                        group.add(new Konva.Rect({
+                            x: badgeOffsetX - rectOffset, y: clipH - 14,
+                            width: faceBadgeW, height: 12,
+                            fill: 'rgba(0,0,0,0.55)', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        group.add(new Konva.Text({
+                            x: badgeOffsetX + 2 - rectOffset, y: clipH - 13,
+                            text: 'FACE',
+                            fontSize: 9, fill: '#f0a06f', fontFamily: 'sans-serif',
+                            fontStyle: 'bold', listening: false,
+                        }));
+                        badgeOffsetX += faceBadgeW + 3;
+                    }
+
+                    // V9: ESRGAN processing overlay
+                    if (esrganProcessingClipId === clip.id) {
+                        group.add(new Konva.Rect({
+                            x: -rectOffset, y: 0,
+                            width: clipW, height: clipH,
+                            fill: '#6fc8f0', opacity: 0.18,
+                            cornerRadius: 4, listening: false,
+                        }));
+                        var eBarY = clipH / 2 - 3;
+                        var eBarW = Math.max(20, clipW - 20);
+                        group.add(new Konva.Rect({
+                            x: 10 - rectOffset, y: eBarY,
+                            width: eBarW, height: 6,
+                            fill: 'rgba(0,0,0,0.5)', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        var eFillW = Math.max(0, eBarW * esrganProgressPercent / 100);
+                        group.add(new Konva.Rect({
+                            x: 10 - rectOffset, y: eBarY,
+                            width: eFillW, height: 6,
+                            fill: '#6fc8f0', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        group.add(new Konva.Text({
+                            x: clipW / 2 - rectOffset - 40, y: eBarY + 9,
+                            text: 'Upscale ' + esrganProgressPercent + '%',
+                            fontSize: 9, fill: '#ccc', fontFamily: 'sans-serif',
+                            listening: false,
+                        }));
+                    }
+
+                    // V9: ESRGAN upscale badge
+                    if (clip.esrgan_scale && esrganProcessingClipId !== clip.id) {
+                        var esrganBadgeText = clip.esrgan_scale + '\u00D7';
+                        var esrganBadgeW = esrganBadgeText.length * 6 + 8;
+                        group.add(new Konva.Rect({
+                            x: badgeOffsetX - rectOffset, y: clipH - 14,
+                            width: esrganBadgeW, height: 12,
+                            fill: 'rgba(0,0,0,0.55)', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        group.add(new Konva.Text({
+                            x: badgeOffsetX + 2 - rectOffset, y: clipH - 13,
+                            text: esrganBadgeText,
+                            fontSize: 9, fill: '#6fc8f0', fontFamily: 'sans-serif',
+                            fontStyle: 'bold', listening: false,
+                        }));
+                        badgeOffsetX += esrganBadgeW + 3;
+                    }
+
+                    // V10: Deflicker processing overlay
+                    if (deflickerProcessingClipId === clip.id) {
+                        group.add(new Konva.Rect({
+                            x: -rectOffset, y: 0,
+                            width: clipW, height: clipH,
+                            fill: '#a0d468', opacity: 0.18,
+                            cornerRadius: 4, listening: false,
+                        }));
+                        var dBarY = clipH / 2 - 3;
+                        var dBarW = Math.max(20, clipW - 20);
+                        group.add(new Konva.Rect({
+                            x: 10 - rectOffset, y: dBarY,
+                            width: dBarW, height: 6,
+                            fill: 'rgba(0,0,0,0.5)', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        var dFillW = Math.max(0, dBarW * deflickerProgressPercent / 100);
+                        group.add(new Konva.Rect({
+                            x: 10 - rectOffset, y: dBarY,
+                            width: dFillW, height: 6,
+                            fill: '#a0d468', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        group.add(new Konva.Text({
+                            x: clipW / 2 - rectOffset - 40, y: dBarY + 9,
+                            text: 'Deflicker ' + deflickerProgressPercent + '%',
+                            fontSize: 9, fill: '#ccc', fontFamily: 'sans-serif',
+                            listening: false,
+                        }));
+                    }
+
+                    // V10: Deflicker badge
+                    if (clip.deflickered && deflickerProcessingClipId !== clip.id) {
+                        var dfBadgeW = 24;
+                        group.add(new Konva.Rect({
+                            x: badgeOffsetX - rectOffset, y: clipH - 14,
+                            width: dfBadgeW, height: 12,
+                            fill: 'rgba(0,0,0,0.55)', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        group.add(new Konva.Text({
+                            x: badgeOffsetX + 2 - rectOffset, y: clipH - 13,
+                            text: 'DF',
+                            fontSize: 9, fill: '#a0d468', fontFamily: 'sans-serif',
+                            fontStyle: 'bold', listening: false,
+                        }));
+                        badgeOffsetX += dfBadgeW + 3;
+                    }
+
+                    // V11: Audio enhancement processing overlay
+                    if (audioProcessingClipId === clip.id) {
+                        group.add(new Konva.Rect({
+                            x: -rectOffset, y: 0,
+                            width: clipW, height: clipH,
+                            fill: '#d4a0e8', opacity: 0.18,
+                            cornerRadius: 4, listening: false,
+                        }));
+                        var aBarY = clipH / 2 - 3;
+                        var aBarW = Math.max(20, clipW - 20);
+                        group.add(new Konva.Rect({
+                            x: 10 - rectOffset, y: aBarY,
+                            width: aBarW, height: 6,
+                            fill: 'rgba(0,0,0,0.5)', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        var aFillW = Math.max(0, aBarW * audioProgressPercent / 100);
+                        group.add(new Konva.Rect({
+                            x: 10 - rectOffset, y: aBarY,
+                            width: aFillW, height: 6,
+                            fill: '#d4a0e8', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        group.add(new Konva.Text({
+                            x: clipW / 2 - rectOffset - 40, y: aBarY + 9,
+                            text: 'Audio ' + audioProgressPercent + '%',
+                            fontSize: 9, fill: '#ccc', fontFamily: 'sans-serif',
+                            listening: false,
+                        }));
+                    }
+
+                    // V11: Audio enhanced badge
+                    if (clip.audio_enhanced && audioProcessingClipId !== clip.id) {
+                        var audioBadgeW = 28;
+                        group.add(new Konva.Rect({
+                            x: badgeOffsetX - rectOffset, y: clipH - 14,
+                            width: audioBadgeW, height: 12,
+                            fill: 'rgba(0,0,0,0.55)', cornerRadius: 3,
+                            listening: false,
+                        }));
+                        group.add(new Konva.Text({
+                            x: badgeOffsetX + 2 - rectOffset, y: clipH - 13,
+                            text: '\u266A',
+                            fontSize: 9, fill: '#d4a0e8', fontFamily: 'sans-serif',
+                            fontStyle: 'bold', listening: false,
+                        }));
+                        badgeOffsetX += audioBadgeW + 3;
                     }
 
                     // V6: Transition-in indicator
@@ -3228,6 +4244,10 @@ var VideoEditTab = (function () {
                     menuItems.push({ separator: true });
                     menuItems.push({ label: 'Interpolate 2\u00D7 (RIFE)', action: 'rife-2x' });
                     menuItems.push({ label: 'Interpolate 4\u00D7 (RIFE)', action: 'rife-4x' });
+                    menuItems.push({ label: 'Restore Faces...', action: 'face-restore' });
+                    menuItems.push({ label: 'Upscale (Real-ESRGAN)...', action: 'esrgan-upscale' });
+                    menuItems.push({ label: 'Deflicker...', action: 'deflicker' });
+                    menuItems.push({ label: 'Enhance Audio...', action: 'audio-enhance' });
                 }
                 menuItems.push({ separator: true });
                 menuItems.push({ label: 'Properties...', action: 'properties' });
