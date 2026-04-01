@@ -2,53 +2,51 @@
     "1": {
         "class_type": "UNETLoader",
         "inputs": {
-            "unet_name": "flux2-dev.safetensors",
+            "unet_name": "sd3.5_large.safetensors",
             "weight_dtype": "default"
         },
-        "_meta": {"title": "Load UNet - Flux 2 Dev"}
+        "_meta": {"title": "Load SD3.5 Large"}
     },
     "2": {
-        "class_type": "DualCLIPLoader",
+        "class_type": "TripleCLIPLoader",
         "inputs": {
             "clip_name1": "clip_l.safetensors",
-            "clip_name2": "t5xxl_fp16.safetensors",
-            "type": "flux",
-            "device": "default"
+            "clip_name2": "clip_g.safetensors",
+            "clip_name3": "t5xxl_fp16.safetensors"
         },
-        "_meta": {"title": "Load Dual CLIP - Flux 2 Dev"}
+        "_meta": {"title": "Load CLIP-L + CLIP-G + T5-XXL"}
     },
     "3": {
         "class_type": "VAELoader",
         "inputs": {
-            "vae_name": "ae.safetensors"
+            "vae_name": "OfficialStableDiffusion/sd35_vae.safetensors"
         },
         "_meta": {"title": "Load VAE"}
     },
     "4": {
-        "class_type": "CLIPTextEncodeFlux",
+        "class_type": "CLIPTextEncode",
         "inputs": {
             "clip": ["2", 0],
-            "clip_l": "beautiful photograph of a mountain lake at sunset",
-            "t5xxl": "A serene mountain lake with golden sunset light reflecting off the calm water, surrounded by snow-capped peaks",
-            "guidance": 3.5
+            "text": "a cat sitting on a windowsill, golden hour sunlight, photorealistic"
         },
-        "_meta": {"title": "CLIP Text Encode Flux 2 Dev - Positive"}
+        "_meta": {"title": "Positive Prompt"}
     },
     "5": {
-        "class_type": "ConditioningZeroOut",
+        "class_type": "CLIPTextEncode",
         "inputs": {
-            "conditioning": ["4", 0]
+            "clip": ["2", 0],
+            "text": ""
         },
-        "_meta": {"title": "Conditioning Zero Out - Negative"}
+        "_meta": {"title": "Negative Prompt"}
     },
     "6": {
-        "class_type": "EmptyFlux2LatentImage",
+        "class_type": "EmptySD3LatentImage",
         "inputs": {
             "width": 1024,
             "height": 1024,
             "batch_size": 1
         },
-        "_meta": {"title": "Empty SD3 Latent Image"}
+        "_meta": {"title": "Empty Latent"}
     },
     "7": {
         "class_type": "KSampler",
@@ -59,9 +57,9 @@
             "latent_image": ["6", 0],
             "seed": 42,
             "steps": 20,
-            "cfg": 1,
+            "cfg": 4.0,
             "sampler_name": "euler",
-            "scheduler": "simple",
+            "scheduler": "sgm_uniform",
             "denoise": 1.0
         },
         "_meta": {"title": "KSampler"}
@@ -78,7 +76,7 @@
         "class_type": "SaveImage",
         "inputs": {
             "images": ["8", 0],
-            "filename_prefix": "flux2_dev"
+            "filename_prefix": "sd35_test"
         },
         "_meta": {"title": "Save Image"}
     }
