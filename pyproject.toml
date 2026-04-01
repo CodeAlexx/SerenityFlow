@@ -17,10 +17,11 @@ dependencies = [
 
 [project.optional-dependencies]
 stagehand = ["stagehand"]
+mcp = ["mcp>=1.0.0", "httpx"]
 dev = ["pytest", "httpx", "aiohttp"]
 
 [project.scripts]
 serenityflow = "serenityflow.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["serenityflow*"]
+include = ["serenityflow*", "serenityflow_mcp*"]
