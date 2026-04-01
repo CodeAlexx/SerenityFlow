@@ -84,6 +84,18 @@ def run_workflow(args):
     from serenityflow.bridge.model_paths import get_model_paths
     get_model_paths(args.model_dir)
 
+    # Sync folder_paths output/input dirs so SaveImage writes to the right place
+    output_dir = os.path.realpath(getattr(args, "output_dir", "output"))
+    input_dir = os.path.realpath(getattr(args, "input_dir", "input"))
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(input_dir, exist_ok=True)
+    try:
+        import folder_paths
+        folder_paths.set_output_directory(output_dir)
+        folder_paths.set_input_directory(input_dir)
+    except (ImportError, AttributeError):
+        pass
+
     log = logging.getLogger("serenityflow")
 
     # Parse workflow
