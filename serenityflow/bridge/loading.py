@@ -257,8 +257,10 @@ def load_diffusion_model(path: str, dtype: str = "default") -> nn.Module:
 
         # Try Stagehand coordinator first (async prefetch with pinned pool).
         # Stagehand and legacy hooks are mutually exclusive — never both.
+        # Always try Stagehand for large models — even if the model alone fits,
+        # text encoders + VAE need VRAM too. Stagehand streams blocks on demand.
         stagehand_runtime = None
-        if model_size > gpu_budget:
+        if model_size > 2 * (1024**3):  # 2GB+ models qualify
             try:
                 from serenityflow.memory.coordinator import get_coordinator
                 coord = get_coordinator()
@@ -282,7 +284,19 @@ def load_diffusion_model(path: str, dtype: str = "default") -> nn.Module:
                 if id(p) not in block_param_ids:
                     non_block_bytes += p.data.nbytes
                     p.data = p.data.to(device, non_blocking=True)
-            logger.info("Moved %.1f MB of non-block params to GPU for Stagehand",
+            # Also move non-block buffers (pos_embed, etc.)
+            block_buf_ids = set()
+            for block in blocks:
+                for b in block.buffers():
+                    block_buf_ids.add(id(b))
+            for name, buf in model.named_buffers():
+                if id(buf) not in block_buf_ids and buf.device.type != "cuda":
+                    non_block_bytes += buf.nbytes
+                    model_part = model
+                    for attr in name.split(".")[:-1]:
+                        model_part = getattr(model_part, attr)
+                    setattr(model_part, name.split(".")[-1], buf.to(device, non_blocking=True))
+            logger.info("Moved %.1f MB of non-block params/buffers to GPU for Stagehand",
                         non_block_bytes / (1024**2))
 
             model._stagehand_runtime = stagehand_runtime
@@ -839,8 +853,7 @@ def _load_wan_vae(state_dict: dict[str, Any], device: str) -> VAEWrapper:
 def load_clip(path: str, clip_type: str = "stable_diffusion") -> CLIPWrapper:
     """Load CLIP text encoder from file."""
     s = _get()
-    # Text encoders stay on CPU — moved to GPU only during encode_text()
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     arch = _resolve_single_clip_architecture(path, clip_type, s["ModelArchitecture"])
     external_mode = _resolve_external_text_mode(path, clip_type)
     if external_mode is not None:
@@ -1258,11 +1271,9 @@ def load_dual_clip(path1: str, path2: str, clip_type: str = "flux") -> CLIPWrapp
     """Load dual CLIP (e.g., CLIP-L + T5-XXL for FLUX).
 
     Uses local safetensors files when provided, falling back to HF repos.
-    Text encoders load on CPU to avoid VRAM pressure from the diffusion model.
     """
     s = _get()
-    # Text encoders stay on CPU — moved to GPU only during encode_text()
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     arch_map = {
         "flux": s["ModelArchitecture"].FLUX_DEV,
         "sd3": s["ModelArchitecture"].SD3,
@@ -1284,6 +1295,39 @@ def load_dual_clip(path1: str, path2: str, clip_type: str = "flux") -> CLIPWrapp
                                            dtype=torch.float16, device=device)
         else:
             # Fall back to HF repo
+            from serenity.inference.text.encoders import get_default_encoder_path
+            enc_path = get_default_encoder_path(arch, enc_type)
+            if enc_path:
+                text_mgr.load_encoder(enc_type, model_path=enc_path.repo,
+                                      dtype=torch.float16, device=device,
+                                      subfolder=enc_path.subfolder,
+                                      tokenizer_subfolder=enc_path.tokenizer_subfolder)
+
+    return CLIPWrapper(text_mgr, arch, torch.float16, device)
+
+
+def load_triple_clip(path1: str, path2: str, path3: str,
+                     clip_type: str = "sd3") -> CLIPWrapper:
+    """Load triple CLIP (CLIP-L + CLIP-G + T5-XXL for SD3)."""
+    s = _get()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    arch_map = {
+        "sd3": s["ModelArchitecture"].SD3,
+    }
+    arch = arch_map.get(clip_type, s["ModelArchitecture"].SD3)
+
+    from serenity.inference.text.encoders import TextEncoderType, get_required_encoders
+    required = get_required_encoders(arch)
+
+    text_mgr = s["TextEncoderManager"]()
+
+    files = [path1, path2, path3]
+    for enc_type in required:
+        local_file = _match_encoder_file(enc_type, files)
+        if local_file:
+            _load_encoder_from_safetensors(text_mgr, enc_type, local_file,
+                                           dtype=torch.float16, device=device)
+        else:
             from serenity.inference.text.encoders import get_default_encoder_path
             enc_path = get_default_encoder_path(arch, enc_type)
             if enc_path:

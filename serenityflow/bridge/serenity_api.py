@@ -198,6 +198,7 @@ from serenityflow.bridge.loading import (  # noqa: E402
     load_vae,
     load_clip,
     load_dual_clip,
+    load_triple_clip,
     load_controlnet,
     load_clip_vision,
 )
@@ -265,6 +266,7 @@ __all__ = [
     "load_controlnet",
     "load_diffusion_model",
     "load_dual_clip",
+    "load_triple_clip",
     "load_ltxv_model",
     "load_vae",
     "sample",

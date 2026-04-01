@@ -4,20 +4,31 @@ from __future__ import annotations
 from serenityflow.nodes.registry import registry
 
 
+def _list_models(folder):
+    from serenityflow.nodes.loaders import _list_models as _lm
+    return _lm(folder)
+
+
 @registry.register(
     "TripleCLIPLoader",
     return_types=("CLIP",),
     category="advanced/loaders",
-    input_types={"required": {
-        "clip_name1": ("STRING",),
-        "clip_name2": ("STRING",),
-        "clip_name3": ("STRING",),
+    input_types=lambda: {"required": {
+        "clip_name1": (_list_models("clip") or _list_models("text_encoders") or ["(no models found)"],),
+        "clip_name2": (_list_models("clip") or _list_models("text_encoders") or ["(no models found)"],),
+        "clip_name3": (_list_models("clip") or _list_models("text_encoders") or ["(no models found)"],),
     }},
 )
 def triple_clip_loader(clip_name1, clip_name2, clip_name3):
-    # For SD3: CLIP-L, CLIP-G, T5-XXL
-    # TODO: bridge.load_triple_clip()
-    raise NotImplementedError("TripleCLIPLoader requires bridge.load_triple_clip()")
+    from serenityflow.bridge.serenity_api import load_triple_clip
+    from serenityflow.bridge.model_paths import get_model_paths
+
+    paths = get_model_paths()
+    path1 = paths.find(clip_name1, "clip")
+    path2 = paths.find(clip_name2, "clip")
+    path3 = paths.find(clip_name3, "clip")
+    clip = load_triple_clip(path1, path2, path3, clip_type="sd3")
+    return (clip,)
 
 
 @registry.register(
