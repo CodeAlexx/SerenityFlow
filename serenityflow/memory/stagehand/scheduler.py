@@ -736,7 +736,12 @@ class StagehandScheduler:
                 # Bandwidth scheduling disabled in adapter — proceed.
                 return True
 
-            from serenity.memory.conductor.bandwidth import AcquireStatus  # type: ignore[import-not-found]
+            try:
+                from serenity.memory.conductor.bandwidth import AcquireStatus  # type: ignore[import-not-found]
+            except ImportError:
+                # Conductor bandwidth module unavailable — treat as acquired.
+                log.debug("AcquireStatus unavailable, treating bandwidth result as acquired for block %s", block_id)
+                return True
             if result.status == AcquireStatus.ACQUIRED and result.token is not None:
                 self._pending_bw_tokens[block_id] = (result.token, time.monotonic())
                 return True

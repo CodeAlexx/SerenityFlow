@@ -24,54 +24,45 @@ _LTX_GEMMA_TRANSFORMERS_COMPAT_PATCHED = False
 def _import_inference():
     """Import Serenity inference subsystems. Raises ImportError with a
     clear message if Serenity is not installed."""
+    from serenityflow.bridge.sampling_math import (
+        compute_sigmas, create_noise, get_prediction, apply_cfg,
+    )
+    from serenityflow.bridge.model_utils import (
+        ModelArchitecture,
+        detect_from_file as sf_detect_from_file,
+        load_state_dict as sf_load_sd,
+        extract_vae_state_dict as sf_extract_vae,
+        VAEDecoder, VAEEncoder,
+    )
+
     try:
-        from serenity.inference.models.loader import (
-            load_model as _load_model,
-            load_state_dict as _load_sd,
-            extract_vae_state_dict as _extract_vae,
-        )
-        from serenity.inference.models.detection import (
-            detect_from_file,
-            detect_model_type,
-            ModelArchitecture,
-        )
-        from serenity.inference.vae.decoder import VAEDecoder
-        from serenity.inference.vae.encoder import VAEEncoder
-        from serenity.inference.text.encoders import TextEncoderManager, get_required_encoders
-        from serenity.inference.sampling.sampler import sample as _sample, create_model_fn
-        from serenity.inference.sampling.schedulers import compute_sigmas
-        from serenity.inference.sampling.conditioning import Conditioning, create_noise
-        from serenity.inference.sampling.prediction import get_prediction
-        from serenity.inference.sampling.cfg import apply_cfg
+        from serenity.inference.models.loader import load_model as _load_model
+        from serenity.inference.models.detection import detect_from_file
+        from serenity.inference.sampling.sampler import sample as _sample
         from serenity.inference.lora.loader import load_lora
         from serenity.inference.lora.merge import merge_lora_into_model
-
-        return {
-            "load_model": _load_model,
-            "load_state_dict": _load_sd,
-            "extract_vae": _extract_vae,
-            "detect_from_file": detect_from_file,
-            "detect_model_type": detect_model_type,
-            "ModelArchitecture": ModelArchitecture,
-            "VAEDecoder": VAEDecoder,
-            "VAEEncoder": VAEEncoder,
-            "TextEncoderManager": TextEncoderManager,
-            "get_required_encoders": get_required_encoders,
-            "sample": _sample,
-            "create_model_fn": create_model_fn,
-            "compute_sigmas": compute_sigmas,
-            "Conditioning": Conditioning,
-            "create_noise": create_noise,
-            "get_prediction": get_prediction,
-            "apply_cfg": apply_cfg,
-            "load_lora": load_lora,
-            "merge_lora_into_model": merge_lora_into_model,
-        }
     except ImportError as e:
         raise ImportError(
             f"Serenity inference engine not found: {e}. "
             "Install serenity or ensure it is on PYTHONPATH."
         ) from e
+
+    return {
+        "load_model": _load_model,
+        "detect_from_file": detect_from_file,
+        "load_state_dict": sf_load_sd,
+        "extract_vae": sf_extract_vae,
+        "ModelArchitecture": ModelArchitecture,
+        "VAEDecoder": VAEDecoder,
+        "VAEEncoder": VAEEncoder,
+        "sample": _sample,
+        "compute_sigmas": compute_sigmas,
+        "create_noise": create_noise,
+        "get_prediction": get_prediction,
+        "apply_cfg": apply_cfg,
+        "load_lora": load_lora,
+        "merge_lora_into_model": merge_lora_into_model,
+    }
 
 
 _SERENITY = None

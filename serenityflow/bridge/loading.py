@@ -12,6 +12,19 @@ import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
+from serenityflow.bridge.model_utils import (
+    ModelArchitecture,
+    detect_from_file as sf_detect_from_file,
+    load_state_dict as sf_load_state_dict,
+    extract_vae_state_dict as sf_extract_vae,
+    safe_load_state_dict as sf_safe_load,
+    convert_ldm_vae_to_diffusers as sf_convert_ldm_vae,
+    VAEDecoder as SFVAEDecoder,
+    VAEEncoder as SFVAEEncoder,
+    get_vae_scaling_factor,
+    get_prediction_type,
+)
+
 
 # --- Facade proxies (avoid circular import at module level) ---
 def _get():
@@ -100,14 +113,11 @@ def load_checkpoint(path: str, dtype: str = "float16") -> tuple:
     except Exception as exc:
         logger.debug("FP8 dequant check skipped for checkpoint: %s", exc)
 
-    # Attach prediction metadata (same as load_diffusion_model does)
-    from serenity.inference.models.loader import _get_adapter
-    adapter = _get_adapter(model_config)
-    if adapter:
-        model._serenity_prediction_type = adapter.get_prediction_type()
-        model._serenity_arch = model_config.architecture
-        model._serenity_model_config = model_config
-        logger.info("Checkpoint prediction type: %s (arch=%s)", model._serenity_prediction_type, arch.value)
+    # Attach prediction metadata
+    model._serenity_prediction_type = get_prediction_type(arch)
+    model._serenity_arch = model_config.architecture
+    model._serenity_model_config = model_config
+    logger.info("Checkpoint prediction type: %s (arch=%s)", model._serenity_prediction_type, arch.value)
 
     # VRAM-aware partial GPU loading with block-level CPU↔GPU streaming
     if torch.cuda.is_available():
@@ -122,30 +132,31 @@ def load_checkpoint(path: str, dtype: str = "float16") -> tuple:
         if model_size > gpu_budget:
             # Model doesn't fit — use block-level offloading
             _enable_layer_offloading(model)
-            from serenity.inference.memory.manager import ModelManager
             manager = _get_model_manager()
-            lm = manager.load(model, budget=gpu_budget)
-            if lm.offloaded_size > 0:
-                logger.info(
-                    "Loaded %.1f GB to GPU, %.1f GB offloaded to CPU (per-layer streaming)",
-                    lm.loaded_size / (1024**3), lm.offloaded_size / (1024**3),
-                )
+            if manager is not None:
+                lm = manager.load(model, budget=gpu_budget)
+                if lm.offloaded_size > 0:
+                    logger.info(
+                        "Loaded %.1f GB to GPU, %.1f GB offloaded to CPU (per-layer streaming)",
+                        lm.loaded_size / (1024**3), lm.offloaded_size / (1024**3),
+                    )
+                else:
+                    logger.info("Fully loaded to GPU (%.1f GB)", lm.loaded_size / (1024**3))
             else:
-                logger.info("Fully loaded to GPU (%.1f GB)", lm.loaded_size / (1024**3))
+                logger.warning("serenity-inference not available, skipping legacy memory manager — model left on CPU with layer offloading only")
         else:
             # Model fits — load fully to GPU
             model = model.to(gpu_device)
 
     # Load VAE from checkpoint
-    sd = s["load_state_dict"](path)
-    vae_sd = s["extract_vae"](sd)
+    sd = sf_load_state_dict(path)
+    vae_sd = sf_extract_vae(sd)
     vae_wrapper = None
     if vae_sd:
         try:
-            from serenity.inference.models.convert import convert_ldm_vae_to_diffusers, safe_load_state_dict
             from diffusers.models import AutoencoderKL
 
-            vae_sd = convert_ldm_vae_to_diffusers(vae_sd)
+            vae_sd = sf_convert_ldm_vae(vae_sd)
             # Squeeze conv1x1 attention weights to linear format (512,512,1,1) → (512,512)
             for k in list(vae_sd.keys()):
                 if vae_sd[k].ndim == 4 and vae_sd[k].shape[2:] == (1, 1) and 'attentions' in k:
@@ -167,24 +178,21 @@ def load_checkpoint(path: str, dtype: str = "float16") -> tuple:
                 act_fn="silu",
                 sample_size=512,
             )
-            safe_load_state_dict(vae, vae_sd)
+            sf_safe_load(vae, vae_sd)
             # VAE MUST run in fp32 — fp16 causes green/purple artifacts (known diffusers issue)
             vae = vae.to(device=gpu_device, dtype=torch.float32).eval()
 
-            from serenity.inference.models.base import BaseModelAdapter
-            # Get adapter for scaling factor
-            from serenity.inference.models.loader import _get_adapter
-            adapter = _get_adapter(model_config)
-            scaling = adapter.get_vae_scaling_factor() if adapter else 0.18215
+            scaling = get_vae_scaling_factor(arch)
 
-            decoder = s["VAEDecoder"](vae_model=vae, dtype=torch.float32, device=gpu_device, scaling_factor=scaling)
-            encoder = s["VAEEncoder"](vae_model=vae, dtype=torch.float32, device=gpu_device, scaling_factor=scaling)
+            decoder = SFVAEDecoder(vae_model=vae, dtype=torch.float32, device=gpu_device, scaling_factor=scaling)
+            encoder = SFVAEEncoder(vae_model=vae, dtype=torch.float32, device=gpu_device, scaling_factor=scaling)
             vae_wrapper = VAEWrapper(decoder, encoder)
         except Exception as e:
             logger.warning("Failed to load VAE from checkpoint: %s", e)
 
     # Load text encoders
-    text_mgr = s["TextEncoderManager"]()
+    from text.manager import TextEncoderManager
+    text_mgr = TextEncoderManager()
     try:
         text_mgr.load_for_model(arch, dtype=torch_dtype, device=gpu_device)
     except Exception as e:
@@ -210,30 +218,27 @@ def load_diffusion_model(path: str, dtype: str = "default") -> nn.Module:
 
     # Always load to CPU first to avoid OOM
     model_config = s["detect_from_file"](path)
-    if _is_flux2_model_config(model_config, s["ModelArchitecture"]):
+    if _is_flux2_model_config(model_config):
         model = _load_flux2_transformer(path, torch_dtype, model_config)
-    elif model_config is not None and model_config.architecture == s["ModelArchitecture"].ZIMAGE:
+    elif model_config is not None and model_config.architecture == ModelArchitecture.ZIMAGE:
         model = _load_zimage_transformer(path, torch_dtype, model_config)
-    elif model_config is not None and model_config.architecture == s["ModelArchitecture"].QWEN:
+    elif model_config is not None and model_config.architecture == ModelArchitecture.QWEN:
         model = _load_qwen_transformer(path, torch_dtype, model_config)
     else:
         model = s["load_model"](path, device="cpu", dtype=torch_dtype)
 
     if model_config is not None and not hasattr(model, "_serenity_prediction_type"):
-        from serenity.inference.models.loader import _get_adapter
-        adapter = _get_adapter(model_config)
-        if adapter:
-            model._serenity_prediction_type = adapter.get_prediction_type()
-            model._serenity_arch = model_config.architecture
-            model._serenity_model_config = model_config
-            logger.info("Model prediction type: %s", model._serenity_prediction_type)
-    if _is_flux2_model_config(model_config, s["ModelArchitecture"]):
+        model._serenity_prediction_type = get_prediction_type(model_config.architecture)
+        model._serenity_arch = model_config.architecture
+        model._serenity_model_config = model_config
+        logger.info("Model prediction type: %s", model._serenity_prediction_type)
+    if _is_flux2_model_config(model_config):
         model._serenity_flux2 = True
         _attach_flux2_vae_stats(model, path)
 
     # Fix scaled FP8 for non-Flux models (Flux handled inside _load_flux2_transformer).
     # Loaders like from_single_file may cast FP8→bf16 without applying scale factors.
-    if not _is_flux2_model_config(model_config, s["ModelArchitecture"]):
+    if not _is_flux2_model_config(model_config):
         try:
             from serenityflow.bridge.fp8_dequant import dequant_scaled_fp8_in_model
             fixed = dequant_scaled_fp8_in_model(model, path)
@@ -329,16 +334,18 @@ def load_diffusion_model(path: str, dtype: str = "default") -> nn.Module:
         else:
             # Legacy fallback: synchronous per-block hooks (no prefetch)
             _enable_layer_offloading(model)
-            from serenity.inference.memory.manager import ModelManager
             manager = _get_model_manager()
-            lm = manager.load(model, budget=gpu_budget)
-            if lm.offloaded_size > 0:
-                logger.info(
-                    "Loaded %.1f GB to GPU, %.1f GB offloaded to CPU (legacy per-layer streaming)",
-                    lm.loaded_size / (1024**3), lm.offloaded_size / (1024**3),
-                )
+            if manager is not None:
+                lm = manager.load(model, budget=gpu_budget)
+                if lm.offloaded_size > 0:
+                    logger.info(
+                        "Loaded %.1f GB to GPU, %.1f GB offloaded to CPU (legacy per-layer streaming)",
+                        lm.loaded_size / (1024**3), lm.offloaded_size / (1024**3),
+                    )
+                else:
+                    logger.info("Fully loaded to GPU (%.1f GB)", lm.loaded_size / (1024**3))
             else:
-                logger.info("Fully loaded to GPU (%.1f GB)", lm.loaded_size / (1024**3))
+                logger.warning("serenity-inference not available, skipping legacy memory manager — model left on CPU with layer offloading only")
 
     return model
 
@@ -348,11 +355,15 @@ _model_manager = None
 
 
 def _get_model_manager():
-    """Get or create the singleton ModelManager."""
+    """Get or create the singleton ModelManager. Returns None if serenity-inference is not installed."""
     global _model_manager
     if _model_manager is None:
-        from serenity.inference.memory.manager import ModelManager
-        _model_manager = ModelManager()
+        try:
+            from serenity.inference.memory.manager import ModelManager
+            _model_manager = ModelManager()
+        except ImportError:
+            logger.warning("serenity.inference.memory.manager not available — legacy ModelManager disabled")
+            return None
     return _model_manager
 
 
@@ -448,16 +459,17 @@ def _find_transformer_blocks(model: nn.Module) -> list[nn.Module]:
     return unique
 
 
-def _is_flux2_model_config(model_config, model_architecture) -> bool:
+def _is_flux2_model_config(model_config) -> bool:
     """Return True for FLUX.2-style single-file transformers."""
     if model_config is None:
         return False
     if model_config.architecture in (
-        model_architecture.FLUX_2_KLEIN_4B,
-        model_architecture.FLUX_2_KLEIN_9B,
+        ModelArchitecture.FLUX_2_KLEIN_4B,
+        ModelArchitecture.FLUX_2_KLEIN_9B,
     ):
         return True
-    return model_config.unet_config.get("image_model") == "flux2"
+    unet_cfg = getattr(model_config, "unet_config", None) or {}
+    return unet_cfg.get("image_model") == "flux2"
 
 
 def _load_flux2_transformer(path: str, dtype: torch.dtype, model_config) -> nn.Module:
@@ -630,7 +642,6 @@ def _attach_flux2_vae_stats(model: nn.Module, checkpoint_path: str) -> None:
 
 def load_vae(path: str) -> VAEWrapper:
     """Load standalone VAE model."""
-    s = _get()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     use_native_flux2_encoder = False
 
@@ -639,7 +650,7 @@ def load_vae(path: str) -> VAEWrapper:
         from diffusers.models import AutoencoderKL
 
         # Detect Flux-style VAE (16ch latent) by peeking at decoder.conv_in shape
-        sd_peek = s["load_state_dict"](path)
+        sd_peek = sf_load_state_dict(path)
         if _is_wan_vae_state_dict(sd_peek):
             return _load_wan_vae(sd_peek, device)
 
@@ -661,7 +672,7 @@ def load_vae(path: str) -> VAEWrapper:
                 from models.vae_flux2 import AutoencoderKLFlux2 as NativeAutoencoderKLFlux2
 
                 logger.info("Falling back to Serenity native FLUX.2 VAE loader for %s", os.path.basename(path))
-                vae_sd = s["load_state_dict"](path)
+                vae_sd = sf_load_state_dict(path)
                 vae = NativeAutoencoderKLFlux2.from_state_dict(vae_sd)
                 use_native_flux2_encoder = True
             vae = vae.to(device=device, dtype=torch.float32).eval()
@@ -692,9 +703,7 @@ def load_vae(path: str) -> VAEWrapper:
 
                 vae_sd = load_file(path)
                 try:
-                    from serenity.inference.models.convert import convert_ldm_vae_to_diffusers
-
-                    vae_sd = convert_ldm_vae_to_diffusers(vae_sd)
+                    vae_sd = sf_convert_ldm_vae(vae_sd)
                 except Exception:
                     pass
                 for k in list(vae_sd.keys()):
@@ -710,15 +719,13 @@ def load_vae(path: str) -> VAEWrapper:
                 scaling = 0.3611
         else:
             # Standard VAE (SD 1.5 / SDXL / etc.)
-            from serenity.inference.models.convert import convert_ldm_vae_to_diffusers, safe_load_state_dict
-
-            sd = s["load_state_dict"](path)
+            sd = sf_load_state_dict(path)
             if any(k.startswith("first_stage_model.") or k.startswith("vae.") for k in sd):
-                sd = s["extract_vae"](sd)
-                sd = convert_ldm_vae_to_diffusers(sd)
+                sd = sf_extract_vae(sd)
+                sd = sf_convert_ldm_vae(sd)
             elif any(k.startswith("encoder.") or k.startswith("decoder.") for k in sd):
                 try:
-                    sd = convert_ldm_vae_to_diffusers(sd)
+                    sd = sf_convert_ldm_vae(sd)
                 except Exception:
                     pass
 
@@ -727,15 +734,15 @@ def load_vae(path: str) -> VAEWrapper:
                 latent_ch = sd["decoder.conv_in.weight"].shape[1]
 
             vae = AutoencoderKL(latent_channels=latent_ch)
-            safe_load_state_dict(vae, sd)
+            sf_safe_load(vae, sd)
             vae = vae.to(device=device, dtype=torch.float32).eval()
             scaling = 0.18215  # SD default
 
-        decoder = s["VAEDecoder"](vae_model=vae, dtype=torch.float32, device=device, scaling_factor=scaling)
+        decoder = SFVAEDecoder(vae_model=vae, dtype=torch.float32, device=device, scaling_factor=scaling)
         if use_native_flux2_encoder:
             encoder = _Flux2NativeVAEEncoder(vae, device=device, dtype=torch.float32, scaling_factor=scaling)
         else:
-            encoder = s["VAEEncoder"](vae_model=vae, dtype=torch.float32, device=device, scaling_factor=scaling)
+            encoder = SFVAEEncoder(vae_model=vae, dtype=torch.float32, device=device, scaling_factor=scaling)
         return VAEWrapper(decoder, encoder)
     except Exception as e:
         raise RuntimeError(f"Failed to load VAE from {path}: {e}") from e
@@ -875,30 +882,31 @@ def _load_wan_vae(state_dict: dict[str, Any], device: str) -> VAEWrapper:
 
 def load_clip(path: str, clip_type: str = "stable_diffusion") -> CLIPWrapper:
     """Load CLIP text encoder from file."""
-    s = _get()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    arch = _resolve_single_clip_architecture(path, clip_type, s["ModelArchitecture"])
+    arch = _resolve_single_clip_architecture(path, clip_type, ModelArchitecture)
     external_mode = _resolve_external_text_mode(path, clip_type)
     if external_mode is not None:
         external_dtype = torch.bfloat16 if external_mode in {"flux2", "qwen"} else torch.float16
         return _load_external_clip(path, external_mode, arch, external_dtype, device)
 
-    from serenity.inference.text.encoders import TextEncoderType, get_required_encoders, get_default_encoder_path
+    from text.manager import TextEncoderType, get_required_encoders, get_default_encoder_path
+    _SAFETENSORS_TYPES = (TextEncoderType.CLIP_L, TextEncoderType.CLIP_G, TextEncoderType.T5_XXL)
     required = get_required_encoders(arch)
 
-    text_mgr = s["TextEncoderManager"]()
+    from text.manager import TextEncoderManager
+    text_mgr = TextEncoderManager()
     for enc_type in required:
         local_file = _match_encoder_file(enc_type, [path])
         if local_file:
             local_dir = _resolve_text_encoder_dir(local_file)
-            if enc_type in (TextEncoderType.QWEN, TextEncoderType.GEMMA) and local_dir:
+            if enc_type not in _SAFETENSORS_TYPES and local_dir:
                 text_mgr.load_encoder(
                     enc_type,
                     model_path=local_dir,
                     dtype=torch.float16,
                     device=device,
                 )
-            elif enc_type not in (TextEncoderType.QWEN, TextEncoderType.GEMMA):
+            elif enc_type in _SAFETENSORS_TYPES:
                 _load_encoder_from_safetensors(
                     text_mgr,
                     enc_type,
@@ -1170,14 +1178,17 @@ def _load_qwen_transformer(path: str, dtype: torch.dtype, model_config) -> nn.Mo
 def _match_encoder_file(enc_type, files: list[str]) -> str | None:
     """Match an encoder type to a local file by naming convention."""
     import os
-    from serenity.inference.text.encoders import TextEncoderType
+    from text.manager import TextEncoderType
 
     patterns = {
         TextEncoderType.CLIP_L: ["clip_l", "clip-l"],
         TextEncoderType.CLIP_G: ["clip_g", "clip-g"],
         TextEncoderType.T5_XXL: ["t5xxl", "t5_xxl", "t5-xxl"],
-        TextEncoderType.QWEN: ["qwen"],
-        TextEncoderType.GEMMA: ["gemma"],
+        TextEncoderType.QWEN3_KLEIN: ["qwen3", "qwen"],
+        TextEncoderType.QWEN3_ZIMAGE: ["gemma", "zimage"],
+        TextEncoderType.QWEN25_VL: ["qwen25", "qwen2.5", "qwen-vl"],
+        TextEncoderType.MISTRAL: ["mistral"],
+        TextEncoderType.UMT5_XXL: ["umt5"],
     }
     for f in files:
         basename = os.path.basename(f).lower()
@@ -1194,7 +1205,7 @@ def _load_encoder_from_safetensors(text_mgr, enc_type, filepath: str,
     Uses config from HF cache + state dict from local file.
     """
     from safetensors.torch import load_file
-    from serenity.inference.text.encoders import TextEncoderType
+    from text.manager import TextEncoderType
 
     sd = load_file(filepath)
 
@@ -1209,7 +1220,7 @@ def _load_encoder_from_safetensors(text_mgr, enc_type, filepath: str,
 def _load_clip_from_sd(text_mgr, enc_type, sd: dict, dtype, device: str) -> None:
     """Load CLIP encoder from a state dict."""
     from transformers import CLIPTextModel, CLIPTokenizer
-    from serenity.inference.text.encoders import TextEncoderType
+    from text.manager import TextEncoderType
 
     encoder = text_mgr.get_encoder(enc_type)
     if encoder.is_loaded:
@@ -1259,7 +1270,7 @@ def _load_clip_from_sd(text_mgr, enc_type, sd: dict, dtype, device: str) -> None
 def _load_t5_from_sd(text_mgr, sd: dict, dtype, device: str) -> None:
     """Load T5 encoder from a state dict."""
     from transformers import AutoTokenizer, T5EncoderModel, AutoConfig
-    from serenity.inference.text.encoders import TextEncoderType
+    from text.manager import TextEncoderType
 
     encoder = text_mgr.get_encoder(TextEncoderType.T5_XXL)
     if encoder.is_loaded:
@@ -1295,19 +1306,19 @@ def load_dual_clip(path1: str, path2: str, clip_type: str = "flux") -> CLIPWrapp
 
     Uses local safetensors files when provided, falling back to HF repos.
     """
-    s = _get()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     arch_map = {
-        "flux": s["ModelArchitecture"].FLUX_DEV,
-        "sd3": s["ModelArchitecture"].SD3,
-        "sdxl": s["ModelArchitecture"].SDXL,
+        "flux": ModelArchitecture.FLUX_DEV,
+        "sd3": ModelArchitecture.SD3,
+        "sdxl": ModelArchitecture.SDXL,
     }
-    arch = arch_map.get(clip_type, s["ModelArchitecture"].FLUX_DEV)
+    arch = arch_map.get(clip_type, ModelArchitecture.FLUX_DEV)
 
-    from serenity.inference.text.encoders import TextEncoderType, get_required_encoders
+    from text.manager import TextEncoderType, get_required_encoders, get_default_encoder_path
     required = get_required_encoders(arch)
 
-    text_mgr = s["TextEncoderManager"]()
+    from text.manager import TextEncoderManager
+    text_mgr = TextEncoderManager()
 
     # Map file paths to encoder types based on naming conventions
     files = [path1, path2]
@@ -1318,7 +1329,6 @@ def load_dual_clip(path1: str, path2: str, clip_type: str = "flux") -> CLIPWrapp
                                            dtype=torch.float16, device=device)
         else:
             # Fall back to HF repo
-            from serenity.inference.text.encoders import get_default_encoder_path
             enc_path = get_default_encoder_path(arch, enc_type)
             if enc_path:
                 text_mgr.load_encoder(enc_type, model_path=enc_path.repo,
@@ -1332,17 +1342,17 @@ def load_dual_clip(path1: str, path2: str, clip_type: str = "flux") -> CLIPWrapp
 def load_triple_clip(path1: str, path2: str, path3: str,
                      clip_type: str = "sd3") -> CLIPWrapper:
     """Load triple CLIP (CLIP-L + CLIP-G + T5-XXL for SD3)."""
-    s = _get()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     arch_map = {
-        "sd3": s["ModelArchitecture"].SD3,
+        "sd3": ModelArchitecture.SD3,
     }
-    arch = arch_map.get(clip_type, s["ModelArchitecture"].SD3)
+    arch = arch_map.get(clip_type, ModelArchitecture.SD3)
 
-    from serenity.inference.text.encoders import TextEncoderType, get_required_encoders
+    from text.manager import TextEncoderType, get_required_encoders, get_default_encoder_path
     required = get_required_encoders(arch)
 
-    text_mgr = s["TextEncoderManager"]()
+    from text.manager import TextEncoderManager
+    text_mgr = TextEncoderManager()
 
     files = [path1, path2, path3]
     for enc_type in required:
@@ -1351,7 +1361,6 @@ def load_triple_clip(path1: str, path2: str, path3: str,
             _load_encoder_from_safetensors(text_mgr, enc_type, local_file,
                                            dtype=torch.float16, device=device)
         else:
-            from serenity.inference.text.encoders import get_default_encoder_path
             enc_path = get_default_encoder_path(arch, enc_type)
             if enc_path:
                 text_mgr.load_encoder(enc_type, model_path=enc_path.repo,
@@ -1364,13 +1373,11 @@ def load_triple_clip(path1: str, path2: str, path3: str,
 
 def load_controlnet(path: str):
     """Load ControlNet model. Returns the state dict + metadata."""
-    s = _get()
-    sd = s["load_state_dict"](path)
+    sd = sf_load_state_dict(path)
     return {"state_dict": sd, "path": path}
 
 
 def load_clip_vision(path: str):
     """Load CLIP vision encoder."""
-    s = _get()
-    sd = s["load_state_dict"](path)
+    sd = sf_load_state_dict(path)
     return {"state_dict": sd, "path": path}

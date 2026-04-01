@@ -18,6 +18,13 @@ def _get():
 
 from serenityflow.bridge.preview import _make_step_callback
 from serenityflow.bridge.loading import CLIPWrapper, VAEWrapper
+from serenityflow.bridge.sampling_math import (
+    compute_sigmas,
+    create_noise,
+    apply_cfg,
+    get_prediction,
+    PipelineCounters,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -36,14 +43,14 @@ def encode_text(clip: CLIPWrapper, text: str) -> list[dict]:
     # concatenates all hidden states into 6144d (wrong format for the model).
     _is_sd3 = False
     try:
-        from serenity.inference.models.detection import ModelArchitecture
+        from serenityflow.bridge.model_utils import ModelArchitecture
         _is_sd3 = hasattr(clip, "_arch") and clip._arch == ModelArchitecture.SD3
     except ImportError:
         pass
 
     if _is_sd3:
         try:
-            from serenity.inference.text.encoders import TextEncoderType
+            from text.manager import TextEncoderType
             clip_l_enc = clip._manager.get_encoder(TextEncoderType.CLIP_L)
             clip_g_enc = clip._manager.get_encoder(TextEncoderType.CLIP_G)
             t5_enc = clip._manager.get_encoder(TextEncoderType.T5_XXL)
@@ -97,13 +104,13 @@ def encode_text(clip: CLIPWrapper, text: str) -> list[dict]:
     try:
         if "attention_mask" in entry:
             raise StopIteration
-        from serenity.inference.text.encoders import TextEncoderType
+        from text.manager import TextEncoderType
 
         encoder_type = None
         if getattr(clip, "_arch", None) == clip._arch.__class__.QWEN:
-            encoder_type = TextEncoderType.QWEN
+            encoder_type = TextEncoderType.QWEN25_VL
         elif getattr(clip, "_arch", None) in (clip._arch.__class__.LUMINA, clip._arch.__class__.ZIMAGE):
-            encoder_type = TextEncoderType.GEMMA
+            encoder_type = TextEncoderType.QWEN3_ZIMAGE
 
         if encoder_type is not None:
             encoder = clip._manager.get_encoder(encoder_type)
@@ -326,13 +333,10 @@ def _run_sampling(
     elif _is_qwen_transformer(model) or _is_zimage_transformer(model):
         prediction_type = "flow"
     if hasattr(model, "_serenity_model_config"):
-        from serenity.inference.models.loader import _get_adapter
-        try:
-            adapter = _get_adapter(model._serenity_model_config)
-        except Exception:
-            adapter = None
-        if adapter:
-            prediction_kwargs = adapter.get_prediction_kwargs()
+        from serenityflow.bridge.model_utils import get_prediction_kwargs
+        _arch = getattr(model._serenity_model_config, "architecture", None)
+        if _arch is not None:
+            prediction_kwargs = get_prediction_kwargs(_arch)
 
     is_qwen = _is_qwen_transformer(model)
     is_zimage = _is_zimage_transformer(model)
@@ -366,7 +370,7 @@ def _run_sampling(
         prediction_kwargs["seq_len"] = actual_seq_len
         logger.info("Flux seq_len=%d (from %dx%d latent)", actual_seq_len, lat_h, lat_w)
 
-    prediction = s["get_prediction"](prediction_type, **prediction_kwargs)
+    prediction = get_prediction(prediction_type, **prediction_kwargs)
     logger.info(
         "Sample: prediction=%s, is_flux=%s, is_qwen=%s, is_zimage=%s, latent=%s, cfg=%.1f",
         prediction_type,
@@ -393,7 +397,7 @@ def _run_sampling(
                          shift, sigmas[0].item(), sigmas[-2].item())
 
     if noise is None:
-        noise = s["create_noise"](
+        noise = create_noise(
             seed=seed,
             shape=base_latent.shape,
             device="cpu",
@@ -686,7 +690,7 @@ def _run_sampling(
             raw_out = call_model(inp_for_model, timestep, **uncond_kwargs)
             uncond_out = prepare_model_output(raw_out, x.dtype, x.shape[1])
         uncond_denoised = prediction.calculate_denoised(sigma, uncond_out, x)
-        return s["apply_cfg"](cond_denoised, uncond_denoised, cfg)
+        return apply_cfg(cond_denoised, uncond_denoised, cfg)
 
     # Wrap denoise_fn with Stagehand managed_forward() if the model has a runtime.
     # This gives async prefetch with pinned pool instead of synchronous per-block hooks.
@@ -707,17 +711,11 @@ def _run_sampling(
 
     step_callback = _make_step_callback(preview_interval=3)
 
-    # Wrap with pipeline counters if available.
-    _sampling_counters = None
-    try:
-        from serenity.inference.sampling.counters import PipelineCounters
-        _sampling_counters = PipelineCounters()
-        _sampling_counters.start()
-        _instrumented_fn = _sampling_counters.wrap_model_fn(denoise_fn)
-        _instrumented_cb = _sampling_counters.make_callback(step_callback)
-    except ImportError:
-        _instrumented_fn = denoise_fn
-        _instrumented_cb = step_callback
+    # Wrap with pipeline counters (stub — real counters are optional).
+    _sampling_counters = PipelineCounters()
+    _sampling_counters.start()
+    _instrumented_fn = _sampling_counters.wrap_model_fn(denoise_fn)
+    _instrumented_cb = _sampling_counters.make_callback(step_callback)
 
     result = s["sample"](
         model_fn=_instrumented_fn,
@@ -798,14 +796,13 @@ def sample(
     return_with_leftover_noise: bool = False,
 ) -> torch.Tensor:
     """Run sampling. Returns denoised latent tensor."""
-    s = _get()
     prediction_type = getattr(model, "_serenity_prediction_type", None)
     if prediction_type in ("flow", "flow_flux") or _is_qwen_transformer(model):
         sigma_min, sigma_max = 1e-4, 1.0
     else:
         sigma_min, sigma_max = 0.0292, 14.6146
 
-    sigmas = s["compute_sigmas"](
+    sigmas = compute_sigmas(
         scheduler=scheduler,
         num_steps=steps,
         sigma_min=sigma_min,
