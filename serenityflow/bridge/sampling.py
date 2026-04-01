@@ -24,6 +24,7 @@ from serenityflow.bridge.sampling_math import (
     apply_cfg,
     get_prediction,
     PipelineCounters,
+    sample as sf_sample,
 )
 
 
@@ -287,7 +288,6 @@ def _run_sampling(
     denoise: float = 1.0,
 ) -> torch.Tensor:
     """Shared sampler implementation for KSampler and custom sampler nodes."""
-    s = _get()
     device = latent.device if latent.is_cuda else (
         torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     )
@@ -717,7 +717,8 @@ def _run_sampling(
     _instrumented_fn = _sampling_counters.wrap_model_fn(denoise_fn)
     _instrumented_cb = _sampling_counters.make_callback(step_callback)
 
-    result = s["sample"](
+    from serenityflow.bridge.sampling_math import sample as sf_sample
+    result = sf_sample(
         model_fn=_instrumented_fn,
         noise=noisy_latent,
         sigmas=sigmas,

@@ -26,6 +26,7 @@ def _import_inference():
     clear message if Serenity is not installed."""
     from serenityflow.bridge.sampling_math import (
         compute_sigmas, create_noise, get_prediction, apply_cfg,
+        sample as sf_sample,
     )
     from serenityflow.bridge.model_utils import (
         ModelArchitecture,
@@ -35,12 +36,11 @@ def _import_inference():
         VAEDecoder, VAEEncoder,
     )
 
+    from serenityflow.bridge.lora_utils import load_lora, merge_lora_into_model
+
     try:
         from serenity.inference.models.loader import load_model as _load_model
         from serenity.inference.models.detection import detect_from_file
-        from serenity.inference.sampling.sampler import sample as _sample
-        from serenity.inference.lora.loader import load_lora
-        from serenity.inference.lora.merge import merge_lora_into_model
     except ImportError as e:
         raise ImportError(
             f"Serenity inference engine not found: {e}. "
@@ -55,7 +55,7 @@ def _import_inference():
         "ModelArchitecture": ModelArchitecture,
         "VAEDecoder": VAEDecoder,
         "VAEEncoder": VAEEncoder,
-        "sample": _sample,
+        "sample": sf_sample,
         "compute_sigmas": compute_sigmas,
         "create_noise": create_noise,
         "get_prediction": get_prediction,

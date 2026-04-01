@@ -35,6 +35,7 @@ __all__ = [
     "get_vae_scaling_factor",
     "get_prediction_type",
     "get_prediction_kwargs",
+    "find_qwen_cache_snapshot",
 ]
 
 
@@ -415,3 +416,36 @@ def get_prediction_kwargs(arch: ModelArchitecture | str) -> dict[str, Any]:
     """Return default prediction kwargs for the given architecture."""
     key = arch.value if isinstance(arch, ModelArchitecture) else str(arch)
     return _PREDICTION_KWARGS.get(key, {})
+
+
+# --------------------------------------------------------------------------- #
+# Qwen cache snapshot discovery
+# --------------------------------------------------------------------------- #
+
+
+def find_qwen_cache_snapshot() -> Optional[str]:
+    """Find a local Qwen-Image pipeline snapshot in ``~/.serenity/models/``.
+
+    Scans for directories containing a ``transformer`` subfolder with
+    ``config.json`` (the diffusers pipeline layout).  Returns the path as
+    a string, or ``None`` if no snapshot is found.
+    """
+    from pathlib import Path
+
+    base = Path.home() / ".serenity" / "models"
+    candidates = [
+        base / "checkpoints",
+        base / "diffusion_models",
+        base,
+    ]
+    for search_dir in candidates:
+        if not search_dir.exists():
+            continue
+        for d in search_dir.iterdir():
+            if not d.is_dir():
+                continue
+            if "qwen" in d.name.lower():
+                transformer_dir = d / "transformer"
+                if transformer_dir.exists() and (transformer_dir / "config.json").exists():
+                    return str(d)
+    return None

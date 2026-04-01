@@ -31,6 +31,7 @@ __all__ = [
     "FluxPrediction",
     "get_prediction",
     "PipelineCounters",
+    "sample",
 ]
 
 
@@ -364,3 +365,209 @@ class PipelineCounters:
 
     def make_callback(self, cb):
         return cb
+
+
+# --------------------------------------------------------------------------- #
+# Denoising samplers
+#
+# Ported from ComfyUI k-diffusion (MIT License):
+#   comfy/k_diffusion/sampling.py
+#   Copyright (c) 2022 Katherine Crowson (https://github.com/crowsonkb)
+#
+# No runtime imports from serenity, comfy, or diffusers.
+# --------------------------------------------------------------------------- #
+
+
+def _append_dims(sigma: Tensor, ndim: int) -> Tensor:
+    """Reshape sigma for broadcasting: ``(B,) -> (B, 1, 1, ...)``."""
+    return sigma.view(sigma.shape[:1] + (1,) * (ndim - 1))
+
+
+def _to_d(x: Tensor, sigma: Tensor, denoised: Tensor) -> Tensor:
+    """Convert denoiser output to a Karras ODE derivative."""
+    return (x - denoised) / _append_dims(sigma, x.ndim)
+
+
+def _get_ancestral_step(sigma_from: Tensor, sigma_to: Tensor, eta: float = 1.0):
+    """Calculate sigma_down and sigma_up for ancestral sampling."""
+    if not eta:
+        return sigma_to, 0.0
+    sigma_up = min(
+        sigma_to,
+        eta * (sigma_to ** 2 * (sigma_from ** 2 - sigma_to ** 2) / sigma_from ** 2) ** 0.5,
+    )
+    sigma_down = (sigma_to ** 2 - sigma_up ** 2) ** 0.5
+    return sigma_down, sigma_up
+
+
+# -- Individual samplers ---------------------------------------------------- #
+
+
+@torch.no_grad()
+def _sample_euler(model_fn, x: Tensor, sigmas: Tensor, callback=None) -> Tensor:
+    """Euler method (Karras Algorithm 2)."""
+    s_in = x.new_ones([x.shape[0]])
+    for i in range(len(sigmas) - 1):
+        sigma_hat = sigmas[i]
+        denoised = model_fn(x, sigma_hat * s_in)
+        d = _to_d(x, sigma_hat, denoised)
+        if callback is not None:
+            callback({"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigma_hat, "denoised": denoised})
+        dt = sigmas[i + 1] - sigma_hat
+        # Euler step
+        x = x + d * dt
+    return x
+
+
+@torch.no_grad()
+def _sample_euler_ancestral(model_fn, x: Tensor, sigmas: Tensor, callback=None, eta: float = 1.0) -> Tensor:
+    """Ancestral sampling with Euler steps."""
+    s_in = x.new_ones([x.shape[0]])
+    for i in range(len(sigmas) - 1):
+        denoised = model_fn(x, sigmas[i] * s_in)
+        sigma_down, sigma_up = _get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
+        if callback is not None:
+            callback({"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigmas[i], "denoised": denoised})
+        if sigma_down == 0:
+            x = denoised
+        else:
+            d = _to_d(x, sigmas[i], denoised)
+            dt = sigma_down - sigmas[i]
+            x = x + d * dt + torch.randn_like(x) * sigma_up
+    return x
+
+
+@torch.no_grad()
+def _sample_euler_ancestral_rf(model_fn, x: Tensor, sigmas: Tensor, callback=None, eta: float = 1.0) -> Tensor:
+    """Ancestral Euler for rectified-flow (CONST) models."""
+    s_in = x.new_ones([x.shape[0]])
+    for i in range(len(sigmas) - 1):
+        denoised = model_fn(x, sigmas[i] * s_in)
+        if callback is not None:
+            callback({"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigmas[i], "denoised": denoised})
+        if sigmas[i + 1] == 0:
+            x = denoised
+        else:
+            downstep_ratio = 1 + (sigmas[i + 1] / sigmas[i] - 1) * eta
+            sigma_down = sigmas[i + 1] * downstep_ratio
+            alpha_ip1 = 1 - sigmas[i + 1]
+            alpha_down = 1 - sigma_down
+            renoise_coeff = (sigmas[i + 1] ** 2 - sigma_down ** 2 * alpha_ip1 ** 2 / alpha_down ** 2) ** 0.5
+            sigma_down_i_ratio = sigma_down / sigmas[i]
+            x = sigma_down_i_ratio * x + (1 - sigma_down_i_ratio) * denoised
+            if eta > 0:
+                x = (alpha_ip1 / alpha_down) * x + torch.randn_like(x) * renoise_coeff
+    return x
+
+
+@torch.no_grad()
+def _sample_dpmpp_2m(model_fn, x: Tensor, sigmas: Tensor, callback=None) -> Tensor:
+    """DPM-Solver++(2M)."""
+    s_in = x.new_ones([x.shape[0]])
+    sigma_fn = lambda t: t.neg().exp()
+    t_fn = lambda sigma: sigma.log().neg()
+    old_denoised = None
+
+    for i in range(len(sigmas) - 1):
+        denoised = model_fn(x, sigmas[i] * s_in)
+        if callback is not None:
+            callback({"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigmas[i], "denoised": denoised})
+        t, t_next = t_fn(sigmas[i]), t_fn(sigmas[i + 1])
+        h = t_next - t
+        if old_denoised is None or sigmas[i + 1] == 0:
+            x = (sigma_fn(t_next) / sigma_fn(t)) * x - (-h).expm1() * denoised
+        else:
+            h_last = t - t_fn(sigmas[i - 1])
+            r = h_last / h
+            denoised_d = (1 + 1 / (2 * r)) * denoised - (1 / (2 * r)) * old_denoised
+            x = (sigma_fn(t_next) / sigma_fn(t)) * x - (-h).expm1() * denoised_d
+        old_denoised = denoised
+    return x
+
+
+@torch.no_grad()
+def _sample_dpmpp_2m_sde(model_fn, x: Tensor, sigmas: Tensor, callback=None, eta: float = 1.0, solver_type: str = "midpoint") -> Tensor:
+    """DPM-Solver++(2M) SDE.
+
+    Uses simple randn noise (no BrownianTree dependency).
+    """
+    if len(sigmas) <= 1:
+        return x
+
+    s_in = x.new_ones([x.shape[0]])
+    sigma_fn = lambda t: t.neg().exp()
+    t_fn = lambda sigma: sigma.log().neg()
+    old_denoised = None
+    h_last = None
+
+    for i in range(len(sigmas) - 1):
+        denoised = model_fn(x, sigmas[i] * s_in)
+        if callback is not None:
+            callback({"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigmas[i], "denoised": denoised})
+        if sigmas[i + 1] == 0:
+            # Final denoising step
+            x = denoised
+        else:
+            t, t_next = t_fn(sigmas[i]), t_fn(sigmas[i + 1])
+            h = t_next - t
+            h_eta = h * (eta + 1)
+
+            x = (sigma_fn(t_next) / sigma_fn(t)) * (-h * eta).exp() * x + sigma_fn(t_next) * (-h_eta).expm1().neg() * denoised
+
+            if old_denoised is not None:
+                r = h_last / h
+                if solver_type == "heun":
+                    x = x + sigma_fn(t_next) * ((-h_eta).expm1().neg() / (-h_eta) + 1) * (1 / r) * (denoised - old_denoised)
+                elif solver_type == "midpoint":
+                    x = x + 0.5 * sigma_fn(t_next) * (-h_eta).expm1().neg() * (1 / r) * (denoised - old_denoised)
+
+            if eta > 0:
+                x = x + torch.randn_like(x) * sigmas[i + 1] * (-2 * h * eta).expm1().neg().sqrt()
+
+            h_last = h
+        old_denoised = denoised
+    return x
+
+
+# -- Dispatcher ------------------------------------------------------------- #
+
+
+_SAMPLER_MAP = {
+    "euler": _sample_euler,
+    "euler_ancestral": _sample_euler_ancestral,
+    "euler_ancestral_rf": _sample_euler_ancestral_rf,
+    "dpmpp_2m": _sample_dpmpp_2m,
+    "dpmpp_2m_sde": _sample_dpmpp_2m_sde,
+    "dpmpp_sde": _sample_dpmpp_2m_sde,
+}
+
+
+@torch.no_grad()
+def sample(
+    model_fn,
+    noise: Tensor,
+    sigmas: Tensor,
+    sampler_type: str = "euler",
+    callback=None,
+) -> Tensor:
+    """Run a denoising loop.
+
+    Parameters
+    ----------
+    model_fn : callable
+        ``(x, sigma) -> denoised``.  Sigma is broadcast as ``sigmas[i] * s_in``.
+    noise : Tensor
+        Initial noisy latent (already scaled by the sigma schedule).
+    sigmas : Tensor
+        1-D sigma schedule with final element == 0.
+    sampler_type : str
+        One of ``euler``, ``euler_ancestral``, ``dpmpp_2m``, ``dpmpp_2m_sde``,
+        ``dpmpp_sde``.  Unknown types fall back to ``euler`` with a warning.
+    callback : callable or None
+        ``callback({'x': ..., 'i': ..., 'sigma': ..., 'sigma_hat': ..., 'denoised': ...})``.
+    """
+    fn = _SAMPLER_MAP.get(sampler_type)
+    if fn is None:
+        logger.warning("Unknown sampler_type %r — falling back to euler", sampler_type)
+        fn = _sample_euler
+    return fn(model_fn, noise, sigmas, callback=callback)

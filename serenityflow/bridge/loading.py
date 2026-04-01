@@ -476,15 +476,13 @@ def _load_flux2_transformer(path: str, dtype: torch.dtype, model_config) -> nn.M
     """Load a FLUX.2 Dev/Klein transformer from a single safetensors file."""
     try:
         from diffusers import Flux2Transformer2DModel
-        from serenity.models.flux2_probe import flux2_config_dir, probe_flux2_variant
-        from serenity.models.single_file_utils import (
-            check_not_lora,
-            format_load_diagnostic,
-            strip_accelerate_hooks,
+        from serenityflow.bridge.flux2_utils import (
+            flux2_config_dir, probe_flux2_variant,
+            check_not_lora, format_load_diagnostic, strip_accelerate_hooks,
         )
     except ImportError as exc:
         raise RuntimeError(
-            "FLUX.2 loading requires diffusers and Serenity's flux2 helpers."
+            "FLUX.2 loading requires diffusers and serenityflow.bridge.flux2_utils."
         ) from exc
 
     check_not_lora(path)
@@ -1149,13 +1147,13 @@ def _load_qwen_transformer(path: str, dtype: torch.dtype, model_config) -> nn.Mo
     """
     try:
         from diffusers import QwenImageTransformer2DModel
-        from serenity.models.qwen import _find_qwen_cache_snapshot
+        from serenityflow.bridge.model_utils import find_qwen_cache_snapshot
     except ImportError as exc:
         raise RuntimeError(
-            "Qwen loading requires diffusers and Serenity's native qwen helpers."
+            "Qwen loading requires diffusers."
         ) from exc
 
-    cache_snapshot = _find_qwen_cache_snapshot()
+    cache_snapshot = find_qwen_cache_snapshot()
     if cache_snapshot is None:
         raise RuntimeError(
             f"Cannot load Qwen model from {path}: no local Qwen-Image pipeline snapshot found."
