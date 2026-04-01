@@ -657,6 +657,9 @@ def load_image_mask(image, channel="alpha"):
 def model_sampling_sd3(model, shift=3.0):
     if hasattr(model, "with_options"):
         return (model.with_options({"sampling_type": "sd3", "shift": shift}),)
+    # Fallback: attach shift directly so sampling.py can read it
+    model._serenity_sigma_shift = float(shift)
+    model._serenity_sampling_type = "sd3"
     return (model,)
 
 
@@ -672,6 +675,9 @@ def model_sampling_sd3(model, shift=3.0):
 def model_sampling_aura_flow(model, shift=1.73):
     if hasattr(model, "with_options"):
         return (model.with_options({"sampling_type": "aura_flow", "shift": shift}),)
+    # Fallback: attach shift directly so sampling.py can read it
+    model._serenity_sigma_shift = float(shift)
+    model._serenity_sampling_type = "aura_flow"
     return (model,)
 
 

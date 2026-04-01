@@ -30,6 +30,42 @@ def encode_text(clip: CLIPWrapper, text: str) -> list[dict]:
 
     Each entry is a dict with 'cross_attn' and optionally 'pooled_output'.
     """
+    # SD3 needs special handling: model expects T5-only context (4096d) and
+    # concat(clip_l_pooled, clip_g_pooled) as pooled_projections (2048d).
+    # Encode each encoder separately instead of using _encode_sd3 which
+    # concatenates all hidden states into 6144d (wrong format for the model).
+    _is_sd3 = False
+    try:
+        from serenity.inference.models.detection import ModelArchitecture
+        _is_sd3 = hasattr(clip, "_arch") and clip._arch == ModelArchitecture.SD3
+    except ImportError:
+        pass
+
+    if _is_sd3:
+        try:
+            from serenity.inference.text.encoders import TextEncoderType
+            clip_l_enc = clip._manager.get_encoder(TextEncoderType.CLIP_L)
+            clip_g_enc = clip._manager.get_encoder(TextEncoderType.CLIP_G)
+            t5_enc = clip._manager.get_encoder(TextEncoderType.T5_XXL)
+
+            clip_l_out = clip_l_enc.encode(text, clip_skip=clip.clip_skip)
+            clip_g_out = clip_g_enc.encode(text, clip_skip=clip.clip_skip)
+            t5_out = t5_enc.encode(text)
+
+            cond = t5_out.hidden_states  # (B, seq, 4096)
+            pooled = torch.cat([
+                clip_l_out.pooled_output,
+                clip_g_out.pooled_output,
+            ], dim=-1)  # (B, 2048)
+            attention_mask = None
+
+            entry = {"cross_attn": cond}
+            if pooled is not None:
+                entry["pooled_output"] = pooled
+            return [entry]
+        except Exception as e:
+            logger.warning("SD3 direct encode failed, falling back: %s", e)
+
     try:
         result = clip._manager.encode_for_model(
             clip._arch, text, "",
@@ -300,11 +336,13 @@ def _run_sampling(
 
     is_qwen = _is_qwen_transformer(model)
     is_zimage = _is_zimage_transformer(model)
+    _cls_name = model.__class__.__name__
+    _is_wan = "Wan" in _cls_name
     # SD3 uses SD3Transformer2DModel; Flux uses FluxTransformer2DModel — both have joint_attention_dim
-    is_sd3 = (not is_qwen and not is_zimage and
-              model.__class__.__name__ in ("SD3Transformer2DModel",) or
-              prediction_type == "flow" and hasattr(model, "config") and
-              hasattr(model.config, "sample_size") and not hasattr(model.config, "in_channels_condition"))
+    is_sd3 = (not is_qwen and not is_zimage and not _is_wan and (
+              _cls_name in ("SD3Transformer2DModel",) or
+              (prediction_type == "flow" and hasattr(model, "config") and
+               hasattr(model.config, "sample_size") and not hasattr(model.config, "in_channels_condition"))))
     is_flux = (not is_qwen and not is_zimage and not is_sd3 and
                hasattr(model, "config") and hasattr(model.config, "joint_attention_dim"))
     is_flux2 = bool(getattr(model, "_serenity_flux2", False))
@@ -343,6 +381,16 @@ def _run_sampling(
     if prediction_type == "flow_flux" and hasattr(prediction, "apply_sigma_shift"):
         sigma_body = prediction.apply_sigma_shift(sigmas[:-1])
         sigmas = torch.cat([sigma_body, sigmas[-1:]])
+    elif prediction_type == "flow":
+        # Flow matching sigma shift. Read from model attribute (set by ModelSamplingSD3/AuraFlow
+        # nodes) or default to 3.0 for SD3.
+        shift = getattr(model, "_serenity_sigma_shift", 3.0 if is_sd3 else 0.0)
+        if shift > 0:
+            body = sigmas[:-1]
+            shifted = shift * body / (1.0 + (shift - 1.0) * body)
+            sigmas = torch.cat([shifted, sigmas[-1:]])
+            logger.info("Flow sigma shift=%.1f applied: [%.4f .. %.4f]",
+                         shift, sigmas[0].item(), sigmas[-2].item())
 
     if noise is None:
         noise = s["create_noise"](
@@ -373,7 +421,8 @@ def _run_sampling(
         model_dtype = torch.float32
 
     log_sigmas = None
-    if not is_flux and not is_qwen and not is_zimage and not is_sd3:
+    _is_flow = prediction_type in ("flow", "flow_flux")
+    if not is_flux and not is_qwen and not is_zimage and not is_sd3 and not _is_flow:
         betas = torch.linspace(0.00085 ** 0.5, 0.012 ** 0.5, 1000) ** 2
         alphas = 1.0 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
@@ -574,8 +623,8 @@ def _run_sampling(
     def call_model(inp, timestep, **kwargs):
         """Call the underlying model with family-specific timestep handling."""
         if is_sd3:
-            # SD3 uses continuous timestep (sigma * 1000)
-            sd3_t = (timestep * 1000.0).to(device=device, dtype=model_dtype)
+            # SD3: timestep is already sigma*1000 from prediction.sigma_to_timestep()
+            sd3_t = timestep.to(device=device, dtype=model_dtype)
             return _invoke_with_retry(model, inp, timestep=sd3_t, **kwargs)
         if is_flux:
             return _invoke_with_retry(model, inp, timestep=timestep, **kwargs)
