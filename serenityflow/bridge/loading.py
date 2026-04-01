@@ -301,6 +301,29 @@ def load_diffusion_model(path: str, dtype: str = "default") -> nn.Module:
 
             model._stagehand_runtime = stagehand_runtime
             model._stagehand_checkpoint_path = path
+
+            # File-backed mode: stream blocks from checkpoint file, not CPU module params
+            _ckpt_path = path
+            if _ckpt_path:
+                try:
+                    if _ckpt_path.endswith(".safetensors"):
+                        _n_fb = stagehand_runtime.convert_registry_to_file_backed(_ckpt_path)
+                        logger.info("File-backed: %d params from %s", _n_fb, _ckpt_path)
+                    elif os.path.isdir(_ckpt_path):
+                        _n_fb = stagehand_runtime.convert_registry_to_file_backed_sharded(_ckpt_path)
+                        logger.info("File-backed (sharded): %d params from %s", _n_fb, _ckpt_path)
+                except Exception as _fb_exc:
+                    logger.warning("File-backed conversion failed (%s), using module-backed", _fb_exc)
+
+                # VMM registration (after file-backed so param_layout is populated)
+                _vmm_h = stagehand_runtime.vmm_register_model(
+                    model_id=f"{model.__class__.__name__}_{id(model)}",
+                    dtype_str="bfloat16",
+                    safetensors_path=_ckpt_path if _ckpt_path.endswith(".safetensors") else None,
+                )
+                if _vmm_h is not None:
+                    logger.info("VMM: registered %s (%d blocks)", model.__class__.__name__, _vmm_h.block_count)
+
             logger.info("Model managed by Stagehand (async prefetch, %d-block lookahead)",
                         stagehand_runtime._config.prefetch_window_blocks)
         else:

@@ -2543,6 +2543,15 @@ def sample_ltxv(
             n_fb = xfm_runtime.convert_registry_to_file_backed(model.checkpoint_path)
             gc.collect()
             logger.info("File-backed: %d params from %s", n_fb, model.checkpoint_path)
+
+            # VMM registration (after file-backed so param_layout is populated)
+            _vmm_handle = xfm_runtime.vmm_register_model(
+                model_id=f"ltxv_{id(xfm_inner)}",
+                dtype_str="bfloat16",
+                safetensors_path=model.checkpoint_path if model.checkpoint_path.endswith(".safetensors") else None,
+            )
+            if _vmm_handle is not None:
+                logger.info("VMM: registered LTX-V transformer (%d blocks)", _vmm_handle.block_count)
         except Exception as exc:
             logger.warning("File-backed conversion failed (%s), using module-backed", exc)
         logger.info("Stagehand transformer ready (%d blocks)", len(xfm_runtime._registry))
@@ -2832,6 +2841,14 @@ def sample_ltxv(
                 n_fb2 = xfm_runtime2.convert_registry_to_file_backed(model.checkpoint_path)
                 gc.collect()
                 logger.info("Stage 2 file-backed: %d params from %s", n_fb2, model.checkpoint_path)
+
+                _vmm_handle2 = xfm_runtime2.vmm_register_model(
+                    model_id=f"ltxv_stage2_{id(xfm_inner2)}",
+                    dtype_str="bfloat16",
+                    safetensors_path=model.checkpoint_path if model.checkpoint_path.endswith(".safetensors") else None,
+                )
+                if _vmm_handle2 is not None:
+                    logger.info("VMM: registered LTX-V stage2 transformer (%d blocks)", _vmm_handle2.block_count)
             except Exception as exc:
                 logger.warning("Stage 2 file-backed conversion failed (%s)", exc)
             logger.info("Stage 2 Stagehand ready (%d blocks)", len(xfm_runtime2._registry))
