@@ -61,6 +61,10 @@ async def lifespan(app: FastAPI):
     from serenityflow.executor.runner import WorkflowRunner
     from serenityflow.nodes.registry import registry
 
+    # Install debug log buffer (captures serenityflow.* logs in a ring buffer)
+    from serenityflow.debug.log_buffer import install as install_log_buffer
+    install_log_buffer()
+
     # Import nodes to trigger registration
     import serenityflow.nodes  # noqa: F401
 
@@ -170,7 +174,10 @@ from serenityflow.server.sam_routes import register_sam_routes  # noqa: E402
 from serenityflow.server.preprocess_routes import register_preprocess_routes  # noqa: E402
 from serenityflow.server.video_edit_routes import register_video_edit_routes  # noqa: E402
 from serenityflow.server.websocket import register_websocket  # noqa: E402
+from serenityflow.debug.router import register_debug_routes  # noqa: E402
 
+# Debug routes MUST register before the catch-all static route in register_routes
+register_debug_routes(app)
 # SAM and preprocess routes MUST register before the catch-all static route in register_routes
 register_sam_routes(app)
 register_preprocess_routes(app)
