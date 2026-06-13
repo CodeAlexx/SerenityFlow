@@ -8,9 +8,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import sys
 import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -257,6 +259,8 @@ class TestDebugEndpoints:
         data = r.json()
         assert data["pipeline_type"] is None
         assert data["model_loaded"] is False
+        assert "active_loras" in data
+        assert "components" in data
 
     def test_pipeline_status_empty_cache(self, client):
         state.runner = FakeRunner()
@@ -598,3 +602,734 @@ class TestMCPClient:
 
         result = await client.post("/lora/check", json={"lora_path": "/test.safetensors"})
         assert result == {"compatible": True}
+
+
+# ---------------------------------------------------------------------------
+# LoRA Registry tests
+# ---------------------------------------------------------------------------
+
+
+class TestLoraRegistry:
+    def test_record_and_retrieve(self):
+        from serenityflow.bridge.lora_utils import LoraRecord, LoraRegistry
+
+        reg = LoraRegistry()
+        rec = LoraRecord(
+            path="/test/lora.safetensors",
+            strength=0.8,
+            rank=16,
+            alpha=16.0,
+            keys_matched=42,
+            keys_missed=3,
+            target_modules=["blocks.0.to_q.weight"],
+            timestamp=1.0,
+        )
+        reg.record(rec)
+        results = reg.get_all()
+        assert len(results) == 1
+        assert results[0].path == "/test/lora.safetensors"
+        assert results[0].rank == 16
+
+    def test_clear(self):
+        from serenityflow.bridge.lora_utils import LoraRecord, LoraRegistry
+
+        reg = LoraRegistry()
+        rec = LoraRecord(
+            path="/test.safetensors", strength=1.0, rank=8, alpha=None,
+            keys_matched=10, keys_missed=0, target_modules=[], timestamp=0.0,
+        )
+        reg.record(rec)
+        assert len(reg.get_all()) == 1
+        reg.clear()
+        assert len(reg.get_all()) == 0
+
+    def test_to_dicts(self):
+        from serenityflow.bridge.lora_utils import LoraRecord, LoraRegistry
+
+        reg = LoraRegistry()
+        rec = LoraRecord(
+            path="/test.safetensors", strength=0.5, rank=32, alpha=16.0,
+            keys_matched=5, keys_missed=2, target_modules=["a.weight", "b.weight"],
+            timestamp=99.0,
+        )
+        reg.record(rec)
+        dicts = reg.to_dicts()
+        assert len(dicts) == 1
+        d = dicts[0]
+        assert isinstance(d, dict)
+        assert d["path"] == "/test.safetensors"
+        assert d["strength"] == 0.5
+        assert d["rank"] == 32
+        assert d["alpha"] == 16.0
+        assert d["keys_matched"] == 5
+        assert d["keys_missed"] == 2
+        assert d["target_modules"] == ["a.weight", "b.weight"]
+        assert d["timestamp"] == 99.0
+
+
+class TestPipelineStatusLoras:
+    def test_active_loras_populated(self, client):
+        from serenityflow.bridge.lora_utils import LoraRecord, get_lora_registry
+
+        registry = get_lora_registry()
+        # Clean slate
+        registry.clear()
+        registry.record(LoraRecord(
+            path="/my/lora.safetensors", strength=0.75, rank=16, alpha=16.0,
+            keys_matched=100, keys_missed=5, target_modules=["x.weight"],
+            timestamp=1.0,
+        ))
+
+        state.runner = FakeRunner()
+        r = client.get("/debug/pipeline/status")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["active_loras"]) == 1
+        assert data["active_loras"][0]["path"] == "/my/lora.safetensors"
+        assert data["active_loras"][0]["strength"] == 0.75
+
+        # Cleanup
+        registry.clear()
+
+    def test_active_loras_visible_without_runner(self, client):
+        """LoRAs registered globally must appear even when runner is None."""
+        from serenityflow.bridge.lora_utils import LoraRecord, get_lora_registry
+
+        registry = get_lora_registry()
+        registry.clear()
+        registry.record(LoraRecord(
+            path="/orphan/lora.safetensors", strength=1.0, rank=8, alpha=None,
+            keys_matched=10, keys_missed=0, target_modules=[], timestamp=0.0,
+        ))
+
+        state.runner = None
+        r = client.get("/debug/pipeline/status")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["active_loras"]) == 1
+        assert data["active_loras"][0]["path"] == "/orphan/lora.safetensors"
+
+        registry.clear()
+
+
+class TestBreakpointGenerate:
+    def test_no_model_returns_503(self, client):
+        """Breakpoint generate with no runner returns 503."""
+        state.runner = None
+        r = client.post("/debug/generate/breakpoint", json={"prompt": "test"})
+        assert r.status_code == 503
+        data = r.json()
+        assert "error" in data
+
+    def test_no_model_loaded_returns_503(self, client):
+        """Breakpoint generate with runner but no model returns 503."""
+        state.runner = FakeRunner()
+        r = client.post("/debug/generate/breakpoint", json={"prompt": "test"})
+        assert r.status_code == 503
+        data = r.json()
+        assert "error" in data
+        assert "No model loaded" in data["error"]
+
+    def test_invalid_resume_token(self, client):
+        """Breakpoint generate with invalid resume_token returns 400."""
+        # Need a runner with a model to get past the early checks
+        import torch
+
+        fake_model = torch.nn.Linear(4, 4)
+        fake_model._serenity_arch = None
+
+        cache = FakeCache()
+        # Create a fake LoadedCheckpoint
+        class FakeLoadedCheckpoint:
+            __name__ = "LoadedCheckpoint"
+            def __init__(self):
+                self.model = fake_model
+        lc = FakeLoadedCheckpoint()
+        type(lc).__name__ = "LoadedCheckpoint"
+        cache.set_outputs("n1", (lc,))
+
+        state.runner = FakeRunner(cache=cache)
+        r = client.post("/debug/generate/breakpoint", json={
+            "prompt": "test",
+            "resume_token": "invalid_token_xyz",
+        })
+        assert r.status_code == 400
+        data = r.json()
+        assert "error" in data
+        assert "invalid" in data["error"].lower() or "expired" in data["error"].lower()
+
+    def test_breakpoint_request_model_defaults(self):
+        """BreakpointGenerateRequest has correct defaults."""
+        from serenityflow.debug.router import BreakpointGenerateRequest
+
+        req = BreakpointGenerateRequest(prompt="hello")
+        assert req.prompt == "hello"
+        assert req.negative_prompt == ""
+        assert req.width == 512
+        assert req.height == 512
+        assert req.steps == 4
+        assert req.guidance_scale == 3.5
+        assert req.seed == 42
+        assert req.break_at_step == 2
+        assert req.resume_token is None
+
+
+class TestABCompare:
+    def test_no_model_returns_503(self, client):
+        """A/B compare with no runner returns 503."""
+        state.runner = None
+        r = client.post("/debug/generate/ab_compare", json={
+            "prompt": "test",
+            "lora_path": "/some/lora.safetensors",
+        })
+        assert r.status_code == 503
+        data = r.json()
+        assert "error" in data
+
+    def test_no_model_loaded_returns_503(self, client):
+        """A/B compare with runner but no model returns 503."""
+        state.runner = FakeRunner()
+        r = client.post("/debug/generate/ab_compare", json={
+            "prompt": "test",
+            "lora_path": "/some/lora.safetensors",
+        })
+        assert r.status_code == 503
+        data = r.json()
+        assert "error" in data
+        assert "No model loaded" in data["error"]
+
+    def test_missing_lora_file(self, client):
+        """A/B compare with nonexistent lora_path returns 404."""
+        import torch
+
+        fake_model = torch.nn.Linear(4, 4)
+        fake_model._serenity_arch = None
+
+        cache = FakeCache()
+
+        class FakeLoadedCheckpoint:
+            def __init__(self):
+                self.model = fake_model
+        lc = FakeLoadedCheckpoint()
+        type(lc).__name__ = "LoadedCheckpoint"
+        cache.set_outputs("n1", (lc,))
+
+        state.runner = FakeRunner(cache=cache)
+        r = client.post("/debug/generate/ab_compare", json={
+            "prompt": "test",
+            "lora_path": "/nonexistent/lora.safetensors",
+        })
+        assert r.status_code == 404
+        data = r.json()
+        assert "error" in data
+        assert "not found" in data["error"].lower()
+
+    def test_ab_compare_request_model(self):
+        """ABCompareRequest has correct defaults."""
+        from serenityflow.debug.router import ABCompareRequest
+
+        req = ABCompareRequest(prompt="hello")
+        assert req.prompt == "hello"
+        assert req.negative_prompt == ""
+        assert req.width == 512
+        assert req.height == 512
+        assert req.steps == 4
+        assert req.guidance_scale == 3.5
+        assert req.seed == 42
+        assert req.lora_path == ""
+        assert req.lora_strength == 1.0
+
+
+class TestVramStatusEnhanced:
+    def test_vram_status_no_coordinator(self, client):
+        """VRAM endpoint works with no stagehand coordinator."""
+        r = client.get("/debug/vram/status")
+        assert r.status_code == 200
+        data = r.json()
+        assert "gpu" in data
+        assert "stagehand" in data
+        assert "system_ram" in data
+
+
+# ---------------------------------------------------------------------------
+# Training metrics tests
+# ---------------------------------------------------------------------------
+
+
+def _create_board_db(db_path: str, scalars: list[tuple] | None = None, sessions: list[tuple] | None = None):
+    """Create a minimal SerenityBoard board.db with schema and optional data."""
+    import sqlite3
+    from pathlib import Path
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_id TEXT NOT NULL, start_time REAL NOT NULL,
+            resume_step INTEGER, status TEXT NOT NULL,
+            PRIMARY KEY (session_id)
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS scalars (
+            tag TEXT NOT NULL, step INTEGER NOT NULL,
+            wall_time REAL NOT NULL, value REAL NOT NULL,
+            PRIMARY KEY (tag, step)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS idx_scalars_tag_step ON scalars(tag, step DESC);
+    ''')
+    if sessions:
+        conn.executemany("INSERT INTO sessions VALUES (?, ?, ?, ?)", sessions)
+    if scalars:
+        conn.executemany("INSERT INTO scalars VALUES (?, ?, ?, ?)", scalars)
+    conn.commit()
+    conn.close()
+
+
+class TestTrainingMetrics:
+    def test_find_latest_run(self, tmp_path):
+        from serenityflow.debug.training_reader import find_latest_run
+
+        # Create two run dirs
+        run1 = tmp_path / "run1" / "board.db"
+        run2 = tmp_path / "run2" / "board.db"
+        _create_board_db(str(run1))
+
+        import time
+        time.sleep(0.05)  # ensure different mtime
+        _create_board_db(str(run2))
+
+        result = find_latest_run(str(tmp_path))
+        assert result is not None
+        name, path = result
+        assert name == "run2"
+        assert path.endswith("board.db")
+
+    def test_find_latest_run_empty_dir(self, tmp_path):
+        from serenityflow.debug.training_reader import find_latest_run
+
+        assert find_latest_run(str(tmp_path)) is None
+
+    def test_find_latest_run_nonexistent_dir(self):
+        from serenityflow.debug.training_reader import find_latest_run
+
+        assert find_latest_run("/nonexistent/path/xyz") is None
+
+    def test_read_latest_scalars(self, tmp_path):
+        from serenityflow.debug.training_reader import _open_readonly, _read_latest_scalars
+
+        db_path = str(tmp_path / "run1" / "board.db")
+        _create_board_db(db_path, scalars=[
+            ("loss/train", 1, 1000.0, 0.5),
+            ("loss/train", 2, 1001.0, 0.4),
+            ("loss/train", 3, 1002.0, 0.35),
+            ("grad_norm", 1, 1000.0, 1.2),
+            ("grad_norm", 2, 1001.0, 0.9),
+        ])
+
+        conn = _open_readonly(db_path)
+        try:
+            result = _read_latest_scalars(conn, ["loss/train", "grad_norm", "lr/default"])
+            assert "loss/train" in result
+            assert result["loss/train"]["step"] == 3
+            assert result["loss/train"]["value"] == 0.35
+            assert "grad_norm" in result
+            assert result["grad_norm"]["step"] == 2
+            assert result["grad_norm"]["value"] == 0.9
+            # lr/default not inserted, should not appear
+            assert "lr/default" not in result
+        finally:
+            conn.close()
+
+    def test_read_recent_series(self, tmp_path):
+        from serenityflow.debug.training_reader import _open_readonly, _read_recent_series
+
+        db_path = str(tmp_path / "run1" / "board.db")
+        scalars = [("loss/train", i, 1000.0 + i, 0.5 - i * 0.01) for i in range(1, 11)]
+        _create_board_db(db_path, scalars=scalars)
+
+        conn = _open_readonly(db_path)
+        try:
+            series = _read_recent_series(conn, "loss/train", 5)
+            assert len(series) == 5
+            # Should be in chronological order (step 6..10)
+            assert series[0][0] == 6
+            assert series[4][0] == 10
+            # Values should decrease
+            assert series[0][1] > series[4][1]
+        finally:
+            conn.close()
+
+    def test_compute_summary_decreasing_loss(self):
+        from serenityflow.debug.training_reader import _compute_summary
+
+        series = {
+            "loss/train": [[i, 1.0 - i * 0.1] for i in range(10)],
+        }
+        summary = _compute_summary(series)
+        assert summary["loss_trend"] == "decreasing"
+        assert "loss_last_n_mean" in summary
+        assert "loss_last_n_std" in summary
+
+    def test_compute_summary_increasing_loss(self):
+        from serenityflow.debug.training_reader import _compute_summary
+
+        series = {
+            "loss/train": [[i, 0.1 + i * 0.1] for i in range(10)],
+        }
+        summary = _compute_summary(series)
+        assert summary["loss_trend"] == "increasing"
+
+    def test_compute_summary_with_speed_and_grad(self):
+        from serenityflow.debug.training_reader import _compute_summary
+
+        series = {
+            "perf/steps_per_sec": [[i, 2.5] for i in range(5)],
+            "grad_norm": [[i, 1.0 + i * 0.1] for i in range(5)],
+        }
+        summary = _compute_summary(series)
+        assert summary["training_speed_steps_per_sec"] == 2.5
+        assert "grad_norm_mean" in summary
+        assert "grad_norm_max" in summary
+
+    def test_read_training_metrics_full(self, tmp_path):
+        from serenityflow.debug.training_reader import read_training_metrics
+
+        db_path = str(tmp_path / "myrun" / "board.db")
+        scalars = [
+            ("loss/train", i, 1000.0 + i, 0.5 - i * 0.01) for i in range(1, 21)
+        ] + [
+            ("grad_norm", i, 1000.0 + i, 1.0) for i in range(1, 21)
+        ] + [
+            ("lr/default", 20, 1020.0, 0.0001),
+        ]
+        _create_board_db(db_path, scalars=scalars, sessions=[
+            ("sess1", 1000.0, None, "running"),
+        ])
+
+        result = read_training_metrics(str(tmp_path), run_name="myrun", last_n_steps=10)
+        assert result["run_name"] == "myrun"
+        assert result["session_status"] == "running"
+        assert result["current_step"] == 20
+        assert "loss/train" in result["latest"]
+        assert "lr/default" in result["latest"]
+        assert "loss/train" in result["recent_series"]
+        assert len(result["recent_series"]["loss/train"]) == 10
+        assert "loss_trend" in result["summary"]
+        assert "available_tags" in result
+        assert "myrun" in result["available_runs"]
+
+    def test_read_training_metrics_auto_detect_run(self, tmp_path):
+        from serenityflow.debug.training_reader import read_training_metrics
+
+        db_path = str(tmp_path / "auto_run" / "board.db")
+        _create_board_db(db_path, scalars=[
+            ("loss/train", 1, 1000.0, 0.5),
+        ], sessions=[
+            ("s1", 1000.0, None, "complete"),
+        ])
+
+        result = read_training_metrics(str(tmp_path))
+        assert result["run_name"] == "auto_run"
+
+    def test_read_training_metrics_no_db(self, tmp_path):
+        from serenityflow.debug.training_reader import read_training_metrics
+
+        with pytest.raises(FileNotFoundError):
+            read_training_metrics(str(tmp_path))
+
+    def test_read_training_metrics_specific_run_not_found(self, tmp_path):
+        from serenityflow.debug.training_reader import read_training_metrics
+
+        with pytest.raises(FileNotFoundError):
+            read_training_metrics(str(tmp_path), run_name="nonexistent")
+
+    def test_no_board_db_returns_404(self, client, tmp_path):
+        r = client.get("/debug/training/metrics", params={"log_dir": str(tmp_path)})
+        assert r.status_code == 404
+        assert "error" in r.json()
+
+    def test_missing_log_dir_returns_400(self, client):
+        r = client.get("/debug/training/metrics")
+        assert r.status_code == 400
+        assert "error" in r.json()
+        assert "log_dir" in r.json()["error"]
+
+    def test_endpoint_with_real_db(self, client, tmp_path):
+        db_path = str(tmp_path / "test_run" / "board.db")
+        _create_board_db(db_path, scalars=[
+            ("loss/train", 1, 1000.0, 0.5),
+            ("loss/train", 2, 1001.0, 0.45),
+            ("loss/train", 3, 1002.0, 0.4),
+            ("grad_norm", 1, 1000.0, 1.5),
+            ("lr/default", 3, 1002.0, 0.0001),
+        ], sessions=[
+            ("s1", 1000.0, None, "running"),
+        ])
+
+        r = client.get("/debug/training/metrics", params={
+            "log_dir": str(tmp_path),
+            "run_name": "test_run",
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert data["run_name"] == "test_run"
+        assert data["session_status"] == "running"
+        assert data["current_step"] == 3
+        assert "loss/train" in data["latest"]
+        assert data["latest"]["loss/train"]["value"] == 0.4
+        assert "available_tags" in data
+
+    def test_endpoint_with_custom_tags(self, client, tmp_path):
+        db_path = str(tmp_path / "tag_run" / "board.db")
+        _create_board_db(db_path, scalars=[
+            ("custom/metric", 1, 1000.0, 42.0),
+            ("loss/train", 1, 1000.0, 0.5),
+        ])
+
+        r = client.get("/debug/training/metrics", params={
+            "log_dir": str(tmp_path),
+            "run_name": "tag_run",
+            "tags": "custom/metric,loss/train",
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert "custom/metric" in data["latest"]
+        assert data["latest"]["custom/metric"]["value"] == 42.0
+
+
+# ---------------------------------------------------------------------------
+# Pipeline Diff tests
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineDiff:
+    def test_save_snapshot(self, client):
+        state.runner = None
+        r = client.post("/debug/pipeline/diff", json={"save_snapshot": "test1"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["action"] == "saved"
+        assert data["name"] == "test1"
+        assert "model" in data["keys_captured"]
+        assert "timestamp" in data
+
+    def test_list_snapshots(self, client):
+        state.runner = None
+        # Save two snapshots
+        client.post("/debug/pipeline/diff", json={"save_snapshot": "snap_a"})
+        client.post("/debug/pipeline/diff", json={"save_snapshot": "snap_b"})
+
+        r = client.post("/debug/pipeline/diff", json={})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["action"] == "list"
+        assert data["count"] >= 2
+        assert "snap_a" in data["snapshots"]
+        assert "snap_b" in data["snapshots"]
+
+    def test_diff_identical(self, client):
+        state.runner = None
+        # Save a snapshot, then diff it against current (same state)
+        client.post("/debug/pipeline/diff", json={"save_snapshot": "baseline"})
+
+        r = client.post("/debug/pipeline/diff", json={
+            "snapshot_a": "baseline",
+            "snapshot_b": None,  # current
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert data["action"] == "diff"
+        assert data["diff_count"] == 0
+        assert data["identical_count"] > 0
+
+    def test_diff_unknown_snapshot(self, client):
+        r = client.post("/debug/pipeline/diff", json={
+            "snapshot_a": "nonexistent_snap",
+            "snapshot_b": None,
+        })
+        assert r.status_code == 404
+        data = r.json()
+        assert "error" in data
+        assert "nonexistent_snap" in data["error"]
+
+    def test_diff_snapshots_with_differences(self, client):
+        state.runner = None
+        # Save a snapshot
+        client.post("/debug/pipeline/diff", json={"save_snapshot": "before"})
+
+        # Access the internal snapshot storage and modify it to simulate change
+        from serenityflow.debug.router import register_debug_routes
+        # We need to get at the _config_snapshots closure. Instead, save another
+        # snapshot and then mutate the stored one via a second save with different state.
+        # Simpler: save "before", change state, save "after", then diff.
+        # Since runner is None both times, model.loaded will be the same.
+        # So let's directly modify the snapshot through the endpoint by saving
+        # a second snapshot with a different runner state.
+        import torch
+        fake_model = torch.nn.Linear(4, 4)
+
+        class FakeLoadedCheckpoint:
+            def __init__(self):
+                self.model = fake_model
+                self.model_config = None
+        lc = FakeLoadedCheckpoint()
+        type(lc).__name__ = "LoadedCheckpoint"
+
+        cache = FakeCache()
+        cache.set_outputs("n1", (lc,))
+        state.runner = FakeRunner(cache=cache)
+
+        client.post("/debug/pipeline/diff", json={"save_snapshot": "after"})
+
+        r = client.post("/debug/pipeline/diff", json={
+            "snapshot_a": "before",
+            "snapshot_b": "after",
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert data["action"] == "diff"
+        assert data["diff_count"] > 0
+        # model.loaded should differ (False vs True)
+        model_diffs = [d for d in data["differences"] if d["key"] == "model.loaded"]
+        assert len(model_diffs) == 1
+        assert model_diffs[0]["a"] is False
+        assert model_diffs[0]["b"] is True
+
+    def test_pipeline_diff_request_model(self):
+        from serenityflow.debug.router import PipelineDiffRequest
+
+        req = PipelineDiffRequest()
+        assert req.snapshot_a is None
+        assert req.snapshot_b is None
+        assert req.save_snapshot is None
+
+        req2 = PipelineDiffRequest(save_snapshot="foo")
+        assert req2.save_snapshot == "foo"
+
+
+# ---------------------------------------------------------------------------
+# Diagnose (meta-tool) tests
+# ---------------------------------------------------------------------------
+
+
+class TestDiagnose:
+    def test_full_mode_no_model(self, client):
+        """Diagnose full mode with no runner returns overall error."""
+        state.runner = None
+        r = client.post("/debug/diagnose", json={"mode": "full"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["overall_status"] == "error"
+        assert "pipeline" in data["sections"]
+        assert data["sections"]["pipeline"]["status"] == "error"
+
+    def test_full_mode_structure(self, client):
+        """Response has required top-level keys."""
+        state.runner = None
+        r = client.post("/debug/diagnose", json={"mode": "full"})
+        assert r.status_code == 200
+        data = r.json()
+        assert "mode" in data
+        assert "overall_status" in data
+        assert "sections" in data
+        assert "summary" in data
+        assert data["mode"] == "full"
+
+    def test_lora_mode_without_path(self, client):
+        """Lora mode without lora_path returns error section."""
+        state.runner = None
+        r = client.post("/debug/diagnose", json={"mode": "lora"})
+        assert r.status_code == 200
+        data = r.json()
+        assert "lora_compatibility" in data["sections"]
+        assert data["sections"]["lora_compatibility"]["status"] == "error"
+        assert "required" in data["sections"]["lora_compatibility"]["diagnosis"].lower()
+
+    def test_performance_mode(self, client):
+        """Performance mode has pipeline, vram, logs but NOT lora or weight_health."""
+        state.runner = None
+        r = client.post("/debug/diagnose", json={"mode": "performance"})
+        assert r.status_code == 200
+        data = r.json()
+        sections = data["sections"]
+        assert "pipeline" in sections
+        assert "vram" in sections
+        assert "logs" in sections
+        assert "lora_compatibility" not in sections
+        assert "weight_health" not in sections
+
+    def test_health_mode(self, client):
+        """Health mode has pipeline, vram, weight_health, logs."""
+        state.runner = None
+        r = client.post("/debug/diagnose", json={"mode": "health"})
+        assert r.status_code == 200
+        data = r.json()
+        sections = data["sections"]
+        assert "pipeline" in sections
+        assert "vram" in sections
+        assert "weight_health" in sections
+        assert "logs" in sections
+
+    def test_diagnose_request_model(self):
+        """DiagnoseRequest Pydantic model has correct defaults."""
+        from serenityflow.debug.router import DiagnoseRequest
+
+        req = DiagnoseRequest()
+        assert req.mode == "full"
+        assert req.lora_path is None
+        assert req.tensor_paths is None
+        assert req.training_log_dir is None
+
+    def test_runner_pipeline_no_state(self):
+        """DiagnosticRunner._check_pipeline returns error when no runner."""
+        from serenityflow.debug.diagnose import DiagnosticRunner
+
+        # state.runner is None from the autouse fixture
+        runner = DiagnosticRunner()
+        section = runner._check_pipeline()
+        assert section.status == "error"
+        assert section.data["model_loaded"] is False
+        assert "No pipeline runner" in section.diagnosis
+
+    def test_full_mode_with_model(self, client):
+        """Diagnose with a fake model loaded returns ok for pipeline."""
+        import torch
+
+        fake_model = torch.nn.Linear(4, 4)
+
+        class FakeLoadedCheckpoint:
+            def __init__(self):
+                self.model = fake_model
+                self.model_config = None
+        lc = FakeLoadedCheckpoint()
+        type(lc).__name__ = "LoadedCheckpoint"
+
+        cache = FakeCache()
+        cache.set_outputs("n1", (lc,))
+        state.runner = FakeRunner(cache=cache)
+
+        r = client.post("/debug/diagnose", json={"mode": "full"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["sections"]["pipeline"]["status"] == "ok"
+        assert data["sections"]["pipeline"]["data"]["model_loaded"] is True
+
+    def test_training_section_with_db(self, client, tmp_path):
+        """Diagnose with training_log_dir containing a board.db."""
+        state.runner = None
+        db_path = str(tmp_path / "run1" / "board.db")
+        _create_board_db(db_path, scalars=[
+            ("loss/train", i, 1000.0 + i, 0.5 - i * 0.01)
+            for i in range(1, 11)
+        ], sessions=[
+            ("s1", 1000.0, None, "running"),
+        ])
+
+        r = client.post("/debug/diagnose", json={
+            "mode": "health",
+            "training_log_dir": str(tmp_path),
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert "training" in data["sections"]
+        assert data["sections"]["training"]["data"]["session_status"] == "running"
+        assert data["sections"]["training"]["data"]["current_step"] == 10

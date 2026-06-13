@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -286,6 +287,7 @@ def _run_sampling(
     add_noise: bool = True,
     noise: torch.Tensor | None = None,
     denoise: float = 1.0,
+    step_callback: Callable | None = None,
 ) -> torch.Tensor:
     """Shared sampler implementation for KSampler and custom sampler nodes."""
     device = latent.device if latent.is_cuda else (
@@ -709,13 +711,29 @@ def _run_sampling(
 
         logger.info("Sampling with Stagehand managed_forward (async prefetch)")
 
-    step_callback = _make_step_callback(preview_interval=3)
+    preview_cb = _make_step_callback(preview_interval=3)
+
+    # Build a sampling_math-compatible callback that adapts the dict-based
+    # signature to (step, total, sigma, denoised) and dispatches to both
+    # the preview callback and any user-supplied step_callback.
+    total_steps = max(len(sigmas) - 1, 1)
+    _callbacks = [cb for cb in (preview_cb, step_callback) if cb is not None]
+    if _callbacks:
+        def _adapted_cb(info: dict) -> None:
+            step = info.get("i", 0)
+            sigma = info.get("sigma")
+            denoised = info.get("denoised")
+            for cb in _callbacks:
+                cb(step, total_steps, sigma, denoised)
+        _final_cb = _adapted_cb
+    else:
+        _final_cb = None
 
     # Wrap with pipeline counters (stub — real counters are optional).
     _sampling_counters = PipelineCounters()
     _sampling_counters.start()
     _instrumented_fn = _sampling_counters.wrap_model_fn(denoise_fn)
-    _instrumented_cb = _sampling_counters.make_callback(step_callback)
+    _instrumented_cb = _sampling_counters.make_callback(_final_cb)
 
     from serenityflow.bridge.sampling_math import sample as sf_sample
     result = sf_sample(
@@ -795,6 +813,7 @@ def sample(
     end_step: int | None = None,
     add_noise: bool = True,
     return_with_leftover_noise: bool = False,
+    step_callback: Callable | None = None,
 ) -> torch.Tensor:
     """Run sampling. Returns denoised latent tensor."""
     prediction_type = getattr(model, "_serenity_prediction_type", None)
@@ -834,6 +853,7 @@ def sample(
         seed=seed,
         add_noise=add_noise,
         denoise=denoise,
+        step_callback=step_callback,
     )
 
 

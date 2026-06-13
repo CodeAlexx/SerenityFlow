@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.venv/
 *.egg-info/
 dist/
 build/
@@ -10,3 +11,6 @@ tests/workflow_templates/
 node_modules/
 *.js.map
 package-lock.json
+/input/
+/output/
+/temp/

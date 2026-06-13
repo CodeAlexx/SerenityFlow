@@ -123,7 +123,7 @@ def apply_lora(model: nn.Module, lora_path: str, strength: float = 1.0) -> nn.Mo
     """Apply LoRA to model. Returns the modified model (same object, mutated)."""
     s = _get()
     lora_sd = s["load_lora"](lora_path)
-    s["merge_lora_into_model"](model, lora_sd, strength=strength)
+    s["merge_lora_into_model"](model, lora_sd, strength=strength, lora_path=lora_path)
     return model
 
 

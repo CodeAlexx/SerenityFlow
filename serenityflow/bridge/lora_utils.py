@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
+from dataclasses import dataclass, asdict
 from typing import Any
 
 import torch
@@ -16,7 +19,61 @@ import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["load_lora", "merge_lora_into_model"]
+__all__ = [
+    "load_lora",
+    "merge_lora_into_model",
+    "LoraRecord",
+    "LoraRegistry",
+    "get_lora_registry",
+]
+
+
+# ---------------------------------------------------------------------------
+# LoRA Registry — tracks which LoRAs have been merged at runtime
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LoraRecord:
+    path: str
+    strength: float
+    rank: int
+    alpha: float | None
+    keys_matched: int
+    keys_missed: int
+    target_modules: list[str]
+    timestamp: float
+
+
+class LoraRegistry:
+    """Thread-safe registry of merged LoRA records."""
+
+    def __init__(self) -> None:
+        self._records: list[LoraRecord] = []
+        self._lock = threading.Lock()
+
+    def record(self, rec: LoraRecord) -> None:
+        with self._lock:
+            self._records.append(rec)
+
+    def get_all(self) -> list[LoraRecord]:
+        with self._lock:
+            return list(self._records)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._records.clear()
+
+    def to_dicts(self) -> list[dict]:
+        with self._lock:
+            return [asdict(r) for r in self._records]
+
+
+_lora_registry = LoraRegistry()
+
+
+def get_lora_registry() -> LoraRegistry:
+    return _lora_registry
 
 
 def load_lora(path: str) -> dict:
@@ -92,6 +149,7 @@ def merge_lora_into_model(
     model: nn.Module,
     lora_sd: dict,
     strength: float = 1.0,
+    lora_path: str | None = None,
 ) -> None:
     """Merge LoRA weights into model parameters in-place.
 
@@ -110,6 +168,7 @@ def merge_lora_into_model(
     model_keys = set(model_sd.keys())
     applied = 0
     skipped = 0
+    matched_modules: list[str] = []
 
     for base_key, components in pairs.items():
         down = components.get("down")
@@ -151,5 +210,21 @@ def merge_lora_into_model(
 
             param.data.add_(delta * (strength * scale))
             applied += 1
+            matched_modules.append(target_key)
 
     logger.info("LoRA merge: %d layers applied, %d skipped (strength=%.2f)", applied, skipped, strength)
+
+    # Record into the global LoRA registry
+    first_pair = next(iter(pairs.values()), {})
+    rep_rank = first_pair.get("down", torch.empty(0)).shape[0] if first_pair.get("down") is not None else 0
+    rep_alpha = float(first_pair["alpha"]) if first_pair.get("alpha") is not None else None
+    _lora_registry.record(LoraRecord(
+        path=lora_path or "<unknown>",
+        strength=strength,
+        rank=rep_rank,
+        alpha=rep_alpha,
+        keys_matched=applied,
+        keys_missed=skipped,
+        target_modules=matched_modules,
+        timestamp=time.monotonic(),
+    ))

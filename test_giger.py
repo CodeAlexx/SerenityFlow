@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+import os, torch, logging
+logging.basicConfig(level=logging.INFO, format="%(name)s %(message)s")
+
+from serenityflow.bridge.ltxv import load_ltxv_model, sample_ltxv
+
+CHECKPOINT = os.path.expanduser("~/.serenity/models/checkpoints/ltx-2.3-22b-distilled.safetensors")
+
+model = load_ltxv_model(checkpoint_path=CHECKPOINT, gemma_path="", dtype="bfloat16", backend="auto")
+
+result = sample_ltxv(
+    model=model,
+    prompt="A slow cinematic tracking shot through a vast biomechanical cathedral in the style of HR Giger, ribbed organic walls fused with industrial pipes and vertebrae columns, bioluminescent fluid dripping from ceiling tendrils, dark atmosphere with harsh overhead spotlights casting deep shadows, xenomorph-like sculptures embedded in the architecture, camera glides forward through the corridor revealing deeper chambers, muted desaturated palette with occasional amber highlights, 4K cinematic film grain",
+    width=768,
+    height=512,
+    num_frames=161,
+    steps=8,
+    guidance_scale=1.0,
+    stg_scale=0.0,
+    seed=777,
+    frame_rate=25.0,
+)
+
+video = result["video"]
+print(f"Video shape: {video.shape}, dtype: {video.dtype}")
+
+import imageio.v3 as iio
+outpath = "/home/alex/serenityflow-v2/output/giger_cathedral.mp4"
+os.makedirs(os.path.dirname(outpath), exist_ok=True)
+if video.dim() == 4:
+    frames = video.numpy()
+else:
+    frames = video.squeeze(0).permute(1, 2, 3, 0).clamp(0, 1).mul(255).byte().numpy()
+iio.imwrite(outpath, frames, fps=25, codec="libx264", plugin="pyav")
+print(f"Saved to {outpath}")

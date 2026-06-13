@@ -57,6 +57,30 @@ class DebugGenerateRequest(BaseModel):
     trace_level: str = "full"
 
 
+class ABCompareRequest(BaseModel):
+    prompt: str
+    negative_prompt: str = ""
+    width: int = 512
+    height: int = 512
+    steps: int = 4
+    guidance_scale: float = 3.5
+    seed: int = 42
+    lora_path: str = ""
+    lora_strength: float = 1.0
+
+
+class BreakpointGenerateRequest(BaseModel):
+    prompt: str
+    negative_prompt: str = ""
+    width: int = 512
+    height: int = 512
+    steps: int = 4
+    guidance_scale: float = 3.5
+    seed: int = 42
+    break_at_step: int = 2
+    resume_token: str | None = None
+
+
 class ModelLoadRequest(BaseModel):
     model_path: str
     pipeline_type: str
@@ -66,6 +90,19 @@ class ModelLoadRequest(BaseModel):
 
 class ModelUnloadRequest(BaseModel):
     component: str = "all"
+
+
+class PipelineDiffRequest(BaseModel):
+    snapshot_a: str | None = None
+    snapshot_b: str | None = None
+    save_snapshot: str | None = None
+
+
+class DiagnoseRequest(BaseModel):
+    mode: str = "full"
+    lora_path: str | None = None
+    tensor_paths: list[str] | None = None
+    training_log_dir: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +279,15 @@ def _safe_read_safetensors_metadata(path: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _get_active_loras():
+    """Get currently active LoRAs from the registry."""
+    try:
+        from serenityflow.bridge.lora_utils import get_lora_registry
+        return get_lora_registry().to_dicts()
+    except Exception:
+        return []
+
+
 def register_debug_routes(app: FastAPI) -> None:  # noqa: C901 — intentionally flat
     """Register all ``/debug/*`` endpoints on the FastAPI app."""
 
@@ -252,14 +298,19 @@ def register_debug_routes(app: FastAPI) -> None:  # noqa: C901 — intentionally
         state = _get_server_state()
         runner = state.runner
         if runner is None:
-            return JSONResponse({"pipeline_type": None, "model_loaded": False})
+            return JSONResponse({
+                "pipeline_type": None,
+                "model_loaded": False,
+                "components": {},
+                "active_loras": _get_active_loras(),
+            })
 
         # Walk the runner's cache for loaded model components
         result: dict[str, Any] = {
             "pipeline_type": None,
             "model_loaded": False,
             "components": {},
-            "active_loras": [],
+            "active_loras": _get_active_loras(),
         }
 
         # Check if there's a loaded checkpoint in the cache
@@ -334,10 +385,88 @@ def register_debug_routes(app: FastAPI) -> None:  # noqa: C901 — intentionally
             pool = getattr(coordinator, "_pool", None)
             if pool is not None:
                 sh_info["pool_allocated"] = True
+                try:
+                    pool_stats = pool.stats()
+                    sh_info["pinned_pool"] = pool_stats
+                except Exception:
+                    sh_info["pinned_pool"] = None
             else:
                 sh_info["pool_allocated"] = False
+                sh_info["pinned_pool"] = None
+
             runtimes = getattr(coordinator, "_runtimes", {})
             sh_info["active_runtimes"] = len(runtimes)
+
+            # Per-runtime details
+            runtime_details: list[dict[str, Any]] = []
+            for rt_name, runtime in runtimes.items():
+                rt_info: dict[str, Any] = {"name": str(rt_name)}
+
+                # ResidencyMap
+                try:
+                    residency = getattr(runtime, "_residency", None)
+                    if residency is not None:
+                        gpu_blocks = residency.gpu_resident_blocks()
+                        resident_count = len(list(gpu_blocks)) if gpu_blocks is not None else 0
+                        # Total blocks via iteration
+                        total_blocks = 0
+                        try:
+                            for _ in residency:
+                                total_blocks += 1
+                        except TypeError:
+                            total_blocks = resident_count  # fallback
+                        evicted_count = total_blocks - resident_count
+                        evictable = 0
+                        try:
+                            evictable = len(list(residency.eviction_candidates(999999, 0)))
+                        except Exception:
+                            pass
+                        rt_info["residency"] = {
+                            "resident_blocks": resident_count,
+                            "total_blocks": total_blocks,
+                            "evicted_blocks": evicted_count,
+                            "evictable_blocks": evictable,
+                        }
+                except Exception:
+                    rt_info["residency"] = None
+
+                # BudgetManager
+                try:
+                    budget = getattr(runtime, "_budget", None)
+                    if budget is not None:
+                        rt_info["budget"] = {
+                            "vram_used_mb": budget.vram_used_mb(),
+                            "headroom_mb": budget.headroom_mb(),
+                            "above_high_watermark": budget.above_high_watermark(),
+                        }
+                except Exception:
+                    rt_info["budget"] = None
+
+                # StagehandTelemetry
+                try:
+                    telemetry = getattr(runtime, "_telemetry", None)
+                    if telemetry is not None:
+                        rt_info["telemetry"] = {
+                            "hit_rate": telemetry.hit_rate(),
+                            "mean_stall_ms": telemetry.mean_stall_ms(),
+                            "vram_trend": telemetry.vram_trend(),
+                        }
+                except Exception:
+                    rt_info["telemetry"] = None
+
+                # BlockRegistry — total model size
+                try:
+                    registry = getattr(runtime, "_registry", None)
+                    if registry is not None:
+                        blocks = registry.blocks_in_order()
+                        total_bytes = sum(getattr(b, "size_bytes", 0) for b in blocks)
+                        rt_info["total_model_size_mb"] = round(total_bytes / (1024 * 1024), 1)
+                except Exception:
+                    rt_info["total_model_size_mb"] = None
+
+                runtime_details.append(rt_info)
+
+            sh_info["runtime_details"] = runtime_details
             result["stagehand"] = sh_info
 
         try:
@@ -985,7 +1114,238 @@ def register_debug_routes(app: FastAPI) -> None:  # noqa: C901 — intentionally
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
-    # === 10. Model Load ===
+    # === 10. Breakpoint Generate ===
+
+    _breakpoint_states: dict[str, dict] = {}
+
+    def _cleanup_stale_breakpoints() -> None:
+        """Remove breakpoint states older than 5 minutes."""
+        now = time.monotonic()
+        stale = [k for k, v in _breakpoint_states.items() if now - v["timestamp"] > 300]
+        for k in stale:
+            del _breakpoint_states[k]
+
+    @app.post("/debug/generate/breakpoint")
+    async def debug_generate_breakpoint(req: BreakpointGenerateRequest):
+        import asyncio
+
+        def _run_breakpoint_generate() -> dict:
+            import time as _time
+            import uuid
+            import torch
+            from serenityflow.debug.log_buffer import get_handler
+
+            _cleanup_stale_breakpoints()
+
+            state = _get_server_state()
+            runner = state.runner
+            if runner is None:
+                return {"_status": 503, "error": "No runner available. Load a model first."}
+
+            cache = getattr(runner, "cache", None)
+            if cache is None:
+                return {"_status": 503, "error": "No cache available"}
+
+            model = None
+            clip = None
+
+            for _nid, out in _iter_cache_outputs(cache):
+                type_name = type(out).__name__
+                if type_name == "LoadedCheckpoint":
+                    model = getattr(out, "model", None)
+                elif hasattr(out, "_manager") and hasattr(out, "_arch"):
+                    clip = out
+
+            if model is None:
+                return {"_status": 503, "error": "No model loaded. Submit a workflow that loads a model first."}
+
+            warnings: list[str] = []
+            timing: dict[str, Any] = {}
+
+            # Validate break_at_step
+            if req.break_at_step < 1:
+                return {"_status": 400, "error": "break_at_step must be >= 1"}
+            if req.break_at_step > req.steps:
+                return {"_status": 400, "error": f"break_at_step ({req.break_at_step}) exceeds total steps ({req.steps})"}
+
+            # Handle resume
+            start_step = None
+            resume_latent = None
+            positive = None
+            negative = None
+            if req.resume_token is not None:
+                bp_state = _breakpoint_states.get(req.resume_token)
+                if bp_state is None:
+                    return {"_status": 400, "error": f"Invalid or expired resume_token: {req.resume_token}"}
+                start_step = bp_state["completed_steps"]
+                resume_latent = bp_state["latent"]
+                positive = bp_state["positive"]
+                negative = bp_state["negative"]
+                warnings.append(f"Resuming from step {start_step}")
+
+            # --- Text encoding ---
+            if positive is None:
+                if clip is not None:
+                    t0 = _time.perf_counter()
+                    try:
+                        from serenityflow.bridge.sampling import encode_text
+                        positive = encode_text(clip, req.prompt)
+                        if req.negative_prompt:
+                            negative = encode_text(clip, req.negative_prompt)
+                    except Exception as exc:
+                        warnings.append(f"Text encoding failed: {exc}")
+                    timing["text_encode_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
+                else:
+                    warnings.append("No text encoder loaded — generating with zeros.")
+                    embed_dim = 768
+                    seq_len = 77
+                    pooled_dim = 0
+                    for name, param in model.named_parameters():
+                        if "txt_in.weight" in name or "context_embedder" in name:
+                            embed_dim = param.shape[-1]
+                            seq_len = 256
+                            break
+                        if "y_embedder" in name or "pooled_text_proj" in name:
+                            pooled_dim = param.shape[-1]
+                    cond: dict[str, Any] = {"cross_attn": torch.zeros(1, seq_len, embed_dim)}
+                    if pooled_dim > 0:
+                        cond["pooled_output"] = torch.zeros(1, pooled_dim)
+                    elif embed_dim > 768:
+                        cond["pooled_output"] = torch.zeros(1, 768)
+                    positive = [cond]
+
+            # --- Create or restore latent ---
+            if resume_latent is not None:
+                latent = resume_latent.to(
+                    device="cuda" if torch.cuda.is_available() else "cpu")
+            else:
+                latent_channels = 4
+                arch = getattr(model, "_serenity_arch", None)
+                if arch is not None:
+                    arch_name = arch.value if hasattr(arch, "value") else str(arch)
+                    arch_lower = arch_name.lower()
+                    if "flux_2" in arch_lower or "klein" in arch_lower:
+                        latent_channels = 32
+                    elif "flux" in arch_lower or "sd3" in arch_lower:
+                        latent_channels = 16
+                if hasattr(model, "in_channels"):
+                    latent_channels = model.in_channels
+                latent_h = req.height // 8
+                latent_w = req.width // 8
+                latent = torch.zeros(1, latent_channels, latent_h, latent_w,
+                                     device="cuda" if torch.cuda.is_available() else "cpu",
+                                     dtype=torch.float32)
+
+            # --- Step callback for collecting per-step data ---
+            step_data: list[dict] = []
+            step_times: list[float] = []
+
+            def on_step(step, total, sigma, denoised):
+                step_times.append(_time.perf_counter())
+                stats = {}
+                if denoised is not None:
+                    with torch.no_grad():
+                        d = denoised.float()
+                        stats = {
+                            "mean": round(float(d.mean()), 6),
+                            "std": round(float(d.std()), 6),
+                            "min": round(float(d.min()), 6),
+                            "max": round(float(d.max()), 6),
+                            "nan_count": int(d.isnan().sum()),
+                        }
+                step_data.append({
+                    "step": step,
+                    "sigma": round(float(sigma), 6) if sigma is not None else None,
+                    "latent_stats": stats,
+                    "vram_allocated_mb": round(torch.cuda.memory_allocated() / (1024**2), 1) if torch.cuda.is_available() else 0,
+                })
+
+            # --- Sampling ---
+            t0 = _time.perf_counter()
+            denoised = None
+            try:
+                from serenityflow.bridge.sampling import sample
+                torch.manual_seed(req.seed)
+                is_resuming = resume_latent is not None
+                denoised = sample(
+                    model=model,
+                    latent=latent,
+                    positive=positive,
+                    negative=negative,
+                    seed=req.seed,
+                    steps=req.steps,
+                    cfg=req.guidance_scale,
+                    sampler_name="euler",
+                    scheduler="simple",
+                    denoise=1.0,
+                    start_step=start_step,
+                    end_step=req.break_at_step,
+                    add_noise=not is_resuming,
+                    step_callback=on_step,
+                )
+            except Exception as exc:
+                warnings.append(f"Sampling failed: {exc}")
+                return {
+                    "error": f"Sampling failed: {exc}",
+                    "timing": timing,
+                    "warnings": warnings,
+                }
+            timing["denoise_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
+
+            # --- Compute per-step elapsed_ms ---
+            for idx, sd in enumerate(step_data):
+                if idx == 0:
+                    sd["elapsed_ms"] = round((step_times[0] - t0) * 1000, 1)
+                else:
+                    sd["elapsed_ms"] = round((step_times[idx] - step_times[idx - 1]) * 1000, 1)
+
+            # --- Store resume state ---
+            token = f"bp_{uuid.uuid4().hex[:12]}"
+            completed = req.break_at_step
+            if denoised is not None:
+                _breakpoint_states[token] = {
+                    "latent": denoised.cpu(),
+                    "positive": positive,
+                    "negative": negative,
+                    "completed_steps": completed,
+                    "total_steps": req.steps,
+                    "timestamp": _time.monotonic(),
+                }
+            else:
+                token = None
+
+            timing["total_ms"] = round(
+                sum(v for v in timing.values() if isinstance(v, (int, float))), 1
+            )
+
+            # Collect warnings from log buffer
+            handler = get_handler()
+            if handler:
+                new_entries = handler.get_entries(n=50, level="WARNING")
+                for entry in new_entries:
+                    if entry["message"] not in warnings:
+                        warnings.append(entry["message"])
+
+            return {
+                "seed_used": req.seed,
+                "total_steps": req.steps,
+                "completed_steps": completed,
+                "per_step": step_data,
+                "resume_token": token,
+                "timing": timing,
+                "warnings": warnings[:20],
+            }
+
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(None, _run_breakpoint_generate)
+            status_code = result.pop("_status", 200)
+            if "error" in result and status_code == 200:
+                status_code = 500
+            return JSONResponse(result, status_code=status_code)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    # === 11. Model Load ===
 
     @app.post("/debug/model/load")
     async def model_load(req: ModelLoadRequest):
@@ -1104,6 +1464,13 @@ def register_debug_routes(app: FastAPI) -> None:  # noqa: C901 — intentionally
                         del store[key]
                         freed_components.append(key)
 
+            # Clear LoRA registry
+            try:
+                from serenityflow.bridge.lora_utils import get_lora_registry
+                get_lora_registry().clear()
+            except Exception:
+                pass
+
             # Release Stagehand runtimes
             coordinator = _get_coordinator()
             if coordinator is not None and req.component == "all":
@@ -1134,6 +1501,475 @@ def register_debug_routes(app: FastAPI) -> None:  # noqa: C901 — intentionally
             return JSONResponse(result)
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+    # === 12. A/B Compare ===
+
+    @app.post("/debug/generate/ab_compare")
+    async def debug_ab_compare(req: ABCompareRequest):
+        import asyncio
+
+        def _run_ab_compare() -> dict:
+            import time as _time
+            import torch
+            import torch.nn.functional as F
+
+            state = _get_server_state()
+            runner = state.runner
+            if runner is None:
+                return {"_status": 503, "error": "No runner available. Load a model first."}
+
+            cache = getattr(runner, "cache", None)
+            if cache is None:
+                return {"_status": 503, "error": "No cache available"}
+
+            model = None
+            clip = None
+
+            for _nid, out in _iter_cache_outputs(cache):
+                type_name = type(out).__name__
+                if type_name == "LoadedCheckpoint":
+                    model = getattr(out, "model", None)
+                elif hasattr(out, "_manager") and hasattr(out, "_arch"):
+                    clip = out
+
+            if model is None:
+                return {"_status": 503, "error": "No model loaded. Submit a workflow that loads a model first."}
+
+            # Validate LoRA path
+            lora_path = os.path.expanduser(req.lora_path)
+            if not lora_path or not os.path.isfile(lora_path):
+                return {"_status": 404, "error": f"LoRA file not found: {lora_path}"}
+
+            warnings: list[str] = []
+
+            # --- Shared text encoding ---
+            positive = None
+            negative = None
+
+            if clip is not None:
+                try:
+                    from serenityflow.bridge.sampling import encode_text
+                    positive = encode_text(clip, req.prompt)
+                    if req.negative_prompt:
+                        negative = encode_text(clip, req.negative_prompt)
+                except Exception as exc:
+                    warnings.append(f"Text encoding failed: {exc}")
+            else:
+                warnings.append("No text encoder loaded — generating with zeros.")
+                embed_dim = 768
+                seq_len = 77
+                pooled_dim = 0
+                for name, param in model.named_parameters():
+                    if "txt_in.weight" in name or "context_embedder" in name:
+                        embed_dim = param.shape[-1]
+                        seq_len = 256
+                        break
+                    if "y_embedder" in name or "pooled_text_proj" in name:
+                        pooled_dim = param.shape[-1]
+                cond: dict[str, Any] = {"cross_attn": torch.zeros(1, seq_len, embed_dim)}
+                if pooled_dim > 0:
+                    cond["pooled_output"] = torch.zeros(1, pooled_dim)
+                elif embed_dim > 768:
+                    cond["pooled_output"] = torch.zeros(1, 768)
+                positive = [cond]
+
+            # --- Shared latent shape ---
+            latent_channels = 4
+            arch = getattr(model, "_serenity_arch", None)
+            if arch is not None:
+                arch_name = arch.value if hasattr(arch, "value") else str(arch)
+                arch_lower = arch_name.lower()
+                if "flux_2" in arch_lower or "klein" in arch_lower:
+                    latent_channels = 32
+                elif "flux" in arch_lower or "sd3" in arch_lower:
+                    latent_channels = 16
+            if hasattr(model, "in_channels"):
+                latent_channels = model.in_channels
+            latent_h = req.height // 8
+            latent_w = req.width // 8
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
+            def _make_latent():
+                torch.manual_seed(req.seed)
+                return torch.randn(1, latent_channels, latent_h, latent_w,
+                                   device=device, dtype=torch.float32)
+
+            def _latent_stats(t: torch.Tensor) -> dict:
+                d = t.float()
+                return {
+                    "mean": round(float(d.mean()), 6),
+                    "std": round(float(d.std()), 6),
+                    "min": round(float(d.min()), 6),
+                    "max": round(float(d.max()), 6),
+                }
+
+            from serenityflow.bridge.sampling import sample
+
+            # =============== Run A (baseline, no LoRA) ===============
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+            vram_before_a = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+
+            latent_a_input = _make_latent()
+            t0_a = _time.perf_counter()
+            try:
+                denoised_a = sample(
+                    model=model,
+                    latent=latent_a_input,
+                    positive=positive,
+                    negative=negative,
+                    seed=req.seed,
+                    steps=req.steps,
+                    cfg=req.guidance_scale,
+                    sampler_name="euler",
+                    scheduler="simple",
+                    denoise=1.0,
+                )
+            except Exception as exc:
+                return {"error": f"Run A (baseline) sampling failed: {exc}", "warnings": warnings}
+            time_a = round((_time.perf_counter() - t0_a) * 1000, 1)
+            vram_peak_a = torch.cuda.max_memory_allocated() // (1024 * 1024) if torch.cuda.is_available() else 0
+            stats_a = _latent_stats(denoised_a)
+
+            # =============== Save model state for restoration ===============
+            total_params = sum(p.numel() for p in model.parameters())
+            large_model = total_params > 6_000_000_000
+            saved_sd = None
+
+            if not large_model:
+                saved_sd = {k: v.clone().cpu() for k, v in model.state_dict().items()}
+            else:
+                warnings.append(
+                    f"Model has {total_params / 1e9:.1f}B parameters — too large to "
+                    "snapshot. Model will remain LoRA-modified after this call."
+                )
+
+            # =============== Apply LoRA ===============
+            try:
+                from serenityflow.bridge.lora_utils import load_lora, merge_lora_into_model
+                lora_sd = load_lora(lora_path)
+                merge_lora_into_model(model, lora_sd, strength=req.lora_strength, lora_path=lora_path)
+            except Exception as exc:
+                # Restore model before returning error
+                if saved_sd is not None:
+                    model.load_state_dict(saved_sd)
+                return {"error": f"LoRA merge failed: {exc}", "warnings": warnings}
+
+            # =============== Run B (with LoRA) ===============
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+
+            latent_b_input = _make_latent()
+            t0_b = _time.perf_counter()
+            try:
+                denoised_b = sample(
+                    model=model,
+                    latent=latent_b_input,
+                    positive=positive,
+                    negative=negative,
+                    seed=req.seed,
+                    steps=req.steps,
+                    cfg=req.guidance_scale,
+                    sampler_name="euler",
+                    scheduler="simple",
+                    denoise=1.0,
+                )
+            except Exception as exc:
+                # Attempt restore even on failure
+                if saved_sd is not None:
+                    model.load_state_dict(saved_sd)
+                return {"error": f"Run B (LoRA) sampling failed: {exc}", "warnings": warnings}
+            time_b = round((_time.perf_counter() - t0_b) * 1000, 1)
+            vram_peak_b = torch.cuda.max_memory_allocated() // (1024 * 1024) if torch.cuda.is_available() else 0
+            stats_b = _latent_stats(denoised_b)
+
+            # =============== Restore model state ===============
+            if saved_sd is not None:
+                model.load_state_dict(saved_sd)
+                del saved_sd
+
+            # Clear LoRA registry entry
+            try:
+                from serenityflow.bridge.lora_utils import get_lora_registry
+                get_lora_registry().clear()
+            except Exception:
+                pass
+
+            # =============== Comparison metrics ===============
+            latent_a_flat = denoised_a.flatten().float()
+            latent_b_flat = denoised_b.flatten().float()
+            mse = float((latent_a_flat - latent_b_flat).pow(2).mean())
+            cosine_sim = float(F.cosine_similarity(latent_a_flat.unsqueeze(0), latent_b_flat.unsqueeze(0)))
+            mean_diff = float(denoised_b.float().mean() - denoised_a.float().mean())
+            std_diff = float(denoised_b.float().std() - denoised_a.float().std())
+
+            return {
+                "seed_used": req.seed,
+                "run_a": {
+                    "label": "without_lora",
+                    "timing": {"denoise_ms": time_a, "total_ms": time_a},
+                    "latent_stats": stats_a,
+                    "vram_peak_mb": vram_peak_a,
+                },
+                "run_b": {
+                    "label": "with_lora",
+                    "lora_path": req.lora_path,
+                    "lora_strength": req.lora_strength,
+                    "timing": {"denoise_ms": time_b, "total_ms": time_b},
+                    "latent_stats": stats_b,
+                    "vram_peak_mb": vram_peak_b,
+                },
+                "comparison": {
+                    "latent_mse": round(mse, 6),
+                    "latent_cosine_similarity": round(cosine_sim, 6),
+                    "latent_mean_diff": round(mean_diff, 6),
+                    "latent_std_diff": round(std_diff, 6),
+                    "timing_diff_ms": round(time_b - time_a, 1),
+                    "model_restored": not large_model,
+                },
+                "warnings": warnings[:20],
+            }
+
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(None, _run_ab_compare)
+            status_code = result.pop("_status", 200)
+            if "error" in result and status_code == 200:
+                status_code = 500
+            return JSONResponse(result, status_code=status_code)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    # === Training Metrics ===
+
+    @app.get("/debug/training/metrics")
+    async def training_metrics(
+        log_dir: str | None = None,
+        run_name: str | None = None,
+        last_n_steps: int = 50,
+        tags: str | None = None,
+    ):
+        """Query training metrics from SerenityBoard's SQLite database."""
+        if log_dir is None:
+            return JSONResponse(
+                {"error": "log_dir parameter is required. Point it at your training output's log directory."},
+                status_code=400,
+            )
+
+        tag_list = tags.split(",") if tags else None
+
+        try:
+            from serenityflow.debug.training_reader import read_training_metrics as _read
+
+            result = _read(
+                log_dir=log_dir,
+                run_name=run_name,
+                last_n_steps=last_n_steps,
+                tags=tag_list,
+            )
+            return JSONResponse(result)
+        except FileNotFoundError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        except Exception as exc:
+            return JSONResponse({"error": f"Failed to read training metrics: {exc}"}, status_code=500)
+
+    # === 13. Pipeline Diff ===
+
+    _config_snapshots: dict[str, dict] = {}
+
+    def _capture_pipeline_snapshot() -> dict:
+        """Capture current pipeline state as a comparable snapshot."""
+        import time as _time
+
+        state = _get_server_state()
+        snap: dict[str, Any] = {"_timestamp": _time.time()}
+
+        # Pipeline info (reuse pipeline_status logic)
+        runner = state.runner
+        if runner is None:
+            snap["model"] = {"loaded": False}
+            snap["text_encoder"] = {"loaded": False}
+            snap["vae"] = {"loaded": False}
+            snap["active_loras"] = _get_active_loras()
+            snap["stagehand"] = None
+            try:
+                import torch
+                snap["engine"] = {
+                    "pytorch_version": torch.__version__,
+                    "cuda_available": torch.cuda.is_available(),
+                    "cuda_version": torch.version.cuda if torch.cuda.is_available() else None,
+                }
+            except Exception:
+                snap["engine"] = None
+            return snap
+
+        cache = getattr(runner, "cache", None)
+        loaded_model = loaded_clip = loaded_vae = None
+        if cache:
+            for _nid, out in _iter_cache_outputs(cache):
+                type_name = type(out).__name__
+                if type_name == "LoadedCheckpoint":
+                    loaded_model = out
+                elif hasattr(out, "_manager") and hasattr(out, "_arch"):
+                    loaded_clip = out
+                elif hasattr(out, "decoder") and hasattr(out, "encoder"):
+                    loaded_vae = out
+
+        if loaded_model is not None:
+            model = getattr(loaded_model, "model", None)
+            config = getattr(loaded_model, "model_config", None)
+            snap["model"] = {
+                "loaded": True,
+                "architecture": (
+                    config.architecture.value
+                    if hasattr(getattr(config, "architecture", None), "value")
+                    else str(getattr(config, "architecture", None))
+                ) if config else None,
+                "dtype": str(next(model.parameters()).dtype) if model else None,
+                "device": str(next(model.parameters()).device) if model else None,
+                "param_count": sum(p.numel() for p in model.parameters()) if model else 0,
+            }
+        else:
+            snap["model"] = {"loaded": False}
+
+        snap["text_encoder"] = _component_info(loaded_clip, "text_encoder") if loaded_clip else {"loaded": False}
+        snap["vae"] = _component_info(loaded_vae, "vae") if loaded_vae else {"loaded": False}
+        snap["active_loras"] = _get_active_loras()
+
+        # Stagehand config
+        coordinator = _get_coordinator()
+        if coordinator is not None:
+            snap["stagehand"] = {
+                "vram_budget_mb": getattr(coordinator, "_vram_budget_mb", None),
+                "pool_mb": getattr(coordinator, "_pool_mb", None),
+            }
+        else:
+            snap["stagehand"] = None
+
+        # Engine info
+        try:
+            import torch
+            snap["engine"] = {
+                "pytorch_version": torch.__version__,
+                "cuda_available": torch.cuda.is_available(),
+                "cuda_version": torch.version.cuda if torch.cuda.is_available() else None,
+            }
+        except Exception:
+            snap["engine"] = None
+
+        return snap
+
+    def _diff_snapshots(a: dict, b: dict, prefix: str = "") -> tuple[list[dict], list[str]]:
+        """Compare two snapshot dicts recursively.
+
+        Returns (differences, identical_keys).
+        """
+        differences: list[dict] = []
+        identical: list[str] = []
+        all_keys = sorted(set(list(a.keys()) + list(b.keys())))
+
+        for key in all_keys:
+            if key.startswith("_"):  # skip metadata keys like _timestamp
+                continue
+            full_key = f"{prefix}.{key}" if prefix else key
+            val_a = a.get(key)
+            val_b = b.get(key)
+
+            if isinstance(val_a, dict) and isinstance(val_b, dict):
+                sub_diffs, sub_identical = _diff_snapshots(val_a, val_b, full_key)
+                differences.extend(sub_diffs)
+                identical.extend(sub_identical)
+            elif val_a == val_b:
+                identical.append(full_key)
+            else:
+                # Determine category from top-level key
+                category = key if not prefix else prefix.split(".")[0]
+                differences.append({
+                    "key": full_key,
+                    "a": val_a,
+                    "b": val_b,
+                    "category": category,
+                })
+
+        return differences, identical
+
+    @app.post("/debug/pipeline/diff")
+    async def pipeline_diff(req: PipelineDiffRequest):
+        # Save snapshot mode
+        if req.save_snapshot is not None:
+            snap = _capture_pipeline_snapshot()
+            _config_snapshots[req.save_snapshot] = snap
+            return JSONResponse({
+                "action": "saved",
+                "name": req.save_snapshot,
+                "keys_captured": [k for k in snap if not k.startswith("_")],
+                "timestamp": snap["_timestamp"],
+            })
+
+        # List snapshots mode (all None)
+        if req.snapshot_a is None and req.snapshot_b is None:
+            listing = {}
+            for name, snap in _config_snapshots.items():
+                listing[name] = {
+                    "timestamp": snap.get("_timestamp"),
+                    "keys": [k for k in snap if not k.startswith("_")],
+                }
+            return JSONResponse({
+                "action": "list",
+                "snapshots": listing,
+                "count": len(listing),
+            })
+
+        # Diff mode: resolve snapshots
+        def _resolve(name: str | None) -> dict | None:
+            if name is None:
+                return _capture_pipeline_snapshot()
+            return _config_snapshots.get(name)
+
+        snap_a = _resolve(req.snapshot_a)
+        snap_b = _resolve(req.snapshot_b)
+
+        if snap_a is None:
+            return JSONResponse(
+                {"error": f"Snapshot '{req.snapshot_a}' not found. Available: {list(_config_snapshots.keys())}"},
+                status_code=404,
+            )
+        if snap_b is None:
+            return JSONResponse(
+                {"error": f"Snapshot '{req.snapshot_b}' not found. Available: {list(_config_snapshots.keys())}"},
+                status_code=404,
+            )
+
+        diffs, identical = _diff_snapshots(snap_a, snap_b)
+        return JSONResponse({
+            "action": "diff",
+            "snapshot_a": req.snapshot_a or "(current)",
+            "snapshot_b": req.snapshot_b or "(current)",
+            "differences": diffs,
+            "identical_count": len(identical),
+            "diff_count": len(diffs),
+        })
+
+    # === Diagnose (meta-tool) ===
+
+    @app.post("/debug/diagnose")
+    async def diagnose(req: DiagnoseRequest):
+        from serenityflow.debug.diagnose import DiagnosticRunner
+        import asyncio
+
+        runner = DiagnosticRunner()
+
+        def _run():
+            return runner.run(
+                mode=req.mode,
+                lora_path=req.lora_path,
+                tensor_paths=req.tensor_paths,
+                training_log_dir=req.training_log_dir,
+            )
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _run)
+        return JSONResponse(result)
 
 
 __all__ = ["register_debug_routes"]

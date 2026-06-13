@@ -187,6 +187,144 @@ _TOOLS: list[Tool] = [
         ),
         inputSchema={"type": "object", "properties": {}},
     ),
+    Tool(
+        name="pipeline_diff",
+        description=(
+            "Save pipeline config snapshots and compare them. Use save_snapshot "
+            "to capture current state, then diff two snapshots to see what changed "
+            "(model, dtype, LoRAs, Stagehand config)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "snapshot_a": {
+                    "type": "string",
+                    "description": "First snapshot name, or omit for current state",
+                },
+                "snapshot_b": {
+                    "type": "string",
+                    "description": "Second snapshot name, or omit for current state",
+                },
+                "save_snapshot": {
+                    "type": "string",
+                    "description": "Save current pipeline state under this name",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="training_metrics",
+        description=(
+            "Query training metrics from an active or recent Serenity training run. "
+            "Reads loss, gradient norms, learning rate, speed, and VRAM from "
+            "SerenityBoard's training logs."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "log_dir": {
+                    "type": "string",
+                    "description": "Path to training logs directory containing board.db files",
+                },
+                "run_name": {
+                    "type": "string",
+                    "description": "Specific run name. Auto-detects latest if omitted.",
+                },
+                "last_n_steps": {"type": "integer", "default": 50},
+                "tags": {
+                    "type": "string",
+                    "description": "Comma-separated scalar tags to query",
+                },
+            },
+            "required": ["log_dir"],
+        },
+    ),
+    Tool(
+        name="debug_ab_compare",
+        description=(
+            "A/B comparison: run same prompt with and without LoRA using "
+            "identical seed. Returns latent stats, timing, and comparison "
+            "metrics (MSE, cosine similarity)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "width": {"type": "integer", "default": 512},
+                "height": {"type": "integer", "default": 512},
+                "steps": {"type": "integer", "default": 4},
+                "guidance_scale": {"type": "number", "default": 3.5},
+                "seed": {"type": "integer", "default": 42},
+                "lora_path": {
+                    "type": "string",
+                    "description": "Path to LoRA safetensors file",
+                },
+                "lora_strength": {"type": "number", "default": 1.0},
+            },
+            "required": ["prompt", "lora_path"],
+        },
+    ),
+    Tool(
+        name="debug_generate_breakpoint",
+        description=(
+            "Run generation with breakpoint at step N. Returns per-step "
+            "latent stats, timing, and a resume token to continue from "
+            "the breakpoint."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "width": {"type": "integer", "default": 512},
+                "height": {"type": "integer", "default": 512},
+                "steps": {"type": "integer", "default": 4},
+                "guidance_scale": {"type": "number", "default": 3.5},
+                "seed": {"type": "integer", "default": 42},
+                "break_at_step": {
+                    "type": "integer",
+                    "default": 2,
+                    "description": "Pause after this step (1-indexed)",
+                },
+                "resume_token": {
+                    "type": "string",
+                    "description": "Token from previous breakpoint to resume",
+                },
+            },
+            "required": ["prompt"],
+        },
+    ),
+    Tool(
+        name="diagnose",
+        description=(
+            "Automatic diagnostic meta-tool. Chains pipeline, VRAM, LoRA, "
+            "weight health, logs, and training checks. Modes: 'full' "
+            "(everything), 'lora' (compatibility), 'performance' "
+            "(speed/VRAM), 'health' (weight integrity)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["full", "lora", "performance", "health"],
+                    "default": "full",
+                },
+                "lora_path": {
+                    "type": "string",
+                    "description": "LoRA file path (required for 'lora' mode)",
+                },
+                "tensor_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Specific tensors to probe. Auto-selects if omitted.",
+                },
+                "training_log_dir": {
+                    "type": "string",
+                    "description": "Training logs directory for training metrics.",
+                },
+            },
+        },
+    ),
 ]
 
 
@@ -206,6 +344,11 @@ _ROUTES: dict[str, tuple[str, str]] = {
     "unload_model": ("POST", "/model/unload"),
     "architecture_diff": ("POST", "/architecture/diff"),
     "config_dump": ("GET", "/config"),
+    "pipeline_diff": ("POST", "/pipeline/diff"),
+    "training_metrics": ("GET", "/training/metrics"),
+    "debug_ab_compare": ("POST", "/generate/ab_compare"),
+    "debug_generate_breakpoint": ("POST", "/generate/breakpoint"),
+    "diagnose": ("POST", "/diagnose"),
 }
 
 

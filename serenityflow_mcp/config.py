@@ -9,7 +9,14 @@ __all__ = ["Config"]
 class Config:
     """Connection settings for the SerenityFlow backend."""
 
-    def __init__(self, base_url: str | None = None):
+    def __init__(
+        self,
+        base_url: str | None = None,
+        training_log_dir: str | None = None,
+    ):
         self.base_url = base_url or os.environ.get(
             "SF_API_URL", "http://localhost:8188"
+        )
+        self.training_log_dir = training_log_dir or os.environ.get(
+            "SF_TRAINING_LOG_DIR", None
         )
